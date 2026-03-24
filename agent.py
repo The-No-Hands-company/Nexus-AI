@@ -1,29 +1,21 @@
 import os
-import subprocess
+import requests
 
-REPO_PATH = "./repo"
+DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = os.getenv("GITHUB_REPO")
-
-def auth_repo_url():
-    return GITHUB_REPO.replace(
-        "https://",
-        f"https://{GITHUB_TOKEN}@"
+def run_agent_task(task: str):
+    response = requests.post(
+        "https://api.deepseek.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "deepseek-chat",
+            "messages": [
+                {"role": "user", "content": task}
+            ]
+        }
     )
 
-def run(cmd):
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-    return result.stdout + result.stderr
-
-def clone_repo():
-    if not os.path.exists(REPO_PATH):
-        return run(f"git clone {auth_repo_url()} {REPO_PATH}")
-    return "Repo already exists"
-
-def commit_and_push():
-    logs = []
-    logs.append(run(f"git -C {REPO_PATH} add ."))
-    logs.append(run(f'git -C {REPO_PATH} commit -m "AI update"'))
-    logs.append(run(f"git -C {REPO_PATH} push {auth_repo_url()}"))
-    return logs
+    return response.json()
