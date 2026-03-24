@@ -15,11 +15,18 @@ def setup_repo():
     print("STEP 1: setup_repo")
 
     if not os.path.exists(REPO_DIR):
-        subprocess.run(
+        result = subprocess.run(
             ["git", "clone", GITHUB_REPO, REPO_DIR],
-            check=True,
+            capture_output=True,
+            text=True,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         )
+
+        print("GIT STDOUT:", result.stdout)
+        print("GIT STDERR:", result.stderr)
+
+        if result.returncode != 0:
+            raise Exception(f"Git clone failed: {result.stderr}")
 
 
 # Write or create a file
