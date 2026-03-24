@@ -3,6 +3,21 @@ import requests
 import subprocess
 import json
 
+print("STEP 1: setup_repo")
+setup_repo()
+
+print("STEP 2: calling AI")
+response = requests.post(...)
+
+print("STEP 3: parsing response")
+
+print("STEP 4: writing file")
+
+print("STEP 5: pushing to git")
+commit_and_push()
+
+print("DONE")
+
 # Environment variables
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
