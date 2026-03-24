@@ -1,5 +1,7 @@
 FROM python:3.11-slim
 
+ENV PORT=8080
+
 RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -7,7 +9,3 @@ WORKDIR /app
 COPY . .
 
 RUN pip install --no-cache-dir -r requirements.txt
-
-RUN chmod +x start.sh
-
-CMD ["./start.sh"]
