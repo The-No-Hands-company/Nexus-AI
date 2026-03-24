@@ -1,21 +1,24 @@
 import os
-import requests
+import subprocess
 
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+REPO_DIR = "/tmp/repo"
 
-def run_agent_task(task: str):
-    response = requests.post(
-        "https://api.deepseek.com/v1/chat/completions",
-        headers={
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        },
-        json={
-            "model": "deepseek-chat",
-            "messages": [
-                {"role": "user", "content": task}
-            ]
-        }
-    )
+def setup_repo():
+    if not os.path.exists(REPO_DIR):
+        subprocess.run([
+            "git", "clone",
+            os.getenv("GITHUB_REPO"),
+            REPO_DIR
+        ])
 
-    return response.json()
+def write_file(path, content):
+    full_path = os.path.join(REPO_DIR, path)
+    os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+    with open(full_path, "w") as f:
+        f.write(content)
+
+def commit_and_push():
+    subprocess.run(["git", "-C", REPO_DIR, "add", "."])
+    subprocess.run(["git", "-C", REPO_DIR, "commit", "-m", "AI update"])
+    subprocess.run(["git", "-C", REPO_DIR, "push"])
