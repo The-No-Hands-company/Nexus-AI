@@ -1,1 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Claude Alt</title>
+</head>
+<body>
+  <h2>Claude Alternative</h2>
 
+  <input id="task" style="width:80%" placeholder="Enter task..." />
+  <button onclick="run()">Run</button>
+
+  <pre id="output"></pre>
+
+  <script>
+    async function run() {
+      const task = document.getElementById("task").value;
+
+      const res = await fetch("/agent", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ task })
+      });
+
+      const data = await res.json();
+      document.getElementById("output").innerText =
+        JSON.stringify(data.result, null, 2);
+    }
+  </script>
+</body>
+</html>
