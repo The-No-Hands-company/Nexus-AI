@@ -7,9 +7,11 @@ app = FastAPI()
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+
 @app.get("/")
 def home():
     return FileResponse("static/index.html")
+
 
 @app.post("/agent")
 async def agent(request: Request):
@@ -18,4 +20,10 @@ async def agent(request: Request):
 
     result = run_agent_task(task)
 
+    return {"result": result}
+
+
+@app.get("/agent")
+def agent_get(task: str):
+    result = run_agent_task(task)
     return {"result": result}
