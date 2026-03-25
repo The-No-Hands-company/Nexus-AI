@@ -4,14 +4,13 @@ import requests
 import subprocess
 from typing import Dict, Any
 
-# Load environment variables
+# Environment variables
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
+GH_TOKEN = os.getenv("GH_TOKEN")          # ← Changed from GITHUB_TOKEN
 PROVIDER = os.getenv("PROVIDER", "grok").lower()
 
 REPO_DIR = "/tmp/repo"
-
 
 def setup_repo() -> None:
     print("=== STEP 1: setup_repo ===")
