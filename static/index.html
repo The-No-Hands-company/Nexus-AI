@@ -1,30 +1,68 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Claude Alt</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; }
+    .chat-bubble { max-width: 80%; }
+  </style>
 </head>
-<body>
-  <h2>Claude Alternative</h2>
+<body class="bg-gray-950 text-white min-h-screen">
+  <div class="max-w-2xl mx-auto p-4">
+    <div class="text-center mb-8">
+      <h1 class="text-4xl font-bold">Claude Alternative</h1>
+      <p class="text-gray-400">Self-hosted Code Agent • Powered by Grok</p>
+    </div>
 
-  <input id="task" style="width:80%" placeholder="Enter task..." />
-  <button onclick="run()">Run</button>
+    <div id="output" class="bg-gray-900 rounded-2xl p-6 min-h-[300px] mb-6 text-gray-300 whitespace-pre-wrap"></div>
 
-  <pre id="output"></pre>
+    <div class="flex gap-2">
+      <input id="task" 
+             class="flex-1 bg-gray-900 border border-gray-700 rounded-2xl px-5 py-4 text-lg focus:outline-none focus:border-blue-500"
+             placeholder="Explain quantum computing... or edit main.py ...">
+      <button onclick="runTask()" 
+              class="bg-blue-600 hover:bg-blue-500 px-8 rounded-2xl font-medium">Run</button>
+    </div>
+
+    <div id="status" class="mt-4 text-center text-sm text-gray-500"></div>
+  </div>
 
   <script>
-    async function run() {
-      const task = document.getElementById("task").value;
+    async function runTask() {
+      const taskInput = document.getElementById("task");
+      const output = document.getElementById("output");
+      const status = document.getElementById("status");
+
+      if (!taskInput.value.trim()) return;
+
+      status.innerHTML = `<span class="animate-pulse">🤖 Thinking...</span>`;
+      output.innerHTML = "";
 
       const res = await fetch("/agent", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ task })
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({task: taskInput.value})
       });
 
       const data = await res.json();
-      document.getElementById("output").innerText =
-        JSON.stringify(data.result, null, 2);
+
+      if (data.error) {
+        output.innerHTML = `<span class="text-red-400">❌ ${data.error}</span>`;
+      } else {
+        output.innerHTML = `<span class="text-emerald-400">${data.result || JSON.stringify(data, null, 2)}</span>`;
+      }
+
+      status.textContent = "✅ Done";
+      taskInput.value = "";
     }
+
+    // Allow Enter key
+    document.getElementById("task").addEventListener("keypress", e => {
+      if (e.key === "Enter") runTask();
+    });
   </script>
 </body>
 </html>
