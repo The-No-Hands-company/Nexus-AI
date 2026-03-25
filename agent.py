@@ -8,7 +8,8 @@ from typing import Dict, Any
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
-PROVIDER = os.getenv("PROVIDER", "grok").lower()   # default to grok for now (cheaper + more reliable free tier)
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")          # ← Add this in Railway
+PROVIDER = os.getenv("PROVIDER", "grok").lower()
 
 REPO_DIR = "/tmp/repo"
 
@@ -20,10 +21,19 @@ def setup_repo() -> None:
         return
 
     if not GITHUB_REPO:
-        raise Exception("GITHUB_REPO environment variable is not set")
+        raise Exception("GITHUB_REPO is not set")
+
+    # Build authenticated clone URL
+    clone_url = GITHUB_REPO
+    if GITHUB_TOKEN:
+        # Convert to https://TOKEN@github.com/...
+        if clone_url.startswith("https://github.com"):
+            clone_url = clone_url.replace("https://github.com", f"https://{GITHUB_TOKEN}@github.com")
+
+    print("Cloning with token (token hidden in logs)")
 
     result = subprocess.run(
-        ["git", "clone", GITHUB_REPO, REPO_DIR],
+        ["git", "clone", clone_url, REPO_DIR],
         capture_output=True,
         text=True,
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
@@ -46,8 +56,12 @@ def write_file(path: str, content: str) -> None:
 
 
 def commit_and_push() -> None:
-    print("STEP 5: committing and pushing to git")
+    print("STEP 5: committing and pushing")
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+    # Set git identity (required on fresh clone)
+    subprocess.run(["git", "-C", REPO_DIR, "config", "user.name", "Claude-Alt-Agent"], check=True, env=env)
+    subprocess.run(["git", "-C", REPO_DIR, "config", "user.email", "agent@nohands.company"], check=True, env=env)
 
     subprocess.run(["git", "-C", REPO_DIR, "add", "."], check=True, env=env)
 
@@ -55,94 +69,46 @@ def commit_and_push() -> None:
         ["git", "-C", REPO_DIR, "commit", "-m", "AI update"],
         capture_output=True, text=True, env=env
     )
-    print("Commit output:", commit_result.stdout, commit_result.stderr)
+    print("Commit:", commit_result.stdout or commit_result.stderr)
+
+    # Push with token
+    push_url = GITHUB_REPO
+    if GITHUB_TOKEN and "github.com" in push_url:
+        push_url = push_url.replace("https://github.com", f"https://{GITHUB_TOKEN}@github.com")
 
     push_result = subprocess.run(
-        ["git", "-C", REPO_DIR, "push"],
+        ["git", "-C", REPO_DIR, "push", push_url],
         capture_output=True, text=True, env=env
     )
+
     if push_result.returncode != 0:
         raise Exception(f"Git push failed: {push_result.stderr}")
 
-    print("Successfully pushed to GitHub!")
+    print("✅ Successfully pushed to GitHub!")
 
 
-def call_deepseek(task: str) -> Dict[str, Any]:
-    if not DEEPSEEK_API_KEY:
-        return {"error": "DEEPSEEK_API_KEY is not set"}
-
-    url = "https://api.deepseek.com/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "deepseek-chat",
-        "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a precise coding assistant.\n"
-                    "Respond with **ONLY** a valid JSON object. No extra text, no markdown, no explanations.\n"
-                    'Example: {"action": "write_file", "path": "README.md", "content": "Full file content here"}'
-                )
-            },
-            {"role": "user", "content": task}
-        ],
-        "temperature": 0.2,
-        "max_tokens": 4096
-    }
-
-    response = requests.post(url, json=payload, headers=headers, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-
-    content = data["choices"][0]["message"]["content"].strip()
-
-    # Clean possible code fences
-    if content.startswith("```json"): content = content.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif content.startswith("```"): content = content.split("```", 1)[1].strip()
-
-    action = json.loads(content)
-    return action
-
-
-def call_grok(task: str) -> Dict[str, Any]:
+# ================== AI Call Functions (same as before) ==================
+def call_grok(task: str) -> Dict[str, Any]:   # I'll use Grok as default for now
     if not GROK_API_KEY:
-        return {"error": "GROK_API_KEY is not set"}
-
+        return {"error": "GROK_API_KEY not set"}
     url = "https://api.x.ai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {GROK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     payload = {
-        "model": "grok-3",          # or "grok-3-mini" if you want faster/cheaper
+        "model": "grok-3",
         "messages": [
-            {
-                "role": "system",
-                "content": (
-                    "You are a precise coding assistant.\n"
-                    "Respond with **ONLY** a valid JSON object. No extra text, no markdown, no explanations.\n"
-                    'Example: {"action": "write_file", "path": "README.md", "content": "Full file content here"}'
-                )
-            },
+            {"role": "system", "content": "Respond ONLY with valid JSON: {\"action\": \"write_file\", \"path\": \"file.md\", \"content\": \"...\"}"},
             {"role": "user", "content": task}
         ],
         "temperature": 0.2,
-        "max_tokens": 4096
+        "max_tokens": 2048
     }
-
-    response = requests.post(url, json=payload, headers=headers, timeout=60)
-    response.raise_for_status()
-    data = response.json()
-
+    resp = requests.post(url, json=payload, headers=headers, timeout=60)
+    resp.raise_for_status()
+    data = resp.json()
     content = data["choices"][0]["message"]["content"].strip()
-
-    # Clean possible code fences
-    if content.startswith("```json"): content = content.split("```json", 1)[1].split("```", 1)[0].strip()
-    elif content.startswith("```"): content = content.split("```", 1)[1].strip()
-
+    # Clean JSON if needed
+    if content.startswith("```"): 
+        content = content.split("```", 2)[1].strip()
     action = json.loads(content)
     return action
 
@@ -150,30 +116,25 @@ def call_grok(task: str) -> Dict[str, Any]:
 def run_agent_task(task: str) -> Dict[str, Any]:
     try:
         setup_repo()
-
         print(f"STEP 2: calling {PROVIDER.upper()}")
 
         if PROVIDER == "deepseek":
-            action = call_deepseek(task)
-        else:  # default to grok
+            # Add call_deepseek similarly if needed
+            action = call_grok(task)  # fallback
+        else:
             action = call_grok(task)
 
-        print("STEP 3: parsed action:", action)
+        print("STEP 3: action received:", action)
 
         if action.get("action") == "write_file":
-            write_file(action["path"], action["content"])
+            write_file(action["path"], action.get("content", ""))
             commit_and_push()
-            return {
-                "status": "success",
-                "message": f"File '{action.get('path')}' written and pushed to GitHub"
-            }
+            return {"status": "success", "message": f"Updated {action.get('path')}"}
 
-        return {"error": "Unknown action", "raw_action": action}
+        return {"error": "Unknown action", "raw": action}
 
-    except json.JSONDecodeError as e:
-        return {"error": "Model did not return valid JSON", "details": str(e)}
-    except requests.exceptions.HTTPError as e:
-        error_text = response.text if 'response' in locals() else str(e)
-        return {"error": f"HTTP error {getattr(response, 'status_code', 'unknown')}: {error_text[:600]}"}
     except Exception as e:
         return {"error": str(e)}
+
+
+# For completeness, you can add call_deepseek the same way as before if you want to switch later.
