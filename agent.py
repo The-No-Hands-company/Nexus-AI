@@ -6,9 +6,12 @@ from typing import Dict, Any
 
 # Environment variables
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
+PROVIDER = os.getenv("PROVIDER", "grok").lower()   # default to grok for now (cheaper + more reliable free tier)
 
 REPO_DIR = "/tmp/repo"
+
 
 def setup_repo() -> None:
     print("STEP 1: setup_repo")
@@ -48,14 +51,12 @@ def commit_and_push() -> None:
 
     subprocess.run(["git", "-C", REPO_DIR, "add", "."], check=True, env=env)
 
-    # Commit (ignore if nothing to commit)
     commit_result = subprocess.run(
         ["git", "-C", REPO_DIR, "commit", "-m", "AI update"],
         capture_output=True, text=True, env=env
     )
     print("Commit output:", commit_result.stdout, commit_result.stderr)
 
-    # Push
     push_result = subprocess.run(
         ["git", "-C", REPO_DIR, "push"],
         capture_output=True, text=True, env=env
@@ -66,78 +67,113 @@ def commit_and_push() -> None:
     print("Successfully pushed to GitHub!")
 
 
+def call_deepseek(task: str) -> Dict[str, Any]:
+    if not DEEPSEEK_API_KEY:
+        return {"error": "DEEPSEEK_API_KEY is not set"}
+
+    url = "https://api.deepseek.com/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "deepseek-chat",
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise coding assistant.\n"
+                    "Respond with **ONLY** a valid JSON object. No extra text, no markdown, no explanations.\n"
+                    'Example: {"action": "write_file", "path": "README.md", "content": "Full file content here"}'
+                )
+            },
+            {"role": "user", "content": task}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 4096
+    }
+
+    response = requests.post(url, json=payload, headers=headers, timeout=60)
+    response.raise_for_status()
+    data = response.json()
+
+    content = data["choices"][0]["message"]["content"].strip()
+
+    # Clean possible code fences
+    if content.startswith("```json"): content = content.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif content.startswith("```"): content = content.split("```", 1)[1].strip()
+
+    action = json.loads(content)
+    return action
+
+
+def call_grok(task: str) -> Dict[str, Any]:
+    if not GROK_API_KEY:
+        return {"error": "GROK_API_KEY is not set"}
+
+    url = "https://api.x.ai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "grok-3",          # or "grok-3-mini" if you want faster/cheaper
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You are a precise coding assistant.\n"
+                    "Respond with **ONLY** a valid JSON object. No extra text, no markdown, no explanations.\n"
+                    'Example: {"action": "write_file", "path": "README.md", "content": "Full file content here"}'
+                )
+            },
+            {"role": "user", "content": task}
+        ],
+        "temperature": 0.2,
+        "max_tokens": 4096
+    }
+
+    response = requests.post(url, json=payload, headers=headers, timeout=60)
+    response.raise_for_status()
+    data = response.json()
+
+    content = data["choices"][0]["message"]["content"].strip()
+
+    # Clean possible code fences
+    if content.startswith("```json"): content = content.split("```json", 1)[1].split("```", 1)[0].strip()
+    elif content.startswith("```"): content = content.split("```", 1)[1].strip()
+
+    action = json.loads(content)
+    return action
+
+
 def run_agent_task(task: str) -> Dict[str, Any]:
     try:
         setup_repo()
 
-        print("STEP 2: calling DeepSeek")
+        print(f"STEP 2: calling {PROVIDER.upper()}")
 
-        url = "https://api.deepseek.com/chat/completions"   # ← without /v1
+        if PROVIDER == "deepseek":
+            action = call_deepseek(task)
+        else:  # default to grok
+            action = call_grok(task)
 
-        headers = {
-            "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
-            "Content-Type": "application/json"
-        }
-
-        payload = {
-            "model": "deepseek-chat",
-            "messages": [
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a helpful coding assistant.\n"
-                        "You MUST respond with **ONLY** valid JSON object.\n"
-                        "No extra text, no markdown, no explanations.\n"
-                        "Format exactly:\n"
-                        '{"action": "write_file", "path": "folder/file.py", "content": "the full code here"}'
-                    )
-                },
-                {"role": "user", "content": task}
-            ],
-            "temperature": 0.3,      # lower = more consistent JSON
-            "max_tokens": 4096
-        }
-
-        response = requests.post(url, json=payload, headers=headers, timeout=60)
-        
-        # This will raise if status is not 2xx (very important!)
-        response.raise_for_status()
-
-        data = response.json()
-
-        print("STEP 3: raw response received")
-
-        # Safe extraction
-        if "choices" not in data or not data["choices"]:
-            error_msg = data.get("error", {}).get("message", str(data))
-            return {"error": f"DeepSeek API error: {error_msg}"}
-
-        content = data["choices"][0]["message"]["content"].strip()
-
-        # Try to clean possible markdown/code fences the model sometimes adds
-        if content.startswith("```json"):
-            content = content.split("```json")[1].split("```")[0].strip()
-        elif content.startswith("```"):
-            content = content.split("```")[1].strip()
-
-        action = json.loads(content)
+        print("STEP 3: parsed action:", action)
 
         if action.get("action") == "write_file":
             write_file(action["path"], action["content"])
             commit_and_push()
             return {
                 "status": "success",
-                "message": f"File {action['path']} written and pushed to GitHub"
+                "message": f"File '{action.get('path')}' written and pushed to GitHub"
             }
 
         return {"error": "Unknown action", "raw_action": action}
 
     except json.JSONDecodeError as e:
-        return {
-            "error": "Model did not return valid JSON",
-            "raw_content": content if 'content' in locals() else "N/A"
-        }
+        return {"error": "Model did not return valid JSON", "details": str(e)}
     except requests.exceptions.HTTPError as e:
-        return {"error": f"HTTP error {response.status_code}: {response.text[:500]}"}
+        error_text = response.text if 'response' in locals() else str(e)
+        return {"error": f"HTTP error {getattr(response, 'status_code', 'unknown')}: {error_text[:600]}"}
     except Exception as e:
         return {"error": str(e)}
