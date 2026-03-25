@@ -13,54 +13,35 @@ REPO_DIR = "/tmp/repo"
 
 
 def setup_repo() -> None:
-    """Clone or reuse the repo with proper token auth"""
+    print("STEP 1: setup_repo")
     if os.path.exists(REPO_DIR):
-        print("✅ Repo already cloned")
+        print("✅ Repo already exists, skipping clone")
         return
 
-    if not GITHUB_REPO:
-        raise Exception("GITHUB_REPO env var is missing")
+    if not GITHUB_REPO or not GITHUB_TOKEN:
+        raise Exception("GITHUB_REPO or GITHUB_TOKEN env var is missing")
 
-    clone_url = GITHUB_REPO
-    if GITHUB_TOKEN and clone_url.startswith("https://github.com"):
-        clone_url = clone_url.replace("https://github.com", f"https://{GITHUB_TOKEN}@github.com")
+    # Build authenticated URL
+    clone_url = GITHUB_REPO.replace("https://github.com", f"https://{GITHUB_TOKEN}@github.com")
 
-    print("Cloning repo...")
+    print(f"Cloning from authenticated URL (token hidden)...")
+
     result = subprocess.run(
         ["git", "clone", clone_url, REPO_DIR],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     )
+
+    print("GIT CLONE STDOUT:", result.stdout)
+    print("GIT CLONE STDERR:", result.stderr)
 
     if result.returncode != 0:
         raise Exception(f"Git clone failed: {result.stderr}")
 
-    print("✅ Repo cloned successfully")
-
-
-def run_command_in_repo(command: str) -> str:
-    """Run any shell command inside the repo and return output"""
-    try:
-        result = subprocess.run(
-            command, shell=True, cwd=REPO_DIR,
-            capture_output=True, text=True, timeout=30
-        )
-        return f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
-    except Exception as e:
-        return f"Command failed: {str(e)}"
-
-
-def read_file(path: str) -> str:
-    """Read a file from the repo"""
-    full_path = os.path.join(REPO_DIR, path)
-    if os.path.exists(full_path):
-        with open(full_path, "r", encoding="utf-8") as f:
-            return f.read()
-    return f"File not found: {path}"
-
 
 def write_file(path: str, content: str) -> str:
-    """Write content to a file"""
+    print(f"STEP 4: writing file {path}")
     full_path = os.path.join(REPO_DIR, path)
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
     with open(full_path, "w", encoding="utf-8") as f:
@@ -69,7 +50,7 @@ def write_file(path: str, content: str) -> str:
 
 
 def commit_and_push() -> str:
-    """Commit and push changes"""
+    print("STEP 5: committing and pushing")
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
     # Set git identity
@@ -78,24 +59,27 @@ def commit_and_push() -> str:
 
     subprocess.run(["git", "-C", REPO_DIR, "add", "."], check=True, env=env)
 
-    # Commit (safe if nothing changed)
     subprocess.run(["git", "-C", REPO_DIR, "commit", "-m", "Claude Alt update"], check=False, env=env)
 
     # Push with token
-    push_url = GITHUB_REPO
-    if GITHUB_TOKEN and push_url.startswith("https://github.com"):
-        push_url = push_url.replace("https://github.com", f"https://{GITHUB_TOKEN}@github.com")
+    push_url = GITHUB_REPO.replace("https://github.com", f"https://{GITHUB_TOKEN}@github.com")
 
-    result = subprocess.run(["git", "-C", REPO_DIR, "push", push_url],
-                            capture_output=True, text=True, env=env)
+    result = subprocess.run(
+        ["git", "-C", REPO_DIR, "push", push_url],
+        capture_output=True, text=True, env=env
+    )
 
     if result.returncode != 0:
-        raise Exception(f"Push failed: {result.stderr}")
-    return "✅ Changes pushed to GitHub"
+        raise Exception(f"Git push failed: {result.stderr}")
+
+    print("✅ Successfully pushed to GitHub!")
+    return "Changes pushed successfully"
 
 
 def call_grok(task: str) -> Dict[str, Any]:
-    """Call Grok and force JSON action format"""
+    if not GROK_API_KEY:
+        return {"error": "GROK_API_KEY not set"}
+
     url = "https://api.x.ai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
     payload = {
@@ -104,20 +88,18 @@ def call_grok(task: str) -> Dict[str, Any]:
             {
                 "role": "system",
                 "content": (
-                    "You are Claude Code — a self-hosted coding agent.\n"
-                    "You can: read files, edit files, run commands, or just respond.\n"
-                    "ALWAYS reply with ONLY valid JSON using one of these actions:\n"
-                    '1. {"action": "respond", "content": "your explanation here"}\n'
-                    '2. {"action": "read_file", "path": "main.py"}\n'
-                    '3. {"action": "write_file", "path": "file.py", "content": "full code here"}\n'
-                    '4. {"action": "run_command", "command": "ls -la"}\n'
-                    "Never add extra text outside the JSON."
+                    "You are a helpful coding agent.\n"
+                    "Reply with ONLY valid JSON using one action:\n"
+                    '{"action": "respond", "content": "..."}\n'
+                    '{"action": "write_file", "path": "file.py", "content": "full code"}\n'
+                    '{"action": "run_command", "command": "ls -la"}\n'
+                    "No extra text outside the JSON."
                 )
             },
             {"role": "user", "content": task}
         ],
         "temperature": 0.2,
-        "max_tokens": 4096
+        "max_tokens": 2048
     }
 
     resp = requests.post(url, json=payload, headers=headers, timeout=60)
@@ -125,9 +107,8 @@ def call_grok(task: str) -> Dict[str, Any]:
     data = resp.json()
     content = data["choices"][0]["message"]["content"].strip()
 
-    # Clean possible markdown
-    if content.startswith("```json"): content = content.split("```json")[1].split("```")[0].strip()
-    elif content.startswith("```"): content = content.split("```")[1].strip()
+    if content.startswith("```"):
+        content = content.split("```", 2)[1].strip()
 
     return json.loads(content)
 
@@ -137,26 +118,21 @@ def run_agent_task(task: str) -> Dict[str, Any]:
         setup_repo()
 
         action = call_grok(task)
-        print("Action received:", action)
+        print("Action from Grok:", action)
 
-        if action["action"] == "respond":
-            return {"result": action.get("content", "No content")}
+        if action.get("action") == "respond":
+            return {"result": action.get("content", "Done")}
 
-        elif action["action"] == "read_file":
-            content = read_file(action["path"])
-            return {"result": f"📄 File content of {action['path']}:\n\n{content}"}
-
-        elif action["action"] == "write_file":
-            msg = write_file(action["path"], action.get("content", ""))
+        elif action.get("action") == "write_file":
+            msg = write_file(action.get("path", "new_file.txt"), action.get("content", ""))
             commit_and_push()
-            return {"result": f"{msg}\n✅ Committed & pushed!"}
+            return {"result": f"{msg}\n✅ Committed and pushed!"}
 
-        elif action["action"] == "run_command":
-            output = run_command_in_repo(action["command"])
-            return {"result": f"💻 Command output:\n{output}"}
+        elif action.get("action") == "run_command":
+            # You can implement run_command later if needed
+            return {"result": "Command support coming soon"}
 
-        else:
-            return {"error": "Unknown action from model"}
+        return {"result": f"Action received: {action}"}
 
     except Exception as e:
         return {"error": str(e)}
