@@ -1,23 +1,31 @@
-# Use official Python slim image
 FROM python:3.12-slim
 
-# Install system dependencies (git + basic tools)
+# Install git + basic tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Set working directory
 WORKDIR /app
 
-# Copy requirements and install Python packages
+# Copy and install Python deps
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the app
+# Copy app code
 COPY . .
 
-# Expose port (Railway will use $PORT)
+# Clone repo at build time (this runs once)
+ARG GITHUB_REPO
+ARG GH_TOKEN
+RUN if [ -n "$GITHUB_REPO" ] && [ -n "$GH_TOKEN" ]; then \
+      git clone https://${GH_TOKEN}@github.com/The-No-Hands-company/Claude-alt.git /repo; \
+    else \
+      echo "Warning: Missing GITHUB_REPO or GH_TOKEN at build time" && mkdir -p /repo; \
+    fi
+
+# Use the cloned repo
+ENV REPO_DIR=/repo
+
 EXPOSE 8000
 
-# Start the app (respects $PORT from Railway)
 CMD ["python", "main.py"]
