@@ -13,33 +13,28 @@
       --border:  #1e1e2e;
       --accent:  #7c6af7;
       --accent2: #5eead4;
+      --warn:    #f59e0b;
       --text:    #e2e8f0;
       --muted:   #64748b;
     }
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      background: var(--bg);
-      color: var(--text);
+      background: var(--bg); color: var(--text);
       font-family: system-ui, -apple-system, sans-serif;
-      height: 100dvh;
-      display: flex;
-      flex-direction: column;
+      height: 100dvh; display: flex; flex-direction: column;
     }
 
-    /* ── header ── */
+    /* header */
     header {
       display: flex; align-items: center; justify-content: space-between;
       padding: 12px 20px;
       border-bottom: 1px solid var(--border);
-      background: var(--surface);
-      flex-shrink: 0;
-      gap: 12px;
+      background: var(--surface); flex-shrink: 0; gap: 12px;
     }
     .logo { font-size: 1.1rem; font-weight: 700; letter-spacing: -0.03em; white-space: nowrap; }
     .logo span { color: var(--accent); }
     .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
 
-    /* provider pill */
     .active-provider {
       display: flex; align-items: center; gap: 6px;
       font-size: 0.75rem; font-weight: 600;
@@ -50,8 +45,13 @@
       cursor: pointer; transition: all .15s;
     }
     .active-provider:hover { background: color-mix(in srgb, var(--accent) 25%, transparent); }
-    .active-provider .dot { width:6px;height:6px;border-radius:50%;background:var(--accent2); }
-
+    .active-provider .pulse {
+      width: 6px; height: 6px; border-radius: 50%; background: var(--accent2);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0%,100% { opacity: 1; } 50% { opacity: .3; }
+    }
     .btn-sm {
       font-size: 0.75rem; color: var(--muted); background: none; border: none;
       cursor: pointer; padding: 4px 10px; border-radius: 6px;
@@ -59,57 +59,66 @@
     }
     .btn-sm:hover { color: var(--text); background: var(--border); }
 
-    /* ── providers drawer ── */
+    /* providers drawer */
     #providers-drawer {
-      display: none;
-      background: var(--surface);
+      display: none; background: var(--surface);
       border-bottom: 1px solid var(--border);
-      padding: 16px 20px;
-      flex-shrink: 0;
+      padding: 16px 20px; flex-shrink: 0;
     }
     #providers-drawer.open { display: block; }
     .drawer-title {
       font-size: .8rem; font-weight: 700; text-transform: uppercase;
       letter-spacing: .08em; color: var(--muted); margin-bottom: 12px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .auto-badge {
+      font-size: .7rem; font-weight: 700; padding: 2px 8px; border-radius: 4px;
+      background: color-mix(in srgb, var(--accent2) 15%, transparent);
+      color: var(--accent2);
+      border: 1px solid color-mix(in srgb, var(--accent2) 25%, transparent);
     }
     .provider-grid {
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
-      gap: 8px;
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 8px;
     }
     .provider-card {
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 10px 14px;
-      display: flex; align-items: center; gap: 10px;
-      transition: border-color .15s;
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 10px; padding: 10px 14px;
+      display: flex; align-items: center; gap: 10px; transition: border-color .15s;
     }
-    .provider-card.active { border-color: var(--accent); }
-    .provider-card.unavailable { opacity: .45; }
-    .provider-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
-    .provider-dot.available { background: #22c55e; }
-    .provider-dot.unavailable { background: var(--muted); }
-    .provider-dot.active { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
-    .provider-info { flex:1; min-width:0; }
+    .provider-card.ready  { border-color: var(--border); }
+    .provider-card.active-card { border-color: var(--accent); }
+    .provider-card.cooling { opacity: .55; }
+    .provider-card.no-key  { opacity: .35; }
+
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .status-dot.ready   { background: #22c55e; }
+    .status-dot.cooling { background: var(--warn); animation: blink .8s infinite; }
+    .status-dot.no-key  { background: var(--muted); }
+    .status-dot.keyless { background: var(--accent2); }
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+
+    .provider-info { flex: 1; min-width: 0; }
     .provider-name { font-size: .82rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .provider-model { font-size: .7rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .provider-tag {
-      font-size: .65rem; font-weight: 700; padding: 2px 6px; border-radius: 4px;
-      text-transform: uppercase; letter-spacing: .05em;
+    .provider-model { font-size: .68rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 1px; }
+    .p-tag {
+      font-size: .62rem; font-weight: 700; padding: 2px 6px; border-radius: 4px;
+      text-transform: uppercase; letter-spacing: .04em; white-space: nowrap; flex-shrink: 0;
     }
-    .provider-tag.active-tag { background: color-mix(in srgb,var(--accent) 20%,transparent); color:var(--accent); }
-    .provider-tag.free-tag  { background: color-mix(in srgb,#22c55e 15%,transparent); color:#22c55e; }
+    .p-tag.t-free    { background: color-mix(in srgb,#22c55e 15%,transparent); color:#22c55e; }
+    .p-tag.t-cooling { background: color-mix(in srgb,var(--warn) 15%,transparent); color:var(--warn); }
+    .p-tag.t-nokey   { color: var(--muted); }
+    .p-tag.t-keyless { background: color-mix(in srgb,var(--accent2) 15%,transparent); color:var(--accent2); }
+
     .drawer-note {
       margin-top: 12px; font-size: .73rem; color: var(--muted);
       background: color-mix(in srgb, var(--accent) 8%, transparent);
       border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
-      border-radius: 8px; padding: 8px 12px; line-height: 1.5;
+      border-radius: 8px; padding: 8px 12px; line-height: 1.6;
     }
+    .drawer-note code { background: rgba(255,255,255,.08); padding:1px 5px; border-radius:3px; font-family:monospace; font-size:.9em; }
     .drawer-note a { color: var(--accent2); text-decoration: underline; }
-    .drawer-note code { background: rgba(255,255,255,.08); padding:1px 5px; border-radius:3px; font-family:monospace; }
 
-    /* ── messages area ── */
+    /* messages */
     #messages {
       flex: 1; overflow-y: auto; padding: 24px 0;
       display: flex; flex-direction: column; gap: 20px;
@@ -117,61 +126,52 @@
     #messages::-webkit-scrollbar { width: 4px; }
     #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 
-    .msg-row { display:flex; padding:0 20px; animation: fadeUp .2s ease; }
-    @keyframes fadeUp {
-      from { opacity:0; transform:translateY(6px); }
-      to   { opacity:1; transform:translateY(0); }
-    }
+    .msg-row { display: flex; padding: 0 20px; animation: fadeUp .2s ease; }
+    @keyframes fadeUp { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
     .msg-row.user  { justify-content: flex-end; }
     .msg-row.agent { justify-content: flex-start; }
-    .bubble {
-      max-width: min(680px, 85vw);
-      padding: 12px 16px;
-      border-radius: 16px;
-      font-size: 0.9rem;
-      line-height: 1.6;
-    }
-    .msg-row.user .bubble  { background:var(--accent); color:#fff; border-bottom-right-radius:4px; }
-    .msg-row.agent .bubble { background:var(--surface); border:1px solid var(--border); border-bottom-left-radius:4px; }
+    .msg-wrap { display: flex; flex-direction: column; max-width: min(680px, 85vw); }
+    .msg-row.user .msg-wrap { align-items: flex-end; }
 
+    .bubble {
+      padding: 12px 16px; border-radius: 16px;
+      font-size: 0.9rem; line-height: 1.6;
+    }
+    .msg-row.user .bubble  { background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
+    .msg-row.agent .bubble { background: var(--surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+
+    .bubble p  { margin: .4em 0; }
     .bubble h1,.bubble h2,.bubble h3 { font-weight:700; margin:.6em 0 .3em; }
-    .bubble h1 { font-size:1.2em; } .bubble h2 { font-size:1.05em; }
-    .bubble p  { margin:.4em 0; }
+    .bubble h1{font-size:1.2em} .bubble h2{font-size:1.05em}
     .bubble ul,.bubble ol { margin:.4em 0 .4em 1.4em; }
     .bubble li { margin:.15em 0; }
-    .bubble code {
-      background:rgba(255,255,255,.08); padding:1px 5px;
-      border-radius:4px; font-size:.85em; font-family:monospace;
-    }
-    .bubble pre {
-      background:rgba(0,0,0,.4); border:1px solid var(--border);
-      border-radius:8px; padding:12px; overflow-x:auto; margin:.5em 0;
-    }
-    .bubble pre code { background:none; padding:0; font-size:.82em; }
+    .bubble code { background:rgba(255,255,255,.08);padding:1px 5px;border-radius:4px;font-size:.85em;font-family:monospace; }
+    .bubble pre { background:rgba(0,0,0,.4);border:1px solid var(--border);border-radius:8px;padding:12px;overflow-x:auto;margin:.5em 0; }
+    .bubble pre code { background:none;padding:0;font-size:.82em; }
     .bubble strong { font-weight:600; }
-    .bubble hr { border:none; border-top:1px solid var(--border); margin:.8em 0; }
-    .bubble a { color:var(--accent2); text-decoration:underline; }
+    .bubble em { font-style:italic; color: var(--muted); }
+    .bubble hr { border:none;border-top:1px solid var(--border);margin:.8em 0; }
+    .bubble a  { color:var(--accent2);text-decoration:underline; }
 
     .tool-step {
-      font-size:.78rem; color:var(--muted);
-      background:rgba(0,0,0,.3);
-      border-left:2px solid var(--accent);
-      padding:4px 10px; border-radius:0 6px 6px 0;
-      margin:4px 0; font-family:monospace;
+      font-size: .76rem; color: var(--muted);
+      background: rgba(0,0,0,.3); border-left: 2px solid var(--accent);
+      padding: 4px 10px; border-radius: 0 6px 6px 0;
+      margin: 4px 0; font-family: monospace;
     }
-    .msg-meta {
-      font-size:.67rem; color:var(--muted); margin-top:5px; text-align:right;
+    .fallback-notice {
+      font-size: .72rem; color: var(--warn);
+      background: color-mix(in srgb, var(--warn) 8%, transparent);
+      border: 1px solid color-mix(in srgb, var(--warn) 20%, transparent);
+      border-radius: 6px; padding: 4px 10px; margin-bottom: 6px;
     }
-    .msg-row.agent .msg-meta { text-align:left; }
+    .msg-meta { font-size: .67rem; color: var(--muted); margin-top: 4px; }
 
     /* typing */
-    .typing { display:flex; align-items:center; gap:5px; padding:0 20px; }
+    .typing { display:flex;align-items:center;gap:5px;padding:0 20px; }
     .dot { width:7px;height:7px;border-radius:50%;background:var(--accent);opacity:.4;animation:bounce .9s infinite; }
-    .dot:nth-child(2){animation-delay:.15s;} .dot:nth-child(3){animation-delay:.30s;}
-    @keyframes bounce {
-      0%,60%,100%{transform:translateY(0);opacity:.4;}
-      30%{transform:translateY(-6px);opacity:1;}
-    }
+    .dot:nth-child(2){animation-delay:.15s} .dot:nth-child(3){animation-delay:.30s}
+    @keyframes bounce { 0%,60%,100%{transform:translateY(0);opacity:.4} 30%{transform:translateY(-6px);opacity:1} }
 
     /* welcome */
     #welcome {
@@ -181,7 +181,7 @@
     }
     #welcome h2 { font-size:1.8rem;font-weight:800;letter-spacing:-0.04em; }
     #welcome h2 span { color:var(--accent); }
-    #welcome p { color:var(--muted);font-size:.9rem;max-width:380px; }
+    #welcome p { color:var(--muted);font-size:.9rem;max-width:400px;line-height:1.6; }
     .chips { display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:8px; }
     .chip {
       font-size:.78rem;padding:6px 14px;border-radius:99px;
@@ -191,17 +191,13 @@
     .chip:hover { border-color:var(--accent);color:var(--text); }
 
     /* input */
-    footer {
-      flex-shrink:0;padding:12px 20px 20px;
-      border-top:1px solid var(--border);background:var(--surface);
-    }
+    footer { flex-shrink:0;padding:12px 20px 20px;border-top:1px solid var(--border);background:var(--surface); }
     .input-row { display:flex;gap:10px;max-width:760px;margin:0 auto; }
     #task {
       flex:1;background:var(--bg);border:1px solid var(--border);
       border-radius:12px;padding:12px 16px;color:var(--text);
       font-size:.9rem;resize:none;outline:none;
-      min-height:48px;max-height:160px;line-height:1.5;
-      transition:border-color .15s;
+      min-height:48px;max-height:160px;line-height:1.5;transition:border-color .15s;
     }
     #task:focus { border-color:var(--accent); }
     #task::placeholder { color:var(--muted); }
@@ -210,9 +206,9 @@
       width:48px;height:48px;display:flex;align-items:center;justify-content:center;
       cursor:pointer;transition:opacity .15s,transform .1s;align-self:flex-end;
     }
-    #send-btn:hover{opacity:.85;} #send-btn:active{transform:scale(.93);}
-    #send-btn:disabled{opacity:.35;cursor:not-allowed;}
-    #send-btn svg{width:20px;height:20px;fill:#fff;}
+    #send-btn:hover{opacity:.85} #send-btn:active{transform:scale(.93)}
+    #send-btn:disabled{opacity:.35;cursor:not-allowed}
+    #send-btn svg{width:20px;height:20px;fill:#fff}
     .input-hint { text-align:center;font-size:.72rem;color:var(--muted);margin-top:6px; }
   </style>
 </head>
@@ -222,32 +218,35 @@
   <div class="logo">Claude <span>Alt</span></div>
   <div class="header-right">
     <button class="active-provider" id="provider-pill" onclick="toggleDrawer()">
-      <div class="dot"></div>
+      <div class="pulse"></div>
       <span id="provider-label">Loading…</span>
     </button>
     <button class="btn-sm" onclick="clearChat()">New chat</button>
   </div>
 </header>
 
-<!-- providers drawer -->
 <div id="providers-drawer">
-  <div class="drawer-title">Available Providers</div>
+  <div class="drawer-title">
+    <span>Provider Fallback Chain</span>
+    <span class="auto-badge">AUTO-FALLBACK ON</span>
+  </div>
   <div class="provider-grid" id="provider-grid">
     <div style="color:var(--muted);font-size:.82rem">Loading…</div>
   </div>
   <div class="drawer-note">
-    Switch providers by setting <code>PROVIDER=&lt;id&gt;</code> in your Railway env vars, e.g.
-    <code>PROVIDER=groq</code> or <code>PROVIDER=gemini</code>.
-    Also set the matching API key env var shown above. The active provider is set at server start.
-    See <a href="https://github.com/mnfst/awesome-free-llm-apis" target="_blank">awesome-free-llm-apis</a> for key signup links.
+    Providers are tried <strong>top to bottom</strong>. On a rate-limit (429), that provider cools down
+    for <code>RATE_LIMIT_COOLDOWN</code> seconds (default 60s) and the next one is tried automatically —
+    no action needed on your end.<br><br>
+    Set <code>PROVIDER=auto</code> to use all available providers, or <code>PROVIDER=groq</code> to prefer
+    one with auto-fallback to the rest. Add API keys as env vars to unlock more providers.
+    See <a href="https://github.com/mnfst/awesome-free-llm-apis" target="_blank">awesome-free-llm-apis</a>.
   </div>
 </div>
 
-<!-- chat area -->
 <div id="chat-area" style="flex:1;overflow:hidden;display:flex;flex-direction:column;">
   <div id="welcome">
     <h2>What can I <span>help</span> you build?</h2>
-    <p>A self-hosted code agent backed by free LLM APIs. No paid plans required.</p>
+    <p>Auto-fallback across free LLM APIs. Hit a rate limit on one — it silently moves to the next.</p>
     <div class="chips">
       <div class="chip" onclick="fillTask('List all files in the repo')">📂 List files</div>
       <div class="chip" onclick="fillTask('Read the README')">📖 Read README</div>
@@ -271,60 +270,85 @@
 <script>
   marked.setOptions({ breaks: true, gfm: true });
 
-  let sessionId = null;
-  let busy = false;
-  let drawerOpen = false;
-  let activeProvider = { label: '?', model: '?' };
+  let sessionId   = null;
+  let busy        = false;
+  let drawerOpen  = false;
+  let providerRefreshTimer = null;
 
   // ── init ──────────────────────────────────────────────────────────────────
   async function init() {
-    const [healthData, providersData, sessionData] = await Promise.all([
+    const [, providersData, sessionData] = await Promise.all([
       fetch('/health').then(r => r.json()).catch(() => ({})),
       fetch('/providers').then(r => r.json()).catch(() => ({ providers: [] })),
       fetch('/session', { method: 'POST' }).then(r => r.json()),
     ]);
-
     sessionId = sessionData.session_id;
+    updateProviderUI(providersData.providers || []);
+    // refresh provider state every 15s (cooldown countdowns)
+    providerRefreshTimer = setInterval(refreshProviders, 15000);
+  }
 
-    // Active provider pill
-    const active = (providersData.providers || []).find(p => p.active);
-    if (active) {
-      activeProvider = active;
-      document.getElementById('provider-label').textContent = `${active.label} · ${active.model}`;
-    }
+  async function refreshProviders() {
+    const data = await fetch('/providers').then(r => r.json()).catch(() => null);
+    if (data) updateProviderUI(data.providers || []);
+  }
 
-    renderProviderGrid(providersData.providers || []);
+  function updateProviderUI(providers) {
+    const ready    = providers.filter(p => p.available);
+    const cooling  = providers.filter(p => p.rate_limited);
+    const nokey    = providers.filter(p => !p.has_key && !p.keyless);
+
+    let label = `${ready.length} provider${ready.length !== 1 ? 's' : ''} ready`;
+    if (cooling.length) label += ` · ${cooling.length} cooling`;
+    document.getElementById('provider-label').textContent = label;
+
+    renderProviderGrid(providers);
   }
 
   // ── provider drawer ───────────────────────────────────────────────────────
   function toggleDrawer() {
     drawerOpen = !drawerOpen;
     document.getElementById('providers-drawer').classList.toggle('open', drawerOpen);
+    if (drawerOpen) refreshProviders();
   }
 
   function renderProviderGrid(providers) {
     const grid = document.getElementById('provider-grid');
-    if (!providers.length) { grid.innerHTML = '<div style="color:var(--muted)">No providers loaded.</div>'; return; }
+    if (!providers.length) { grid.innerHTML = '<div style="color:var(--muted)">No providers.</div>'; return; }
 
-    grid.innerHTML = providers.map(p => {
-      const dotClass = p.active ? 'active' : (p.available ? 'available' : 'unavailable');
-      const cardClass = p.active ? 'active' : (!p.available ? 'unavailable' : '');
-      const tag = p.active
-        ? `<span class="provider-tag active-tag">Active</span>`
-        : (p.available ? `<span class="provider-tag free-tag">Ready</span>` : '');
+    grid.innerHTML = providers.map((p, i) => {
+      let dotClass, cardClass, tagHtml;
+
+      if (!p.has_key && !p.keyless) {
+        dotClass = 'no-key'; cardClass = 'no-key';
+        tagHtml  = '<span class="p-tag t-nokey">No key</span>';
+      } else if (p.rate_limited) {
+        dotClass = 'cooling'; cardClass = 'cooling';
+        const s  = p.cooldown_remaining;
+        tagHtml  = `<span class="p-tag t-cooling">${s}s</span>`;
+      } else if (p.keyless) {
+        dotClass = 'keyless'; cardClass = 'ready';
+        tagHtml  = '<span class="p-tag t-keyless">Free</span>';
+      } else {
+        dotClass = 'ready'; cardClass = 'ready';
+        tagHtml  = '<span class="p-tag t-free">Ready</span>';
+      }
+
+      const order = (p.available) ? `<span style="color:var(--muted);font-size:.65rem;margin-right:4px">#${i+1}</span>` : '';
+
       return `
         <div class="provider-card ${cardClass}">
-          <div class="provider-dot ${dotClass}"></div>
+          <div class="status-dot ${dotClass}"></div>
           <div class="provider-info">
-            <div class="provider-name">${p.label}</div>
+            <div class="provider-name">${order}${p.label}</div>
             <div class="provider-model">${p.model}</div>
           </div>
-          ${tag}
+          ${tagHtml}
         </div>`;
     }).join('');
   }
 
-  // ── textarea auto-resize ──────────────────────────────────────────────────
+  // ── textarea ──────────────────────────────────────────────────────────────
   const ta = document.getElementById('task');
   ta.addEventListener('input', () => {
     ta.style.height = 'auto';
@@ -335,14 +359,11 @@
   });
 
   function fillTask(txt) {
-    ta.value = txt;
-    ta.dispatchEvent(new Event('input'));
-    ta.focus();
-    // close drawer if open
+    ta.value = txt; ta.dispatchEvent(new Event('input')); ta.focus();
     if (drawerOpen) toggleDrawer();
   }
 
-  // ── message rendering ─────────────────────────────────────────────────────
+  // ── messages ──────────────────────────────────────────────────────────────
   function showMessages() {
     document.getElementById('welcome').style.display = 'none';
     document.getElementById('messages').style.display = 'flex';
@@ -352,13 +373,9 @@
     const msgs = document.getElementById('messages');
     const row  = document.createElement('div');
     row.className = `msg-row ${role}`;
-    const inner = meta
-      ? `<div class="bubble">${html}</div><div class="msg-meta">${meta}</div>`
-      : `<div class="bubble">${html}</div>`;
-    // wrap bubble + meta together
     const wrap = document.createElement('div');
-    wrap.style.cssText = 'display:flex;flex-direction:column;max-width:min(680px,85vw);';
-    wrap.innerHTML = inner;
+    wrap.className = 'msg-wrap';
+    wrap.innerHTML = `<div class="bubble">${html}</div>` + (meta ? `<div class="msg-meta">${meta}</div>` : '');
     row.appendChild(wrap);
     msgs.appendChild(row);
     msgs.scrollTop = msgs.scrollHeight;
@@ -376,28 +393,34 @@
   function hideTyping() { typingEl && typingEl.remove(); }
 
   function renderAgent(raw) {
-    const lines = raw.split('\n');
+    // pull out fallback notice line if present
+    let fallbackHtml = '';
+    let cleaned = raw;
+    const fbMatch = raw.match(/^\*↩️ Auto-fallback: (.+?)\*\n\n/);
+    if (fbMatch) {
+      fallbackHtml = `<div class="fallback-notice">↩️ Auto-fallback: ${escapeHtml(fbMatch[1])}</div>`;
+      cleaned = raw.slice(fbMatch[0].length);
+    }
+
+    const lines = cleaned.split('\n');
     let html = '', mdLines = [];
-    const flushMd = () => {
-      if (mdLines.length) { html += marked.parse(mdLines.join('\n')); mdLines = []; }
-    };
+    const flushMd = () => { if (mdLines.length) { html += marked.parse(mdLines.join('\n')); mdLines = []; } };
     for (const line of lines) {
-      if (/^[📝📖📂🗑️⚙️🚀🔧]\s+\*\*/.test(line)) {
+      if (/^[📝📖📂🗑️⚙️🚀🔧]\s+`/.test(line)) {
         flushMd();
-        html += `<div class="tool-step">${line.replace(/\*\*/g, '')}</div>`;
+        html += `<div class="tool-step">${line}</div>`;
       } else {
         mdLines.push(line);
       }
     }
     flushMd();
-    return html;
+    return fallbackHtml + html;
   }
 
   // ── send ──────────────────────────────────────────────────────────────────
   async function sendTask() {
     const val = ta.value.trim();
     if (!val || busy) return;
-
     busy = true;
     document.getElementById('send-btn').disabled = true;
     if (drawerOpen) toggleDrawer();
@@ -408,7 +431,7 @@
     showTyping();
 
     try {
-      const res = await fetch('/agent', {
+      const res  = await fetch('/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ task: val, session_id: sessionId }),
@@ -419,9 +442,12 @@
       if (data.error) {
         addBubble('agent', `<span style="color:#f87171">❌ ${escapeHtml(data.error)}</span>`);
       } else {
-        const meta = data.provider ? `${data.provider} · ${data.model || ''}` : '';
+        const meta = data.provider ? `${data.provider} · ${data.model}` : '';
         addBubble('agent', renderAgent(data.result || ''), meta);
       }
+
+      // refresh provider states (cooldowns may have changed)
+      refreshProviders();
     } catch (err) {
       hideTyping();
       addBubble('agent', `<span style="color:#f87171">❌ ${escapeHtml(err.message)}</span>`);
