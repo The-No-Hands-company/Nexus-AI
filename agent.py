@@ -6,14 +6,57 @@ import time
 
 # ── GitHub URL extraction ─────────────────────────────────────────────────────
 _GITHUB_URL_RE = re.compile(r'https://github\.com/[\w\-\.]+/[\w\-\.]+')
+_CLONE_INTENT_RE = re.compile(r'\b(clone|develop|continue|work on|improve|build|update)\b', re.IGNORECASE)
 
-def _inject_github_urls(task: str) -> str:
-    """Prepend any GitHub URLs found in task so the LLM can't substitute placeholders."""
+def _try_direct_clone(task: str):
+    """If task has a GitHub URL + clone intent, yield SSE events doing it directly."""
     urls = _GITHUB_URL_RE.findall(task)
-    if not urls:
-        return task
-    url_list = "\n".join(f"- {u}" for u in urls)
-    return f"[GITHUB URLS — clone these exactly, do not use placeholders]\n{url_list}\n\n{task}"
+    if not urls or not _CLONE_INTENT_RE.search(task):
+        return None
+
+    def _gen():
+        for url in urls:
+            repo_name  = url.rstrip('/').split('/')[-1]
+            clone_path = f"/tmp/{repo_name}"
+
+            yield {"type": "think",
+                   "thought": f"Cloning {url} directly into {clone_path}, then exploring and improving."}
+
+            if os.path.exists(os.path.join(clone_path, ".git")):
+                clone_result = f"Already cloned at {clone_path}"
+            else:
+                r = subprocess.run(
+                    ["git", "clone", url, clone_path],
+                    capture_output=True, text=True,
+                    env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}, timeout=60
+                )
+                clone_result = (r.stdout + r.stderr).strip() or "Cloned successfully"
+                if r.returncode != 0:
+                    yield {"type": "tool", "icon": "⚙️", "action": "run_command",
+                           "label": f"git clone {url}", "result": f"Failed: {clone_result}",
+                           "file_path": None, "file_content": None}
+                    yield {"type": "done", "content": f"❌ Clone failed: {clone_result}",
+                           "provider": "Built-in", "model": "direct", "history": []}
+                    return
+
+            yield {"type": "tool", "icon": "⚙️", "action": "run_command",
+                   "label": f"git clone {url}", "result": clone_result,
+                   "file_path": None, "file_content": None}
+
+            matches = glob.glob(os.path.join(clone_path, "**/*"), recursive=True)
+            file_list = "\n".join(
+                os.path.relpath(m, clone_path) for m in sorted(matches) if os.path.isfile(m)
+            )[:2000]
+            yield {"type": "tool", "icon": "📂", "action": "list_files",
+                   "label": repo_name, "result": file_list,
+                   "file_path": None, "file_content": None}
+
+            yield {"type": "_hand_off",
+                   "context": (f"Repo {url} cloned to {clone_path}.\n\nFiles:\n{file_list}\n\n"
+                                f"Task: {task}\n\nNow read key files, make real improvements, "
+                                f"then commit and push. Use {clone_path} for all git operations."),
+                   "clone_path": clone_path}
+    return _gen()
 import base64
 import requests
 import subprocess
@@ -457,9 +500,26 @@ def stream_agent_task(task: str, history: list,
                "provider": "Built-in", "model": "direct", "history": msgs}
         return
 
-    messages: List[Dict] = list(history)
-    enriched_task = _inject_github_urls(task)
-    messages.append({"role": "user", "content": _build_user_content(enriched_task, files or [])})
+    # Direct clone: bypass LLM for GitHub clone+develop tasks
+    clone_gen = _try_direct_clone(task)
+    if clone_gen and not files:
+        hand_off_context = None
+        clone_path = None
+        for event in clone_gen:
+            if event["type"] == "_hand_off":
+                hand_off_context = event["context"]
+                clone_path = event["clone_path"]
+            else:
+                yield event
+        # Continue with LLM using clone context
+        if hand_off_context:
+            messages: List[Dict] = list(history)
+            messages.append({"role": "user", "content": hand_off_context})
+        else:
+            return  # clone failed, already yielded error
+    else:
+        messages: List[Dict] = list(history)
+        messages.append({"role": "user", "content": _build_user_content(task, files or [])})
 
     providers_used: List[str] = []
 
