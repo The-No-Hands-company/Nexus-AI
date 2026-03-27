@@ -155,7 +155,7 @@
     #messages {
       flex:1;overflow-y:auto;overflow-x:hidden;
       padding:20px 0 8px;
-      display:none;flex-direction:column;gap:16px;
+      display:flex;flex-direction:column;gap:16px;
       -webkit-overflow-scrolling: touch;
     }
     #messages::-webkit-scrollbar{width:3px;}
@@ -369,10 +369,12 @@
       <div class="chip" onclick="fillTask('Add a CHANGELOG.md with today\\'s date')">📝 Edit a file</div>
     </div>
   </div>
-  <div id="messages"></div>
-  <div id="typing">
-    <div class="typing-bubble">
-      <div class="tdot"></div><div class="tdot"></div><div class="tdot"></div>
+  <!-- #typing lives INSIDE #messages so insertBefore reference works -->
+  <div id="messages">
+    <div id="typing" style="display:none;padding:0 4px">
+      <div class="typing-bubble">
+        <div class="tdot"></div><div class="tdot"></div><div class="tdot"></div>
+      </div>
     </div>
   </div>
 </div>
@@ -568,7 +570,6 @@
   // ── MESSAGES ──────────────────────────────────────────────────────────────
   function showChat() {
     document.getElementById('welcome').style.display = 'none';
-    document.getElementById('messages').style.display = 'flex';
   }
 
   function scrollBottom() {
@@ -577,8 +578,9 @@
   }
 
   function addBubble(role, content='', meta='') {
-    const msgs = document.getElementById('messages');
-    const row  = document.createElement('div');
+    const msgs   = document.getElementById('messages');
+    const typing = document.getElementById('typing');
+    const row    = document.createElement('div');
     row.className = `msg-row ${role}`;
     const wrap = document.createElement('div');
     wrap.className = 'msg-wrap';
@@ -592,9 +594,8 @@
       wrap.appendChild(m);
     }
     row.appendChild(wrap);
-    // Insert before typing indicator
-    const typing = document.getElementById('typing');
-    msgs.insertBefore(row, typing.nextSibling || null);
+    // Always insert before the typing indicator so it stays at the bottom
+    msgs.insertBefore(row, typing);
     scrollBottom();
     return { wrap, bub };
   }
@@ -747,9 +748,11 @@
     const s = await fetch('/session',{method:'POST'}).then(r=>r.json());
     sid = s.session_id;
     attachedFiles = []; renderFileChips();
-    document.getElementById('messages').innerHTML = '';
-    document.getElementById('messages').style.display = 'none';
-    document.getElementById('welcome').style.display  = 'flex';
+    // Remove all message rows (keep #typing)
+    const msgs   = document.getElementById('messages');
+    const typing = document.getElementById('typing');
+    [...msgs.children].forEach(c => { if (c !== typing) c.remove(); });
+    document.getElementById('welcome').style.display = 'flex';
     showTyping(false);
     if (drawerOpen) toggleDrawer();
     ta.focus();
