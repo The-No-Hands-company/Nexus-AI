@@ -118,6 +118,7 @@ TOOLS_DESCRIPTION = """You are a self-hosted code agent with web access. Reply O
 Available actions (pick one per reply):
 
   { "action": "respond",      "content": "<markdown>" }
+  { "action": "get_time",     "timezone": "Europe/Stockholm" }
   { "action": "web_search",   "query": "search terms" }
   { "action": "write_file",   "path": "relative/path.ext", "content": "..." }
   { "action": "read_file",    "path": "relative/path.ext" }
@@ -127,6 +128,7 @@ Available actions (pick one per reply):
   { "action": "commit_push",  "message": "feat: ..." }
 
 Rules:
+- Use get_time for ANY question about current time, date, or timezone — never web_search for this.
 - Use web_search when asked about current events, documentation, or anything you're unsure of.
 - Always finish code-edit tasks with commit_push.
 - run_command is restricted — no destructive operations.
@@ -151,7 +153,38 @@ def _git(args: List[str]) -> subprocess.CompletedProcess:
                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
 
 # ── tools ─────────────────────────────────────────────────────────────────────
-def tool_web_search(query: str) -> str:
+def tool_get_time(timezone: str = "UTC") -> str:
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            tz = ZoneInfo(timezone)
+        except ZoneInfoNotFoundError:
+            # Try common fuzzy matches e.g. "Sweden" → "Europe/Stockholm"
+            ALIASES = {
+                "sweden": "Europe/Stockholm", "stockholm": "Europe/Stockholm",
+                "uk": "Europe/London", "london": "Europe/London",
+                "new york": "America/New_York", "nyc": "America/New_York",
+                "los angeles": "America/Los_Angeles", "la": "America/Los_Angeles",
+                "tokyo": "Asia/Tokyo", "japan": "Asia/Tokyo",
+                "paris": "Europe/Paris", "france": "Europe/Paris",
+                "berlin": "Europe/Berlin", "germany": "Europe/Berlin",
+                "dubai": "Asia/Dubai", "uae": "Asia/Dubai",
+                "sydney": "Australia/Sydney", "australia": "Australia/Sydney",
+                "utc": "UTC", "gmt": "GMT",
+                "jakarta": "Asia/Jakarta", "indonesia": "Asia/Jakarta",
+            }
+            key = timezone.lower().strip()
+            mapped = ALIASES.get(key)
+            if not mapped:
+                return f"Unknown timezone: '{timezone}'. Try a valid IANA name like 'Europe/Stockholm'."
+            tz = ZoneInfo(mapped)
+        now = datetime.now(tz)
+        return now.strftime(f"Current time in {timezone}: **%H:%M:%S** (%A, %B %d %Y, %Z UTC%z)")
+    except Exception as e:
+        return f"Time lookup failed: {e}"
+
+
     try:
         from duckduckgo_search import DDGS
         results = list(DDGS().text(query, max_results=5))
@@ -219,13 +252,14 @@ def tool_commit_push(message: str = "Claude Alt update") -> str:
     return f"Committed & pushed: {message}"
 
 TOOL_ICONS = {
-    "web_search": "🔍", "write_file": "📝", "read_file": "📖",
+    "get_time": "🕐", "web_search": "🔍", "write_file": "📝", "read_file": "📖",
     "list_files": "📂", "delete_file": "🗑️", "run_command": "⚙️",
     "commit_push": "🚀",
 }
 
 def dispatch_tool(action: Dict[str, Any]) -> str:
     kind = action.get("action")
+    if kind == "get_time":     return tool_get_time(action.get("timezone", "UTC"))
     if kind == "web_search":   return tool_web_search(action["query"])
     if kind == "write_file":   return tool_write_file(action["path"], action["content"])
     if kind == "read_file":    return tool_read_file(action["path"])
