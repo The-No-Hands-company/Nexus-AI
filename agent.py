@@ -266,14 +266,16 @@ def _try_direct_answer(task: str) -> str | None:
     return None
 
 # ── tool description ──────────────────────────────────────────────────────────
-TOOLS_DESCRIPTION = """You are a self-hosted code agent. You take action immediately using your tools. You do NOT ask clarifying questions when you have enough information to proceed.
+TOOLS_DESCRIPTION = """You are a self-hosted code agent. You are smart, structured, and build things properly.
 
 Reply ONLY with valid JSON — no markdown fences, no extra text.
 
 Available actions (pick one per reply):
 
-  { "action": "think",        "thought": "brief reasoning before a complex task" }
-  { "action": "respond",      "content": "<markdown>" }
+  { "action": "clarify", "questions": [{"id": "q1", "text": "Question?", "options": ["A", "B", "C"]}, ...] }
+  { "action": "plan",    "title": "What I'm building", "steps": ["Step 1", "Step 2", ...] }
+  { "action": "think",   "thought": "brief internal reasoning" }
+  { "action": "respond", "content": "<markdown>" }
   { "action": "get_time",     "timezone": "Europe/Stockholm" }
   { "action": "web_search",   "query": "search terms" }
   { "action": "write_file",   "path": "relative/path.ext", "content": "..." }
@@ -283,16 +285,25 @@ Available actions (pick one per reply):
   { "action": "run_command",  "cmd": "git log --oneline -5" }
   { "action": "commit_push",  "message": "feat: ..." }
 
+When to use "clarify":
+- ONLY for new project/app creation where key architecture decisions would change the entire approach
+- Ask 2-4 focused questions with 2-4 short options each
+- Each question needs an "id" (q1, q2...), "text", and "options" array
+- NEVER clarify for simple tasks, file edits, searches, or continuing existing work
+
+When to use "plan":
+- Before starting a multi-file build (3+ files) — announce what you're building
+- Include concrete steps like "1. Scaffold Express app", "2. Add SQLite schema", etc.
+- Then immediately start executing on the next turn
+
 Critical rules:
-- If you see [GITHUB URLS] at the top of the message, clone EXACTLY those URLs — never use placeholders like username/repo-name.
-- If the user says "continue development", start by listing/reading files, then make improvements.
-- Use "think" only before genuinely complex multi-step tasks, not simple ones.
+- If you see [GITHUB URLS] at the top, clone EXACTLY those URLs — no placeholders.
+- If the user says "continue development", list/read files first then improve.
 - Use get_time for ANY time/date/timezone question — never web_search for this.
-- Use web_search for current events, docs, or facts you are unsure about.
+- Use web_search for current events, docs, or unknown facts.
 - Always finish code-edit tasks with commit_push.
 - run_command: no destructive operations (no rm -rf, sudo, etc).
-- Never ask the user for information you can discover yourself with tools.
-- Never ask for authentication details upfront — just attempt the action and report if it fails.
+- Never ask for info you can discover with tools.
 """
 
 # ── repo helpers ──────────────────────────────────────────────────────────────
@@ -415,9 +426,10 @@ def tool_commit_push(message: str = "Claude Alt update") -> str:
     return f"Committed & pushed: {message}"
 
 TOOL_ICONS = {
-    "think": "💭", "get_time": "🕐", "web_search": "🔍",
-    "write_file": "📝", "read_file": "📖", "list_files": "📂",
-    "delete_file": "🗑️", "run_command": "⚙️", "commit_push": "🚀",
+    "clarify": "❓", "plan": "📋", "think": "💭", "get_time": "🕐",
+    "web_search": "🔍", "write_file": "📝", "read_file": "📖",
+    "list_files": "📂", "delete_file": "🗑️", "run_command": "⚙️",
+    "commit_push": "🚀",
 }
 
 def dispatch_tool(action: Dict[str, Any]) -> str:
@@ -614,6 +626,33 @@ def stream_agent_task(task: str, history: list,
                 yield {"type": "fallback", "chain": chain}
 
         kind = action.get("action")
+
+        # ── clarify: pause and ask the user questions ─────────────────────────
+        if kind == "clarify":
+            questions = action.get("questions", [])
+            yield {"type": "clarify", "questions": questions}
+            # Wait: the agent yields and stops — the client sends answers back
+            # as a follow-up message, which restarts the stream naturally.
+            messages.append({"role": "assistant",
+                             "content": json.dumps(action, ensure_ascii=False)})
+            cfg = PROVIDERS.get(providers_used[-1], {}) if providers_used else {}
+            yield {
+                "type":    "done",
+                "content": "",   # no text content — UI renders the clarify widget
+                "provider": cfg.get("label", "?"),
+                "model":    _config["model"] or cfg.get("default_model", "?"),
+                "history":  messages,
+            }
+            return
+
+        # ── plan: show build plan then continue ───────────────────────────────
+        if kind == "plan":
+            yield {"type": "plan", "title": action.get("title", ""),
+                   "steps": action.get("steps", [])}
+            messages.append({"role": "assistant",
+                             "content": json.dumps(action, ensure_ascii=False)})
+            messages.append({"role": "user", "content": "Plan looks good. Start building."})
+            continue
 
         # ── think: emit reasoning event, feed back, continue ─────────────────
         if kind == "think":
