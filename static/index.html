@@ -249,6 +249,34 @@
     .plan-step:last-child{border-bottom:none}
     .plan-step-num{color:var(--accent);font-weight:700;font-size:.72rem;flex-shrink:0}
 
+
+    /* artifact renderer */
+    .artifact-wrap{margin:6px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;animation:fadeUp .18s ease}
+    .artifact-header{display:flex;align-items:center;justify-content:space-between;
+      background:var(--surface2);padding:6px 12px;font-size:.7rem;color:var(--muted)}
+    .artifact-header span{font-family:monospace}
+    .artifact-actions{display:flex;gap:6px}
+    .artifact-btn{background:none;border:1px solid var(--border);color:var(--muted);
+      border-radius:5px;padding:2px 8px;font-size:.65rem;cursor:pointer;transition:all .13s}
+    .artifact-btn:hover{border-color:var(--accent);color:var(--text)}
+    .artifact-frame{width:100%;border:none;min-height:200px;max-height:500px;
+      background:#fff;display:block}
+    .artifact-frame.expanded{max-height:800px}
+    /* system message */
+    .sys-msg{font-size:.68rem;color:var(--teal);text-align:center;
+      padding:3px 0;opacity:.8;animation:fadeUp .15s ease}
+    /* token input bar */
+    .token-bar{background:color-mix(in srgb,var(--amber)8%,transparent);
+      border:1px solid color-mix(in srgb,var(--amber)25%,transparent);
+      border-radius:8px;padding:8px 12px;margin:6px 14px;
+      display:flex;align-items:center;gap:8px;font-size:.75rem}
+    .token-bar input{flex:1;background:var(--bg);border:1px solid var(--border);
+      border-radius:6px;padding:5px 10px;color:var(--text);font-size:.78rem;
+      outline:none;font-family:monospace}
+    .token-bar input:focus{border-color:var(--accent)}
+    .token-bar button{background:var(--accent);border:none;color:#fff;
+      border-radius:6px;padding:5px 12px;font-size:.73rem;cursor:pointer;font-weight:600}
+
     /* typing */
     #typing{display:none;padding:0 14px}
     .typing-bubble{background:var(--surface);border:1px solid var(--border);
@@ -356,6 +384,7 @@
   <div class="logo">Claude <em>Alt</em></div>
   <div class="header-spacer"></div>
   <button id="save-btn" onclick="saveCurrentChat()">💾 Save</button>
+  <button class="btn-icon" onclick="showTokenBar()" title="Set GitHub token">🔑</button>
   <button class="pill pill-providers" id="provider-pill" onclick="toggleDrawer()">
     <div class="dot"></div>
     <span id="provider-label">Loading…</span>
@@ -414,6 +443,13 @@
     </div>
 
     <div id="file-chips"></div>
+    <div id="token-bar" style="display:none" class="token-bar">
+      🔑 <span style="color:var(--amber);font-weight:600">Private repo?</span>
+      <input type="password" id="token-input" placeholder="Paste GitHub token (ghp_...)">
+      <button onclick="submitToken()">Store</button>
+      <button onclick="document.getElementById('token-bar').style.display='none'"
+        style="background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
+    </div>
 
     <footer>
       <div class="input-row">
@@ -438,6 +474,56 @@ let sid=null, busy=false, drawerOpen=false, sidebarOpen=false;
 let attachedFiles=[], activeChatId=null;
 let currentStreamId=null, abortController=null;
 let voiceRecognition=null, isListening=false;
+let artifactCount=0;
+
+// ── TOKEN HANDLING ─────────────────────────────────────────────────────────
+function showTokenBar(){document.getElementById('token-bar').style.display='flex'}
+async function submitToken(){
+  const val=document.getElementById('token-input').value.trim();
+  if(!val||!sid) return;
+  await fetch(`/session/${sid}/token`,{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({token:val})});
+  document.getElementById('token-input').value='';
+  document.getElementById('token-bar').style.display='none';
+  // Show confirmation in chat
+  addSysMsg('🔑 Token stored for this session');
+}
+
+// ── ARTIFACT RENDERER ──────────────────────────────────────────────────────
+function makeArtifact(path, content){
+  const id='artifact-'+(++artifactCount);
+  const blob=new Blob([content],{type:'text/html'});
+  const url=URL.createObjectURL(blob);
+  const ext=(path||'').split('.').pop()||'html';
+  return `<div class="artifact-wrap">
+    <div class="artifact-header">
+      <span>✨ ${esc(path||'artifact.html')}</span>
+      <div class="artifact-actions">
+        <button class="artifact-btn" onclick="toggleArtifact('${id}')">⤢ Expand</button>
+        <button class="artifact-btn" onclick="window.open('${url}','_blank')">↗ Open</button>
+        <button class="artifact-btn" onclick="copyArtifact('${id}')">⎘ Copy</button>
+      </div>
+    </div>
+    <iframe id="${id}" class="artifact-frame" src="${url}" sandbox="allow-scripts allow-same-origin"></iframe>
+  </div>`;
+}
+function toggleArtifact(id){
+  const f=document.getElementById(id);
+  f.classList.toggle('expanded');
+  f.style.maxHeight=f.classList.contains('expanded')?'800px':'500px';
+}
+function copyArtifact(id){
+  const f=document.getElementById(id);
+  const src=f.srcdoc||'';
+  navigator.clipboard.writeText(src).catch(()=>{});
+}
+
+function addSysMsg(text){
+  const msgs=document.getElementById('messages'),typing=document.getElementById('typing');
+  const el=document.createElement('div');el.className='sys-msg';el.textContent=text;
+  msgs.insertBefore(el,typing);scrollBottom();
+}
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 async function init(){
@@ -749,6 +835,10 @@ function setBusy(v){
 async function send(){
   const val=ta.value.trim();
   if(!val||busy) return;
+  // Auto-show token bar if a GitHub URL is in the message (for private repos)
+  if(/https:\/\/github\.com\/.+\/.+/.test(val) && !val.includes('ghp_') && !val.includes('github_pat_')){
+    document.getElementById('token-bar').style.display='flex';
+  }
   setBusy(true);
   if(drawerOpen) toggleDrawer();
   if(isListening){voiceRecognition?.stop();setListening(false)}
@@ -862,6 +952,9 @@ async function send(){
           const el=document.createElement('div');el.className='think-step';
           el.textContent=evt.thought;agentBub.appendChild(el);scrollBottom();
 
+        } else if(evt.type==='system'){
+          addSysMsg(evt.message||'');
+
         } else if(evt.type==='tool'){
           if(!toolContainer){toolContainer=document.createElement('div');agentBub.appendChild(toolContainer)}
           const el=document.createElement('div');el.className='tool-step';
@@ -869,7 +962,10 @@ async function send(){
             <span class="t-label">${esc(evt.action)}</span>
             <span class="t-result">${esc(evt.label)}</span>`;
           toolContainer.appendChild(el);
-          if(evt.file_content&&evt.file_path){
+          // Artifact renderer — HTML/SVG files rendered inline
+          if(evt.artifact && evt.file_content && evt.file_path){
+            toolContainer.insertAdjacentHTML('beforeend',makeArtifact(evt.file_path,evt.file_content));
+          } else if(evt.file_content&&evt.file_path){
             toolContainer.insertAdjacentHTML('beforeend',makeCodeViewer(evt.file_path,evt.file_content));
           }
           scrollBottom();
