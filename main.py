@@ -32,8 +32,20 @@ def health():
     return {"status": "healthy", "provider": cfg["provider"]}
 
 
-@app.get("/providers")
-def providers():
+@app.get("/debug/env")
+def debug_env():
+    """Shows which provider env vars are present — values are hidden."""
+    from agent import PROVIDERS
+    result = {}
+    for pid, cfg in PROVIDERS.items():
+        key_name = cfg["env_key"]
+        val = os.getenv(key_name, "")
+        result[key_name] = {
+            "present": bool(val),
+            "length":  len(val),
+            "prefix":  val[:4] + "…" if val else "(not set)",
+        }
+    return result
     return {"providers": get_providers_list()}
 
 
