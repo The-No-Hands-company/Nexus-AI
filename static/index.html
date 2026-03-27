@@ -20,7 +20,7 @@
     body {
       background: var(--bg);
       color: var(--text);
-      font-family: 'Inter', system-ui, sans-serif;
+      font-family: system-ui, -apple-system, sans-serif;
       height: 100dvh;
       display: flex;
       flex-direction: column;
@@ -33,24 +33,81 @@
       border-bottom: 1px solid var(--border);
       background: var(--surface);
       flex-shrink: 0;
+      gap: 12px;
     }
-    .logo { font-size: 1.1rem; font-weight: 700; letter-spacing: -0.03em; }
+    .logo { font-size: 1.1rem; font-weight: 700; letter-spacing: -0.03em; white-space: nowrap; }
     .logo span { color: var(--accent); }
-    .provider-badge {
-      font-size: 0.72rem; font-weight: 600; text-transform: uppercase;
-      letter-spacing: 0.08em;
-      padding: 3px 10px; border-radius: 99px;
+    .header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+
+    /* provider pill */
+    .active-provider {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 0.75rem; font-weight: 600;
+      padding: 4px 12px; border-radius: 99px;
       background: color-mix(in srgb, var(--accent) 15%, transparent);
       color: var(--accent);
       border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+      cursor: pointer; transition: all .15s;
     }
-    .header-actions { display: flex; align-items: center; gap: 10px; }
-    .btn-clear {
+    .active-provider:hover { background: color-mix(in srgb, var(--accent) 25%, transparent); }
+    .active-provider .dot { width:6px;height:6px;border-radius:50%;background:var(--accent2); }
+
+    .btn-sm {
       font-size: 0.75rem; color: var(--muted); background: none; border: none;
-      cursor: pointer; padding: 4px 8px; border-radius: 6px;
-      transition: color .15s, background .15s;
+      cursor: pointer; padding: 4px 10px; border-radius: 6px;
+      transition: color .15s, background .15s; white-space: nowrap;
     }
-    .btn-clear:hover { color: var(--text); background: var(--border); }
+    .btn-sm:hover { color: var(--text); background: var(--border); }
+
+    /* ── providers drawer ── */
+    #providers-drawer {
+      display: none;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 20px;
+      flex-shrink: 0;
+    }
+    #providers-drawer.open { display: block; }
+    .drawer-title {
+      font-size: .8rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .08em; color: var(--muted); margin-bottom: 12px;
+    }
+    .provider-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 8px;
+    }
+    .provider-card {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px 14px;
+      display: flex; align-items: center; gap: 10px;
+      transition: border-color .15s;
+    }
+    .provider-card.active { border-color: var(--accent); }
+    .provider-card.unavailable { opacity: .45; }
+    .provider-dot { width:8px; height:8px; border-radius:50%; flex-shrink:0; }
+    .provider-dot.available { background: #22c55e; }
+    .provider-dot.unavailable { background: var(--muted); }
+    .provider-dot.active { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+    .provider-info { flex:1; min-width:0; }
+    .provider-name { font-size: .82rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .provider-model { font-size: .7rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .provider-tag {
+      font-size: .65rem; font-weight: 700; padding: 2px 6px; border-radius: 4px;
+      text-transform: uppercase; letter-spacing: .05em;
+    }
+    .provider-tag.active-tag { background: color-mix(in srgb,var(--accent) 20%,transparent); color:var(--accent); }
+    .provider-tag.free-tag  { background: color-mix(in srgb,#22c55e 15%,transparent); color:#22c55e; }
+    .drawer-note {
+      margin-top: 12px; font-size: .73rem; color: var(--muted);
+      background: color-mix(in srgb, var(--accent) 8%, transparent);
+      border: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+      border-radius: 8px; padding: 8px 12px; line-height: 1.5;
+    }
+    .drawer-note a { color: var(--accent2); text-decoration: underline; }
+    .drawer-note code { background: rgba(255,255,255,.08); padding:1px 5px; border-radius:3px; font-family:monospace; }
 
     /* ── messages area ── */
     #messages {
@@ -60,18 +117,13 @@
     #messages::-webkit-scrollbar { width: 4px; }
     #messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
 
-    .msg-row {
-      display: flex;
-      padding: 0 20px;
-      animation: fadeUp .2s ease;
-    }
+    .msg-row { display:flex; padding:0 20px; animation: fadeUp .2s ease; }
     @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(6px); }
-      to   { opacity: 1; transform: translateY(0); }
+      from { opacity:0; transform:translateY(6px); }
+      to   { opacity:1; transform:translateY(0); }
     }
     .msg-row.user  { justify-content: flex-end; }
     .msg-row.agent { justify-content: flex-start; }
-
     .bubble {
       max-width: min(680px, 85vw);
       padding: 12px 16px;
@@ -79,135 +131,123 @@
       font-size: 0.9rem;
       line-height: 1.6;
     }
-    .msg-row.user .bubble {
-      background: var(--accent);
-      color: #fff;
-      border-bottom-right-radius: 4px;
-    }
-    .msg-row.agent .bubble {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-bottom-left-radius: 4px;
-    }
+    .msg-row.user .bubble  { background:var(--accent); color:#fff; border-bottom-right-radius:4px; }
+    .msg-row.agent .bubble { background:var(--surface); border:1px solid var(--border); border-bottom-left-radius:4px; }
 
-    /* markdown inside bubble */
-    .bubble h1,.bubble h2,.bubble h3 { font-weight: 700; margin: .6em 0 .3em; }
-    .bubble h1 { font-size: 1.2em; }
-    .bubble h2 { font-size: 1.05em; }
-    .bubble p  { margin: .4em 0; }
-    .bubble ul,.bubble ol { margin: .4em 0 .4em 1.4em; }
-    .bubble li { margin: .15em 0; }
+    .bubble h1,.bubble h2,.bubble h3 { font-weight:700; margin:.6em 0 .3em; }
+    .bubble h1 { font-size:1.2em; } .bubble h2 { font-size:1.05em; }
+    .bubble p  { margin:.4em 0; }
+    .bubble ul,.bubble ol { margin:.4em 0 .4em 1.4em; }
+    .bubble li { margin:.15em 0; }
     .bubble code {
-      background: rgba(255,255,255,.08); padding: 1px 5px;
-      border-radius: 4px; font-size: .85em; font-family: 'Fira Code', monospace;
+      background:rgba(255,255,255,.08); padding:1px 5px;
+      border-radius:4px; font-size:.85em; font-family:monospace;
     }
     .bubble pre {
-      background: rgba(0,0,0,.4); border: 1px solid var(--border);
-      border-radius: 8px; padding: 12px; overflow-x: auto; margin: .5em 0;
+      background:rgba(0,0,0,.4); border:1px solid var(--border);
+      border-radius:8px; padding:12px; overflow-x:auto; margin:.5em 0;
     }
-    .bubble pre code { background: none; padding: 0; font-size: .82em; }
-    .bubble strong { font-weight: 600; }
-    .bubble hr { border: none; border-top: 1px solid var(--border); margin: .8em 0; }
-    .bubble a { color: var(--accent2); text-decoration: underline; }
+    .bubble pre code { background:none; padding:0; font-size:.82em; }
+    .bubble strong { font-weight:600; }
+    .bubble hr { border:none; border-top:1px solid var(--border); margin:.8em 0; }
+    .bubble a { color:var(--accent2); text-decoration:underline; }
 
-    /* tool steps */
     .tool-step {
-      font-size: .78rem; color: var(--muted);
-      background: rgba(0,0,0,.3);
-      border-left: 2px solid var(--accent);
-      padding: 4px 10px; border-radius: 0 6px 6px 0;
-      margin: 4px 0; font-family: monospace;
+      font-size:.78rem; color:var(--muted);
+      background:rgba(0,0,0,.3);
+      border-left:2px solid var(--accent);
+      padding:4px 10px; border-radius:0 6px 6px 0;
+      margin:4px 0; font-family:monospace;
     }
+    .msg-meta {
+      font-size:.67rem; color:var(--muted); margin-top:5px; text-align:right;
+    }
+    .msg-row.agent .msg-meta { text-align:left; }
 
-    /* typing indicator */
-    .typing { display: flex; align-items: center; gap: 5px; padding: 0 20px; }
-    .dot {
-      width: 7px; height: 7px; border-radius: 50%;
-      background: var(--accent); opacity: .4;
-      animation: bounce .9s infinite;
-    }
-    .dot:nth-child(2) { animation-delay: .15s; }
-    .dot:nth-child(3) { animation-delay: .30s; }
+    /* typing */
+    .typing { display:flex; align-items:center; gap:5px; padding:0 20px; }
+    .dot { width:7px;height:7px;border-radius:50%;background:var(--accent);opacity:.4;animation:bounce .9s infinite; }
+    .dot:nth-child(2){animation-delay:.15s;} .dot:nth-child(3){animation-delay:.30s;}
     @keyframes bounce {
-      0%,60%,100% { transform: translateY(0); opacity: .4; }
-      30% { transform: translateY(-6px); opacity: 1; }
+      0%,60%,100%{transform:translateY(0);opacity:.4;}
+      30%{transform:translateY(-6px);opacity:1;}
     }
 
     /* welcome */
     #welcome {
-      flex: 1; display: flex; flex-direction: column;
-      align-items: center; justify-content: center; text-align: center;
-      gap: 12px; padding: 40px 20px;
+      flex:1;display:flex;flex-direction:column;
+      align-items:center;justify-content:center;text-align:center;
+      gap:12px;padding:40px 20px;
     }
-    #welcome h2 { font-size: 1.8rem; font-weight: 800; letter-spacing: -0.04em; }
-    #welcome h2 span { color: var(--accent); }
-    #welcome p { color: var(--muted); font-size: .9rem; max-width: 360px; }
-    .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 8px; }
+    #welcome h2 { font-size:1.8rem;font-weight:800;letter-spacing:-0.04em; }
+    #welcome h2 span { color:var(--accent); }
+    #welcome p { color:var(--muted);font-size:.9rem;max-width:380px; }
+    .chips { display:flex;flex-wrap:wrap;gap:8px;justify-content:center;margin-top:8px; }
     .chip {
-      font-size: .78rem; padding: 6px 14px; border-radius: 99px;
-      border: 1px solid var(--border); color: var(--muted);
-      cursor: pointer; transition: all .15s; background: var(--surface);
+      font-size:.78rem;padding:6px 14px;border-radius:99px;
+      border:1px solid var(--border);color:var(--muted);
+      cursor:pointer;transition:all .15s;background:var(--surface);
     }
-    .chip:hover { border-color: var(--accent); color: var(--text); }
+    .chip:hover { border-color:var(--accent);color:var(--text); }
 
-    /* ── input bar ── */
+    /* input */
     footer {
-      flex-shrink: 0;
-      padding: 12px 20px 20px;
-      border-top: 1px solid var(--border);
-      background: var(--surface);
+      flex-shrink:0;padding:12px 20px 20px;
+      border-top:1px solid var(--border);background:var(--surface);
     }
-    .input-row {
-      display: flex; gap: 10px; max-width: 760px; margin: 0 auto;
-    }
+    .input-row { display:flex;gap:10px;max-width:760px;margin:0 auto; }
     #task {
-      flex: 1;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 12px 16px;
-      color: var(--text);
-      font-size: .9rem;
-      resize: none;
-      outline: none;
-      min-height: 48px;
-      max-height: 160px;
-      line-height: 1.5;
-      transition: border-color .15s;
+      flex:1;background:var(--bg);border:1px solid var(--border);
+      border-radius:12px;padding:12px 16px;color:var(--text);
+      font-size:.9rem;resize:none;outline:none;
+      min-height:48px;max-height:160px;line-height:1.5;
+      transition:border-color .15s;
     }
-    #task:focus { border-color: var(--accent); }
-    #task::placeholder { color: var(--muted); }
+    #task:focus { border-color:var(--accent); }
+    #task::placeholder { color:var(--muted); }
     #send-btn {
-      flex-shrink: 0;
-      background: var(--accent);
-      border: none; border-radius: 12px;
-      width: 48px; height: 48px;
-      display: flex; align-items: center; justify-content: center;
-      cursor: pointer; transition: opacity .15s, transform .1s;
-      align-self: flex-end;
+      flex-shrink:0;background:var(--accent);border:none;border-radius:12px;
+      width:48px;height:48px;display:flex;align-items:center;justify-content:center;
+      cursor:pointer;transition:opacity .15s,transform .1s;align-self:flex-end;
     }
-    #send-btn:hover { opacity: .85; }
-    #send-btn:active { transform: scale(.93); }
-    #send-btn:disabled { opacity: .35; cursor: not-allowed; }
-    #send-btn svg { width: 20px; height: 20px; fill: #fff; }
-    .input-hint { text-align: center; font-size: .72rem; color: var(--muted); margin-top: 6px; }
+    #send-btn:hover{opacity:.85;} #send-btn:active{transform:scale(.93);}
+    #send-btn:disabled{opacity:.35;cursor:not-allowed;}
+    #send-btn svg{width:20px;height:20px;fill:#fff;}
+    .input-hint { text-align:center;font-size:.72rem;color:var(--muted);margin-top:6px; }
   </style>
 </head>
 <body>
 
 <header>
   <div class="logo">Claude <span>Alt</span></div>
-  <div class="header-actions">
-    <span class="provider-badge" id="provider-badge">Loading…</span>
-    <button class="btn-clear" onclick="clearChat()">New chat</button>
+  <div class="header-right">
+    <button class="active-provider" id="provider-pill" onclick="toggleDrawer()">
+      <div class="dot"></div>
+      <span id="provider-label">Loading…</span>
+    </button>
+    <button class="btn-sm" onclick="clearChat()">New chat</button>
   </div>
 </header>
 
-<!-- messages OR welcome screen -->
+<!-- providers drawer -->
+<div id="providers-drawer">
+  <div class="drawer-title">Available Providers</div>
+  <div class="provider-grid" id="provider-grid">
+    <div style="color:var(--muted);font-size:.82rem">Loading…</div>
+  </div>
+  <div class="drawer-note">
+    Switch providers by setting <code>PROVIDER=&lt;id&gt;</code> in your Railway env vars, e.g.
+    <code>PROVIDER=groq</code> or <code>PROVIDER=gemini</code>.
+    Also set the matching API key env var shown above. The active provider is set at server start.
+    See <a href="https://github.com/mnfst/awesome-free-llm-apis" target="_blank">awesome-free-llm-apis</a> for key signup links.
+  </div>
+</div>
+
+<!-- chat area -->
 <div id="chat-area" style="flex:1;overflow:hidden;display:flex;flex-direction:column;">
   <div id="welcome">
     <h2>What can I <span>help</span> you build?</h2>
-    <p>A self-hosted code agent that can read, write, and commit files to your repo.</p>
+    <p>A self-hosted code agent backed by free LLM APIs. No paid plans required.</p>
     <div class="chips">
       <div class="chip" onclick="fillTask('List all files in the repo')">📂 List files</div>
       <div class="chip" onclick="fillTask('Read the README')">📖 Read README</div>
@@ -233,23 +273,58 @@
 
   let sessionId = null;
   let busy = false;
+  let drawerOpen = false;
+  let activeProvider = { label: '?', model: '?' };
 
   // ── init ──────────────────────────────────────────────────────────────────
   async function init() {
-    // fetch provider info
-    try {
-      const h = await fetch('/health').then(r => r.json());
-      const badge = document.getElementById('provider-badge');
-      badge.textContent = h.provider || 'unknown';
-      if (h.provider === 'claude') badge.style.color = '#f97316';
-    } catch {}
+    const [healthData, providersData, sessionData] = await Promise.all([
+      fetch('/health').then(r => r.json()).catch(() => ({})),
+      fetch('/providers').then(r => r.json()).catch(() => ({ providers: [] })),
+      fetch('/session', { method: 'POST' }).then(r => r.json()),
+    ]);
 
-    // start a session
-    const s = await fetch('/session', { method: 'POST' }).then(r => r.json());
-    sessionId = s.session_id;
+    sessionId = sessionData.session_id;
+
+    // Active provider pill
+    const active = (providersData.providers || []).find(p => p.active);
+    if (active) {
+      activeProvider = active;
+      document.getElementById('provider-label').textContent = `${active.label} · ${active.model}`;
+    }
+
+    renderProviderGrid(providersData.providers || []);
   }
 
-  // ── auto-resize textarea ──────────────────────────────────────────────────
+  // ── provider drawer ───────────────────────────────────────────────────────
+  function toggleDrawer() {
+    drawerOpen = !drawerOpen;
+    document.getElementById('providers-drawer').classList.toggle('open', drawerOpen);
+  }
+
+  function renderProviderGrid(providers) {
+    const grid = document.getElementById('provider-grid');
+    if (!providers.length) { grid.innerHTML = '<div style="color:var(--muted)">No providers loaded.</div>'; return; }
+
+    grid.innerHTML = providers.map(p => {
+      const dotClass = p.active ? 'active' : (p.available ? 'available' : 'unavailable');
+      const cardClass = p.active ? 'active' : (!p.available ? 'unavailable' : '');
+      const tag = p.active
+        ? `<span class="provider-tag active-tag">Active</span>`
+        : (p.available ? `<span class="provider-tag free-tag">Ready</span>` : '');
+      return `
+        <div class="provider-card ${cardClass}">
+          <div class="provider-dot ${dotClass}"></div>
+          <div class="provider-info">
+            <div class="provider-name">${p.label}</div>
+            <div class="provider-model">${p.model}</div>
+          </div>
+          ${tag}
+        </div>`;
+    }).join('');
+  }
+
+  // ── textarea auto-resize ──────────────────────────────────────────────────
   const ta = document.getElementById('task');
   ta.addEventListener('input', () => {
     ta.style.height = 'auto';
@@ -259,35 +334,36 @@
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendTask(); }
   });
 
-  // ── chip helper ───────────────────────────────────────────────────────────
   function fillTask(txt) {
     ta.value = txt;
     ta.dispatchEvent(new Event('input'));
     ta.focus();
+    // close drawer if open
+    if (drawerOpen) toggleDrawer();
   }
 
-  // ── show messages area ────────────────────────────────────────────────────
+  // ── message rendering ─────────────────────────────────────────────────────
   function showMessages() {
-    document.getElementById('welcome').style.display  = 'none';
-    const msgs = document.getElementById('messages');
-    msgs.style.display = 'flex';
+    document.getElementById('welcome').style.display = 'none';
+    document.getElementById('messages').style.display = 'flex';
   }
 
-  // ── add bubble ────────────────────────────────────────────────────────────
-  function addBubble(role, html) {
+  function addBubble(role, html, meta = '') {
     const msgs = document.getElementById('messages');
-    const row = document.createElement('div');
+    const row  = document.createElement('div');
     row.className = `msg-row ${role}`;
-    const bubble = document.createElement('div');
-    bubble.className = 'bubble';
-    bubble.innerHTML = html;
-    row.appendChild(bubble);
+    const inner = meta
+      ? `<div class="bubble">${html}</div><div class="msg-meta">${meta}</div>`
+      : `<div class="bubble">${html}</div>`;
+    // wrap bubble + meta together
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'display:flex;flex-direction:column;max-width:min(680px,85vw);';
+    wrap.innerHTML = inner;
+    row.appendChild(wrap);
     msgs.appendChild(row);
     msgs.scrollTop = msgs.scrollHeight;
-    return bubble;
   }
 
-  // ── typing indicator ──────────────────────────────────────────────────────
   let typingEl = null;
   function showTyping() {
     const msgs = document.getElementById('messages');
@@ -299,20 +375,12 @@
   }
   function hideTyping() { typingEl && typingEl.remove(); }
 
-  // ── render agent markdown ─────────────────────────────────────────────────
   function renderAgent(raw) {
-    // Split on tool-step lines (lines starting with icon + backtick)
     const lines = raw.split('\n');
-    let html = '';
-    let mdLines = [];
-
+    let html = '', mdLines = [];
     const flushMd = () => {
-      if (mdLines.length) {
-        html += marked.parse(mdLines.join('\n'));
-        mdLines = [];
-      }
+      if (mdLines.length) { html += marked.parse(mdLines.join('\n')); mdLines = []; }
     };
-
     for (const line of lines) {
       if (/^[📝📖📂🗑️⚙️🚀🔧]\s+\*\*/.test(line)) {
         flushMd();
@@ -325,26 +393,25 @@
     return html;
   }
 
-  // ── main send ─────────────────────────────────────────────────────────────
+  // ── send ──────────────────────────────────────────────────────────────────
   async function sendTask() {
     const val = ta.value.trim();
     if (!val || busy) return;
 
     busy = true;
     document.getElementById('send-btn').disabled = true;
+    if (drawerOpen) toggleDrawer();
 
     showMessages();
     addBubble('user', escapeHtml(val).replace(/\n/g, '<br>'));
-
-    ta.value = '';
-    ta.style.height = 'auto';
+    ta.value = ''; ta.style.height = 'auto';
     showTyping();
 
     try {
       const res = await fetch('/agent', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task: val, session_id: sessionId })
+        body: JSON.stringify({ task: val, session_id: sessionId }),
       });
       const data = await res.json();
       hideTyping();
@@ -352,11 +419,12 @@
       if (data.error) {
         addBubble('agent', `<span style="color:#f87171">❌ ${escapeHtml(data.error)}</span>`);
       } else {
-        addBubble('agent', renderAgent(data.result || ''));
+        const meta = data.provider ? `${data.provider} · ${data.model || ''}` : '';
+        addBubble('agent', renderAgent(data.result || ''), meta);
       }
     } catch (err) {
       hideTyping();
-      addBubble('agent', `<span style="color:#f87171">❌ Network error: ${escapeHtml(err.message)}</span>`);
+      addBubble('agent', `<span style="color:#f87171">❌ ${escapeHtml(err.message)}</span>`);
     }
 
     busy = false;
@@ -366,21 +434,18 @@
 
   // ── clear ─────────────────────────────────────────────────────────────────
   async function clearChat() {
-    if (sessionId) {
-      await fetch(`/session/${sessionId}`, { method: 'DELETE' }).catch(() => {});
-    }
+    if (sessionId) await fetch(`/session/${sessionId}`, { method: 'DELETE' }).catch(() => {});
     const s = await fetch('/session', { method: 'POST' }).then(r => r.json());
     sessionId = s.session_id;
-
     document.getElementById('messages').innerHTML = '';
     document.getElementById('messages').style.display = 'none';
     document.getElementById('welcome').style.display = 'flex';
+    if (drawerOpen) toggleDrawer();
     ta.focus();
   }
 
-  // ── escape ────────────────────────────────────────────────────────────────
   function escapeHtml(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
   }
 
   init();
