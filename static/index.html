@@ -220,6 +220,35 @@
     .complexity-tag{font-size:.63rem;margin-bottom:3px;opacity:.7}
     .msg-meta{font-size:.62rem;color:var(--muted);margin-top:3px}
 
+
+    /* clarify card */
+    .clarify-card{background:var(--surface2);border:1px solid color-mix(in srgb,var(--accent)30%,transparent);
+      border-radius:12px;padding:14px 16px;margin:4px 0;animation:fadeUp .18s ease}
+    .clarify-title{font-size:.75rem;font-weight:700;color:var(--accent);margin-bottom:10px;
+      text-transform:uppercase;letter-spacing:.06em}
+    .clarify-q{margin-bottom:12px}
+    .clarify-q-text{font-size:.85rem;font-weight:600;margin-bottom:6px}
+    .clarify-options{display:flex;flex-wrap:wrap;gap:6px}
+    .clarify-opt{font-size:.78rem;padding:5px 12px;border-radius:99px;
+      border:1px solid var(--border);background:var(--bg);color:var(--text);
+      cursor:pointer;transition:all .14s;-webkit-tap-highlight-color:transparent}
+    .clarify-opt:hover,.clarify-opt.selected{border-color:var(--accent);
+      background:color-mix(in srgb,var(--accent)15%,transparent);color:var(--text)}
+    .clarify-submit{margin-top:10px;background:var(--accent);color:#fff;border:none;
+      border-radius:9px;padding:7px 16px;font-size:.8rem;font-weight:600;
+      cursor:pointer;transition:background .14s}
+    .clarify-submit:hover{background:var(--accent-d)}
+
+    /* plan card */
+    .plan-card{background:var(--surface2);border:1px solid color-mix(in srgb,var(--teal)25%,transparent);
+      border-radius:12px;padding:14px 16px;margin:4px 0;animation:fadeUp .18s ease}
+    .plan-title{font-size:.8rem;font-weight:700;color:var(--teal);margin-bottom:8px}
+    .plan-steps{list-style:none;padding:0;margin:0}
+    .plan-step{display:flex;align-items:baseline;gap:8px;font-size:.8rem;
+      color:var(--muted);padding:3px 0;border-bottom:1px solid var(--border)}
+    .plan-step:last-child{border-bottom:none}
+    .plan-step-num{color:var(--accent);font-weight:700;font-size:.72rem;flex-shrink:0}
+
     /* typing */
     #typing{display:none;padding:0 14px}
     .typing-bubble{background:var(--surface);border:1px solid var(--border);
@@ -768,7 +797,59 @@ async function send(){
         let evt;try{evt=JSON.parse(part.slice(5).trim())}catch{continue}
         if(!gotFirst){showTyping(false);gotFirst=true}
 
-        if(evt.type==='complexity'){
+        if(evt.type==='clarify'){
+          // Render interactive clarify card
+          const card=document.createElement('div');card.className='clarify-card';
+          const title=document.createElement('div');title.className='clarify-title';
+          title.textContent='A few quick questions before I start:';
+          card.appendChild(title);
+          const answers={};
+          (evt.questions||[]).forEach(q=>{
+            const qDiv=document.createElement('div');qDiv.className='clarify-q';
+            const qText=document.createElement('div');qText.className='clarify-q-text';
+            qText.textContent=q.text;qDiv.appendChild(qText);
+            const opts=document.createElement('div');opts.className='clarify-options';
+            (q.options||[]).forEach(opt=>{
+              const btn=document.createElement('button');btn.className='clarify-opt';
+              btn.textContent=opt;
+              btn.onclick=()=>{
+                opts.querySelectorAll('.clarify-opt').forEach(b=>b.classList.remove('selected'));
+                btn.classList.add('selected');
+                answers[q.id||q.text]=opt;
+              };
+              opts.appendChild(btn);
+            });
+            qDiv.appendChild(opts);card.appendChild(qDiv);
+          });
+          // Submit button — sends answers back as a follow-up message
+          const sub=document.createElement('button');sub.className='clarify-submit';
+          sub.textContent='Continue →';
+          sub.onclick=async()=>{
+            const answerText=Object.entries(answers)
+              .map(([k,v])=>`${k}: ${v}`).join('\n');
+            if(!answerText){alert('Please select at least one option.');return}
+            card.style.opacity='.5';card.style.pointerEvents='none';
+            ta.value=answerText;
+            await new Promise(r=>setTimeout(r,100));
+            send();
+          };
+          card.appendChild(sub);
+          agentBub.appendChild(card);scrollBottom();
+
+        } else if(evt.type==='plan'){
+          const card=document.createElement('div');card.className='plan-card';
+          const title=document.createElement('div');title.className='plan-title';
+          title.textContent='📋 ' + (evt.title||'Build plan');
+          card.appendChild(title);
+          const ol=document.createElement('ul');ol.className='plan-steps';
+          (evt.steps||[]).forEach((step,i)=>{
+            const li=document.createElement('li');li.className='plan-step';
+            li.innerHTML=`<span class="plan-step-num">${i+1}</span><span>${esc(step)}</span>`;
+            ol.appendChild(li);
+          });
+          card.appendChild(ol);agentBub.appendChild(card);scrollBottom();
+
+        } else if(evt.type==='complexity'){
           const colors={high:'#f59e0b',medium:'#7c6af7',low:'#22c55e'};
           const labels={high:'🧠 Complex — routing to strongest provider',
                         medium:'⚡ Medium complexity',low:'💬 Simple query'};
