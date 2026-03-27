@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import glob
 import time
@@ -6,10 +7,27 @@ import base64
 import requests
 import subprocess
 import threading
+from datetime import datetime
 from typing import Dict, Any, List, Iterator, Optional
 
+# ── runtime config (can be patched by /settings endpoint) ────────────────────
+_config: Dict[str, Any] = {
+    "provider":    os.getenv("PROVIDER", "auto").lower(),
+    "model":       os.getenv("LLM_MODEL", ""),
+    "temperature": float(os.getenv("LLM_TEMPERATURE", "0.2")),
+}
+
+def get_config() -> Dict[str, Any]:
+    return dict(_config)
+
+def update_config(provider: str | None = None, model: str | None = None,
+                  temperature: float | None = None) -> Dict[str, Any]:
+    if provider    is not None: _config["provider"]    = provider.lower()
+    if model       is not None: _config["model"]       = model
+    if temperature is not None: _config["temperature"] = float(temperature)
+    return dict(_config)
+
 # ── env ───────────────────────────────────────────────────────────────────────
-PROVIDER    = os.getenv("PROVIDER", "auto").lower()
 REPO_DIR    = os.getenv("REPO_DIR", "/tmp/repo")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 GH_TOKEN    = os.getenv("GH_TOKEN")
@@ -83,7 +101,6 @@ def _is_rate_limited(pid: str) -> bool:
     return time.time() < _cooldowns.get(pid, 0)
 
 def _mark_rate_limited(pid: str) -> None:
-    # Keyless providers get a shorter cooldown — they're the last resort
     cfg = PROVIDERS.get(pid, {})
     cooldown = 15 if cfg.get("keyless") else COOLDOWN_SECONDS
     _cooldowns[pid] = time.time() + cooldown
@@ -107,19 +124,43 @@ def _has_key(cfg: Dict) -> bool:
     return cfg.get("keyless", False) or bool(os.getenv(cfg["env_key"], "").strip())
 
 def _fallback_order() -> List[str]:
+    provider = _config["provider"]
     available = [pid for pid, cfg in PROVIDERS.items()
                  if _has_key(cfg) and not _is_rate_limited(pid)]
-    if PROVIDER == "auto":
+    if provider == "auto":
         return available
-    ordered = [PROVIDER] if PROVIDER in available else []
-    ordered += [p for p in available if p != PROVIDER]
+    ordered = [provider] if provider in available else []
+    ordered += [p for p in available if p != provider]
     return ordered
+
+# ── direct intent detection ───────────────────────────────────────────────────
+_TIME_RE = re.compile(
+    r'\b(what(?:\'s| is)(?: the)? (?:current )?time(?: in| at)?|'
+    r'current time(?: in)?|time(?: right)? now(?: in)?|'
+    r'what time(?: is it)?(?: in)?)\b', re.IGNORECASE)
+_DATE_RE = re.compile(
+    r'\b(what(?:\'s| is)(?: the)? (?:current |today\'?s? )?date|'
+    r'today\'?s? date|what day is(?: it| today))\b', re.IGNORECASE)
+
+def _extract_location(text: str) -> str:
+    m = re.search(r'\b(?:in|at|for)\s+([A-Za-z][A-Za-z\s/]{1,30})\??$', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip().rstrip('?').strip()
+    return "UTC"
+
+def _try_direct_answer(task: str) -> str | None:
+    if _TIME_RE.search(task):
+        return tool_get_time(_extract_location(task))
+    if _DATE_RE.search(task):
+        return tool_get_time("UTC")
+    return None
 
 # ── tool description ──────────────────────────────────────────────────────────
 TOOLS_DESCRIPTION = """You are a self-hosted code agent with web access. Reply ONLY with valid JSON.
 
 Available actions (pick one per reply):
 
+  { "action": "think",        "thought": "reasoning before acting..." }
   { "action": "respond",      "content": "<markdown>" }
   { "action": "get_time",     "timezone": "Europe/Stockholm" }
   { "action": "web_search",   "query": "search terms" }
@@ -131,10 +172,11 @@ Available actions (pick one per reply):
   { "action": "commit_push",  "message": "feat: ..." }
 
 Rules:
-- Use get_time for ANY question about current time, date, or timezone — never web_search for this.
-- Use web_search when asked about current events, documentation, or anything you're unsure of.
+- Use "think" before complex multi-step tasks to plan your approach.
+- Use get_time for ANY time/date/timezone question — never web_search for this.
+- Use web_search when asked about current events, docs, or anything you're unsure of.
 - Always finish code-edit tasks with commit_push.
-- run_command is restricted — no destructive operations.
+- run_command: no destructive operations.
 """
 
 # ── repo helpers ──────────────────────────────────────────────────────────────
@@ -142,7 +184,7 @@ def setup_repo() -> None:
     if os.path.exists(os.path.join(REPO_DIR, ".git")):
         return
     if not GITHUB_REPO or not GH_TOKEN:
-        raise Exception(f"Missing GITHUB_REPO or GH_TOKEN")
+        raise Exception("Missing GITHUB_REPO or GH_TOKEN")
     auth_url = GITHUB_REPO.replace("https://github.com", f"https://{GH_TOKEN}@github.com")
     r = subprocess.run(["git", "clone", auth_url, REPO_DIR],
                        capture_output=True, text=True,
@@ -156,80 +198,40 @@ def _git(args: List[str]) -> subprocess.CompletedProcess:
                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
 
 # ── tools ─────────────────────────────────────────────────────────────────────
-import re
-
-# ── direct intent detection (no LLM needed) ───────────────────────────────────
-_TIME_RE = re.compile(
-    r'\b(what(?:\'s| is)(?: the)? (?:current )?time(?: in| at)?|'
-    r'current time(?: in)?|'
-    r'time(?: right)? now(?: in)?|'
-    r'what time(?: is it)?(?: in)?)\b',
-    re.IGNORECASE
-)
-_DATE_RE = re.compile(
-    r'\b(what(?:\'s| is)(?: the)? (?:current |today\'?s? )?date|'
-    r'today\'?s? date|what day is(?: it| today))\b',
-    re.IGNORECASE
-)
-
-def _extract_location(text: str) -> str:
-    """Pull the location/timezone out of a time query."""
-    # "time in Sweden", "time in New York", "time at Tokyo" etc.
-    m = re.search(r'\b(?:in|at|for)\s+([A-Za-z][A-Za-z\s/]{1,30})\??$', text, re.IGNORECASE)
-    if m:
-        return m.group(1).strip().rstrip('?').strip()
-    return "UTC"
-
-def _try_direct_answer(task: str) -> str | None:
-    """Return an instant answer for simple time/date queries, skipping the LLM."""
-    if _TIME_RE.search(task):
-        loc = _extract_location(task)
-        result = tool_get_time(loc)
-        return result
-    if _DATE_RE.search(task):
-        result = tool_get_time("UTC")
-        return result
-    return None
-
-
+def tool_get_time(timezone: str = "UTC") -> str:
     try:
-        from datetime import datetime
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        ALIASES = {
+            "sweden": "Europe/Stockholm", "stockholm": "Europe/Stockholm",
+            "uk": "Europe/London", "london": "Europe/London",
+            "new york": "America/New_York", "nyc": "America/New_York",
+            "los angeles": "America/Los_Angeles", "la": "America/Los_Angeles",
+            "tokyo": "Asia/Tokyo", "japan": "Asia/Tokyo",
+            "paris": "Europe/Paris", "france": "Europe/Paris",
+            "berlin": "Europe/Berlin", "germany": "Europe/Berlin",
+            "dubai": "Asia/Dubai", "uae": "Asia/Dubai",
+            "sydney": "Australia/Sydney", "australia": "Australia/Sydney",
+            "jakarta": "Asia/Jakarta", "indonesia": "Asia/Jakarta",
+            "utc": "UTC", "gmt": "GMT",
+        }
+        key = timezone.lower().strip()
+        tz_name = ALIASES.get(key, timezone)
         try:
-            tz = ZoneInfo(timezone)
+            tz = ZoneInfo(tz_name)
         except ZoneInfoNotFoundError:
-            # Try common fuzzy matches e.g. "Sweden" → "Europe/Stockholm"
-            ALIASES = {
-                "sweden": "Europe/Stockholm", "stockholm": "Europe/Stockholm",
-                "uk": "Europe/London", "london": "Europe/London",
-                "new york": "America/New_York", "nyc": "America/New_York",
-                "los angeles": "America/Los_Angeles", "la": "America/Los_Angeles",
-                "tokyo": "Asia/Tokyo", "japan": "Asia/Tokyo",
-                "paris": "Europe/Paris", "france": "Europe/Paris",
-                "berlin": "Europe/Berlin", "germany": "Europe/Berlin",
-                "dubai": "Asia/Dubai", "uae": "Asia/Dubai",
-                "sydney": "Australia/Sydney", "australia": "Australia/Sydney",
-                "utc": "UTC", "gmt": "GMT",
-                "jakarta": "Asia/Jakarta", "indonesia": "Asia/Jakarta",
-            }
-            key = timezone.lower().strip()
-            mapped = ALIASES.get(key)
-            if not mapped:
-                return f"Unknown timezone: '{timezone}'. Try a valid IANA name like 'Europe/Stockholm'."
-            tz = ZoneInfo(mapped)
+            return f"Unknown timezone: '{timezone}'. Try e.g. 'Europe/Stockholm'."
         now = datetime.now(tz)
-        return now.strftime(f"Current time in {timezone}: **%H:%M:%S** (%A, %B %d %Y, %Z UTC%z)")
+        return now.strftime(f"**%H:%M:%S** %Z — %A, %B %d %Y (UTC%z)")
     except Exception as e:
         return f"Time lookup failed: {e}"
 
-
+def tool_web_search(query: str) -> str:
     try:
         from duckduckgo_search import DDGS
         results = list(DDGS().text(query, max_results=5))
         if not results:
             return "No results found."
-        parts = [f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results]
-        return "\n\n".join(parts)
+        return "\n\n".join(f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results)
     except Exception as e:
         return f"Search failed: {e}"
 
@@ -273,7 +275,7 @@ def tool_run_command(cmd: str) -> str:
     return out[:3000] if out else "(no output)"
 
 def tool_commit_push(message: str = "Claude Alt update") -> str:
-    _git(["config", "user.name", "Claude-Alt-Agent"])
+    _git(["config", "user.name",  "Claude-Alt-Agent"])
     _git(["config", "user.email", "agent@nohands.company"])
     _git(["add", "."])
     c = _git(["commit", "-m", message])
@@ -290,9 +292,9 @@ def tool_commit_push(message: str = "Claude Alt update") -> str:
     return f"Committed & pushed: {message}"
 
 TOOL_ICONS = {
-    "get_time": "🕐", "web_search": "🔍", "write_file": "📝", "read_file": "📖",
-    "list_files": "📂", "delete_file": "🗑️", "run_command": "⚙️",
-    "commit_push": "🚀",
+    "think": "💭", "get_time": "🕐", "web_search": "🔍",
+    "write_file": "📝", "read_file": "📖", "list_files": "📂",
+    "delete_file": "🗑️", "run_command": "⚙️", "commit_push": "🚀",
 }
 
 def dispatch_tool(action: Dict[str, Any]) -> str:
@@ -312,38 +314,28 @@ def _parse_json(raw: str) -> Dict[str, Any]:
     raw = raw.strip()
     if not raw:
         raise ValueError("Empty response from model")
-    # Strip markdown fences
     if raw.startswith("```"):
         parts = raw.split("```")
         raw = parts[1].strip()
         if raw.lower().startswith("json"):
             raw = raw[4:].strip()
-    # Try JSON first
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        # Model returned plain text — wrap it as a respond action
-        # (happens with simple questions that models answer directly)
         return {"action": "respond", "content": raw}
 
 def _build_user_content(text: str, files: List[Dict]) -> Any:
-    """Build message content, supporting image files for vision models."""
     if not files:
         return text
-
     parts: List[Dict] = []
     text_files = []
-
     for f in files:
         ftype = f.get("type", "")
         if ftype.startswith("image/"):
-            parts.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:{ftype};base64,{f['content']}"}
-            })
+            parts.append({"type": "image_url",
+                          "image_url": {"url": f"data:{ftype};base64,{f['content']}"}})
         else:
             text_files.append(f"[File: {f['name']}]\n{f['content']}")
-
     full_text = ("\n\n".join(text_files) + "\n\n" + text).strip() if text_files else text
     parts.append({"type": "text", "text": full_text})
     return parts
@@ -351,52 +343,52 @@ def _build_user_content(text: str, files: List[Dict]) -> Any:
 def _call_openai_compat(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
     api_key = os.getenv(cfg["env_key"], "") or ("llm7" if cfg.get("keyless") else "")
     url = cfg["base_url"].rstrip("/") + "/chat/completions"
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    model = _config["model"] or cfg["default_model"]
     payload = {
-        "model":       os.getenv("LLM_MODEL", cfg["default_model"]),
+        "model":       model,
         "messages":    [{"role": "system", "content": TOOLS_DESCRIPTION}] + messages,
-        "temperature": 0.2,
+        "temperature": _config["temperature"],
         "max_tokens":  4096,
     }
-    resp = requests.post(url, json=payload, headers=headers, timeout=90)
-    resp.raise_for_status()
-    raw = resp.json()["choices"][0]["message"]["content"]
-    return _parse_json(raw)
-
-def _call_grok(messages: List[Dict]) -> Dict[str, Any]:
-    api_key = os.getenv("GROK_API_KEY", "")
-    resp = requests.post(
-        "https://api.x.ai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json={"model": os.getenv("LLM_MODEL", "grok-3"),
-              "messages": [{"role": "system", "content": TOOLS_DESCRIPTION}] + messages,
-              "temperature": 0.2, "max_tokens": 4096},
-        timeout=90,
-    )
+    resp = requests.post(url, json=payload,
+                         headers={"Authorization": f"Bearer {api_key}",
+                                  "Content-Type": "application/json"},
+                         timeout=90)
     resp.raise_for_status()
     return _parse_json(resp.json()["choices"][0]["message"]["content"])
 
-def _call_claude(messages: List[Dict]) -> Dict[str, Any]:
+def _call_grok(messages: List[Dict]) -> Dict[str, Any]:
+    api_key = os.getenv("GROK_API_KEY", "")
+    model = _config["model"] or "grok-3"
+    resp = requests.post(
+        "https://api.x.ai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        json={"model": model,
+              "messages": [{"role": "system", "content": TOOLS_DESCRIPTION}] + messages,
+              "temperature": _config["temperature"], "max_tokens": 4096},
+        timeout=90)
+    resp.raise_for_status()
+    return _parse_json(resp.json()["choices"][0]["message"]["content"])
+
+def _call_claude_api(messages: List[Dict]) -> Dict[str, Any]:
     api_key = os.getenv("CLAUDE_API_KEY", "")
+    model = _config["model"] or "claude-sonnet-4-20250514"
     resp = requests.post(
         "https://api.anthropic.com/v1/messages",
         headers={"x-api-key": api_key, "anthropic-version": "2023-06-01",
                  "Content-Type": "application/json"},
-        json={"model": os.getenv("LLM_MODEL", "claude-sonnet-4-20250514"),
-              "system": TOOLS_DESCRIPTION, "messages": messages, "max_tokens": 4096},
-        timeout=90,
-    )
+        json={"model": model, "system": TOOLS_DESCRIPTION,
+              "messages": messages,
+              "temperature": _config["temperature"], "max_tokens": 4096},
+        timeout=90)
     resp.raise_for_status()
     return _parse_json(resp.json()["content"][0]["text"])
 
 def _call_single(pid: str, messages: List[Dict]) -> Dict[str, Any]:
     cfg = PROVIDERS[pid]
-    if cfg["openai_compat"]:
-        return _call_openai_compat(cfg, messages)
-    if pid == "grok":
-        return _call_grok(messages)
-    if pid == "claude":
-        return _call_claude(messages)
+    if cfg["openai_compat"]: return _call_openai_compat(cfg, messages)
+    if pid == "grok":        return _call_grok(messages)
+    if pid == "claude":      return _call_claude_api(messages)
     raise ValueError(f"No caller for: {pid}")
 
 class AllProvidersExhausted(Exception):
@@ -420,55 +412,43 @@ def call_llm_with_fallback(messages: List[Dict]) -> tuple[Dict[str, Any], str]:
             elif isinstance(e, (requests.ConnectionError, requests.Timeout)):
                 print(f"⚠️  {pid} connection error, skipping…")
             else:
-                # For other errors (auth, unexpected format, etc) log but don't blacklist
                 print(f"⚠️  {pid} error ({type(e).__name__}: {e}), skipping…")
     raise AllProvidersExhausted(f"All providers exhausted. Last error: {last_err}")
 
-# ── streaming agent (sync generator) ─────────────────────────────────────────
+# ── streaming agent ───────────────────────────────────────────────────────────
 def stream_agent_task(task: str, history: list,
                       files: list | None = None) -> Iterator[Dict[str, Any]]:
-    """
-    Yields event dicts:
-      {"type": "tool",  "icon": "🔍", "action": "web_search", "label": "...", "result": "..."}
-      {"type": "fallback", "chain": "Groq → Cerebras"}
-      {"type": "done",  "content": "...", "provider": "...", "model": "...", "history": [...]}
-      {"type": "error", "message": "..."}
-    """
     try:
         setup_repo()
     except Exception as e:
         print(f"setup_repo warning: {e}")
 
-    # ── direct answer: bypass LLM entirely for simple queries ─────────────────
+    # Direct answer: bypass LLM for simple queries
     direct = _try_direct_answer(task)
     if direct and not files:
-        messages = list(history)
-        messages.append({"role": "user",      "content": task})
-        messages.append({"role": "assistant", "content": direct})
+        msgs = list(history)
+        msgs.append({"role": "user",      "content": task})
+        msgs.append({"role": "assistant", "content": direct})
         yield {"type": "done", "content": direct,
-               "provider": "Built-in", "model": "direct", "history": messages}
+               "provider": "Built-in", "model": "direct", "history": msgs}
         return
 
     messages: List[Dict] = list(history)
-
-    # First message — attach files if present
-    first_content = _build_user_content(task, files or [])
-    messages.append({"role": "user", "content": first_content})
+    messages.append({"role": "user", "content": _build_user_content(task, files or [])})
 
     providers_used: List[str] = []
-    final_response = ""
 
-    for _ in range(MAX_LOOP):
+    for loop_i in range(MAX_LOOP):
         try:
             action, pid = call_llm_with_fallback(messages)
         except AllProvidersExhausted as e:
-            # One retry after a short wait — providers may just be temporarily throttled
-            print(f"All providers exhausted, waiting 8s before retry…")
+            print(f"All exhausted, waiting 8s…")
             time.sleep(8)
             try:
                 action, pid = call_llm_with_fallback(messages)
             except AllProvidersExhausted:
-                yield {"type": "error", "message": str(e) + "\n\nTip: add more provider API keys to avoid hitting rate limits."}
+                yield {"type": "error",
+                       "message": str(e) + "\n\nTip: add more provider API keys to avoid rate limits."}
                 return
 
         if pid not in providers_used:
@@ -477,82 +457,112 @@ def stream_agent_task(task: str, history: list,
                 chain = " → ".join(PROVIDERS[p]["label"] for p in providers_used)
                 yield {"type": "fallback", "chain": chain}
 
-        if action.get("action") == "respond":
-            final_response = action.get("content", "")
-            messages.append({"role": "assistant", "content": final_response})
-            break
+        kind = action.get("action")
 
-        # Tool call
-        kind   = action.get("action", "unknown")
-        icon   = TOOL_ICONS.get(kind, "🔧")
-        label  = action.get("query") or action.get("path") or action.get("cmd") or kind
-        result = dispatch_tool(action)
+        # ── think: emit reasoning event, feed back, continue ─────────────────
+        if kind == "think":
+            thought = action.get("thought", "")
+            yield {"type": "think", "thought": thought}
+            messages.append({"role": "assistant",
+                             "content": json.dumps(action, ensure_ascii=False)})
+            messages.append({"role": "user", "content": "Continue based on your reasoning."})
+            continue
 
-        yield {"type": "tool", "icon": icon, "action": kind,
-               "label": label, "result": result}
+        # ── respond: final answer ─────────────────────────────────────────────
+        if kind == "respond":
+            final = action.get("content", "")
+            messages.append({"role": "assistant", "content": final})
+            cfg = PROVIDERS.get(providers_used[-1], {}) if providers_used else {}
+            yield {
+                "type":     "done",
+                "content":  final,
+                "provider": cfg.get("label", "?"),
+                "model":    _config["model"] or cfg.get("default_model", "?"),
+                "history":  messages,
+            }
+            return
 
-        messages.append({"role": "assistant", "content": json.dumps(action, ensure_ascii=False)})
-        messages.append({"role": "user", "content": f"Tool result:\n{result}\n\nContinue."})
-    else:
-        final_response = "Agent reached max tool-call limit."
-        messages.append({"role": "assistant", "content": final_response})
+        # ── tool call: execute with one retry on failure ──────────────────────
+        icon  = TOOL_ICONS.get(kind, "🔧")
+        label = action.get("query") or action.get("path") or action.get("cmd") or \
+                action.get("timezone") or kind
+        # file content for code viewer (write_file only)
+        file_content = action.get("content") if kind == "write_file" else None
+        file_path    = action.get("path")    if kind in ("write_file", "read_file") else None
 
-    cfg = PROVIDERS.get(providers_used[-1], {}) if providers_used else {}
-    yield {
-        "type":     "done",
-        "content":  final_response,
-        "provider": cfg.get("label", "?"),
-        "model":    os.getenv("LLM_MODEL", cfg.get("default_model", "?")),
-        "history":  messages,
-    }
+        try:
+            result = dispatch_tool(action)
+        except Exception as e:
+            # Retry once
+            print(f"Tool {kind} failed ({e}), retrying…")
+            try:
+                result = dispatch_tool(action)
+            except Exception as e2:
+                result = f"Tool failed after retry: {e2}"
 
-# ── non-streaming wrapper (for /agent endpoint) ───────────────────────────────
+        yield {
+            "type":         "tool",
+            "icon":         icon,
+            "action":       kind,
+            "label":        str(label)[:120],
+            "result":       str(result)[:400],
+            "file_path":    file_path,
+            "file_content": file_content,
+        }
+
+        messages.append({"role": "assistant",
+                         "content": json.dumps(action, ensure_ascii=False)})
+        messages.append({"role": "user",
+                         "content": f"Tool result:\n{result}\n\nContinue."})
+
+    # Hit MAX_LOOP
+    final = "Agent reached max tool-call limit."
+    messages.append({"role": "assistant", "content": final})
+    cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+    yield {"type": "done", "content": final,
+           "provider": cfg.get("label", "?"),
+           "model": _config["model"] or cfg.get("default_model", "?"),
+           "history": messages}
+
+# ── non-streaming wrapper ─────────────────────────────────────────────────────
 def run_agent_task(task: str, history: list,
                    files: list | None = None) -> Dict[str, Any]:
-    tool_log: List[str] = []
+    tool_log, fallback_notice = [], ""
     final: Optional[Dict] = None
-    fallback_notice = ""
-
     for event in stream_agent_task(task, history, files):
         if event["type"] == "tool":
             tool_log.append(f"{event['icon']} **`{event['action']}`** `{event['label']}` → {event['result']}")
+        elif event["type"] == "think":
+            tool_log.append(f"💭 *{event['thought']}*")
         elif event["type"] == "fallback":
             fallback_notice = f"*↩️ Auto-fallback: {event['chain']}*\n\n"
         elif event["type"] in ("done", "error"):
             final = event
-
     if not final:
         return {"result": "No response.", "history": history, "provider": "?", "model": "?"}
-
     if final["type"] == "error":
         return {"result": f"❌ {final['message']}", "history": history, "provider": "none", "model": "none"}
-
     content = final["content"]
-    shown   = (fallback_notice
-               + ("\n\n".join(tool_log) + "\n\n---\n\n" if tool_log else "")
-               + content)
-    return {
-        "result":   shown,
-        "history":  final["history"],
-        "provider": final["provider"],
-        "model":    final["model"],
-    }
+    shown = (fallback_notice
+             + ("\n\n".join(tool_log) + "\n\n---\n\n" if tool_log else "")
+             + content)
+    return {"result": shown, "history": final["history"],
+            "provider": final["provider"], "model": final["model"]}
 
-# ── UI helper ─────────────────────────────────────────────────────────────────
+# ── UI helpers ────────────────────────────────────────────────────────────────
 def get_providers_list() -> List[Dict]:
     result = []
     for pid, cfg in PROVIDERS.items():
-        has_key  = _has_key(cfg)
-        cooling  = _is_rate_limited(pid)
-        expires  = max(0, int(_cooldowns.get(pid, 0) - time.time()))
+        has_key = _has_key(cfg)
+        cooling = _is_rate_limited(pid)
         result.append({
-            "id":                 pid,
-            "label":              cfg["label"],
-            "model":              os.getenv("LLM_MODEL", cfg["default_model"]),
+            "id": pid, "label": cfg["label"],
+            "model":              _config["model"] or cfg["default_model"],
             "available":          has_key and not cooling,
             "has_key":            has_key,
             "rate_limited":       cooling,
-            "cooldown_remaining": expires,
+            "cooldown_remaining": max(0, int(_cooldowns.get(pid, 0) - time.time())),
             "keyless":            cfg.get("keyless", False),
+            "active":             _config["provider"] in ("auto", pid),
         })
     return result
