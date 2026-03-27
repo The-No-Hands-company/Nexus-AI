@@ -1,100 +1,163 @@
 import os
 import json
 import glob
+import time
 import requests
 import subprocess
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 
 # ── env ───────────────────────────────────────────────────────────────────────
-PROVIDER = os.getenv("PROVIDER", "groq").lower()
-REPO_DIR = os.getenv("REPO_DIR", "/tmp/repo")
+PROVIDER  = os.getenv("PROVIDER", "auto").lower()   # "auto" = try all in order
+REPO_DIR  = os.getenv("REPO_DIR", "/tmp/repo")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 GH_TOKEN    = os.getenv("GH_TOKEN")
 MAX_LOOP    = 6
 
 # ── provider registry ─────────────────────────────────────────────────────────
-# All entries with "openai_compat: True" share the same caller — just swap
-# base_url + api_key + model.  Claude and Grok get their own callers.
-PROVIDERS = {
-    # ── OpenAI-compatible (free permanent tiers) ──────────────────────────────
+# Order matters — auto-fallback tries them top to bottom.
+# Tweak the order to match your preferred/most generous free tiers first.
+PROVIDERS: Dict[str, Dict] = {
+    "llm7": {
+        "label":         "LLM7.io",
+        "base_url":      "https://api.llm7.io/v1",
+        "env_key":       "LLM7_API_KEY",
+        "default_model": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+        "openai_compat": True,
+        "keyless":       True,   # works without an API key
+    },
     "groq": {
-        "label":          "Groq",
-        "base_url":       "https://api.groq.com/openai/v1",
-        "env_key":        "GROQ_API_KEY",
-        "default_model":  "llama-3.3-70b-versatile",
-        "openai_compat":  True,
+        "label":         "Groq",
+        "base_url":      "https://api.groq.com/openai/v1",
+        "env_key":       "GROQ_API_KEY",
+        "default_model": "llama-3.3-70b-versatile",
+        "openai_compat": True,
     },
     "cerebras": {
-        "label":          "Cerebras",
-        "base_url":       "https://api.cerebras.ai/v1",
-        "env_key":        "CEREBRAS_API_KEY",
-        "default_model":  "llama-3.3-70b",
-        "openai_compat":  True,
-    },
-    "mistral": {
-        "label":          "Mistral AI",
-        "base_url":       "https://api.mistral.ai/v1",
-        "env_key":        "MISTRAL_API_KEY",
-        "default_model":  "mistral-small-latest",
-        "openai_compat":  True,
-    },
-    "openrouter": {
-        "label":          "OpenRouter",
-        "base_url":       "https://openrouter.ai/api/v1",
-        "env_key":        "OPENROUTER_API_KEY",
-        "default_model":  "meta-llama/llama-3.3-70b-instruct:free",
-        "openai_compat":  True,
-    },
-    "nvidia": {
-        "label":          "NVIDIA NIM",
-        "base_url":       "https://integrate.api.nvidia.com/v1",
-        "env_key":        "NVIDIA_API_KEY",
-        "default_model":  "meta/llama-3.3-70b-instruct",
-        "openai_compat":  True,
+        "label":         "Cerebras",
+        "base_url":      "https://api.cerebras.ai/v1",
+        "env_key":       "CEREBRAS_API_KEY",
+        "default_model": "llama-3.3-70b",
+        "openai_compat": True,
     },
     "gemini": {
-        "label":          "Google Gemini",
-        # Google exposes an OpenAI-compat shim at this endpoint
-        "base_url":       "https://generativelanguage.googleapis.com/v1beta/openai",
-        "env_key":        "GEMINI_API_KEY",
-        "default_model":  "gemini-2.0-flash",
-        "openai_compat":  True,
+        "label":         "Google Gemini",
+        "base_url":      "https://generativelanguage.googleapis.com/v1beta/openai",
+        "env_key":       "GEMINI_API_KEY",
+        "default_model": "gemini-2.0-flash",
+        "openai_compat": True,
     },
-    "llm7": {
-        "label":          "LLM7.io",
-        "base_url":       "https://api.llm7.io/v1",
-        "env_key":        "LLM7_API_KEY",   # free tier works without a key (use "llm7")
-        "default_model":  "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
-        "openai_compat":  True,
+    "mistral": {
+        "label":         "Mistral AI",
+        "base_url":      "https://api.mistral.ai/v1",
+        "env_key":       "MISTRAL_API_KEY",
+        "default_model": "mistral-small-latest",
+        "openai_compat": True,
+    },
+    "openrouter": {
+        "label":         "OpenRouter",
+        "base_url":      "https://openrouter.ai/api/v1",
+        "env_key":       "OPENROUTER_API_KEY",
+        "default_model": "meta-llama/llama-3.3-70b-instruct:free",
+        "openai_compat": True,
+    },
+    "nvidia": {
+        "label":         "NVIDIA NIM",
+        "base_url":      "https://integrate.api.nvidia.com/v1",
+        "env_key":       "NVIDIA_API_KEY",
+        "default_model": "meta/llama-3.3-70b-instruct",
+        "openai_compat": True,
     },
     "cohere": {
-        "label":          "Cohere",
-        "base_url":       "https://api.cohere.com/compatibility/v1",
-        "env_key":        "COHERE_API_KEY",
-        "default_model":  "command-r-plus",
-        "openai_compat":  True,
+        "label":         "Cohere",
+        "base_url":      "https://api.cohere.com/compatibility/v1",
+        "env_key":       "COHERE_API_KEY",
+        "default_model": "command-r-plus",
+        "openai_compat": True,
     },
     "github_models": {
-        "label":          "GitHub Models",
-        "base_url":       "https://models.inference.ai.azure.com",
-        "env_key":        "GITHUB_MODELS_TOKEN",   # GitHub PAT with model access
-        "default_model":  "meta-llama/Llama-3.3-70B-Instruct",
-        "openai_compat":  True,
+        "label":         "GitHub Models",
+        "base_url":      "https://models.inference.ai.azure.com",
+        "env_key":       "GITHUB_MODELS_TOKEN",
+        "default_model": "meta-llama/Llama-3.3-70B-Instruct",
+        "openai_compat": True,
     },
-    # ── Non-OpenAI-compat (custom callers) ────────────────────────────────────
     "grok": {
-        "label":          "Grok (xAI)",
-        "env_key":        "GROK_API_KEY",
-        "default_model":  "grok-3",
-        "openai_compat":  False,
+        "label":         "Grok (xAI)",
+        "env_key":       "GROK_API_KEY",
+        "default_model": "grok-3",
+        "openai_compat": False,
     },
     "claude": {
-        "label":          "Claude (Anthropic)",
-        "env_key":        "CLAUDE_API_KEY",
-        "default_model":  "claude-sonnet-4-20250514",
-        "openai_compat":  False,
+        "label":         "Claude (Anthropic)",
+        "env_key":       "CLAUDE_API_KEY",
+        "default_model": "claude-sonnet-4-20250514",
+        "openai_compat": False,
     },
 }
+
+# ── rate-limit cooldown tracking ──────────────────────────────────────────────
+# { provider_id: unix_timestamp_when_cooldown_expires }
+_cooldowns: Dict[str, float] = {}
+COOLDOWN_SECONDS = int(os.getenv("RATE_LIMIT_COOLDOWN", "60"))
+
+
+def _is_rate_limited(provider_id: str) -> bool:
+    expires = _cooldowns.get(provider_id, 0)
+    return time.time() < expires
+
+
+def _mark_rate_limited(provider_id: str) -> None:
+    _cooldowns[provider_id] = time.time() + COOLDOWN_SECONDS
+    print(f"⏳ {provider_id} rate-limited, cooling down for {COOLDOWN_SECONDS}s")
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    """Detect 429s and common rate-limit message patterns."""
+    msg = str(exc).lower()
+    if isinstance(exc, requests.HTTPError):
+        if exc.response is not None and exc.response.status_code == 429:
+            return True
+        # some providers return 429 body in a 200 :(
+        try:
+            body = exc.response.json()
+            code = body.get("error", {}).get("code", "")
+            if "rate" in str(code).lower() or "limit" in str(code).lower():
+                return True
+        except Exception:
+            pass
+    rate_phrases = ["rate limit", "rate_limit", "too many requests", "quota exceeded",
+                    "ratelimit", "throttl", "capacity"]
+    return any(p in msg for p in rate_phrases)
+
+
+# ── provider availability ─────────────────────────────────────────────────────
+def _has_key(cfg: Dict) -> bool:
+    if cfg.get("keyless"):
+        return True
+    return bool(os.getenv(cfg["env_key"], "").strip())
+
+
+def _available_providers() -> List[str]:
+    """All providers that have a key set AND are not in cooldown."""
+    return [
+        pid for pid, cfg in PROVIDERS.items()
+        if _has_key(cfg) and not _is_rate_limited(pid)
+    ]
+
+
+def _fallback_order() -> List[str]:
+    """
+    If PROVIDER is 'auto', return all available providers in registry order.
+    Otherwise, put the chosen provider first, then fall back to others.
+    """
+    available = _available_providers()
+    if PROVIDER == "auto":
+        return available
+    # explicit provider first, then the rest
+    ordered = [PROVIDER] if PROVIDER in available else []
+    ordered += [p for p in available if p != PROVIDER]
+    return ordered
+
 
 # ── tool description ───────────────────────────────────────────────────────────
 TOOLS_DESCRIPTION = """You are a self-hosted code agent. You can respond conversationally OR call tools.
@@ -194,7 +257,9 @@ def tool_commit_push(message: str = "Claude Alt update") -> str:
         return "No GITHUB_REPO set, skipped push."
     push_url = GITHUB_REPO.replace("https://github.com", f"https://{GH_TOKEN}@github.com")
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-    result = subprocess.run(["git", "-C", REPO_DIR, "push", push_url], capture_output=True, text=True, env=env)
+    result = subprocess.run(
+        ["git", "-C", REPO_DIR, "push", push_url], capture_output=True, text=True, env=env
+    )
     if result.returncode != 0:
         raise Exception(f"Push failed: {result.stderr}")
     return f"Committed & pushed: {message}"
@@ -211,7 +276,7 @@ def dispatch_tool(action: Dict[str, Any]) -> str:
     return f"Unknown action: {kind}"
 
 
-# ── LLM callers ───────────────────────────────────────────────────────────────
+# ── LLM callers (one per wire format) ────────────────────────────────────────
 def _parse_json(raw: str) -> Dict[str, Any]:
     raw = raw.strip()
     if raw.startswith("```"):
@@ -222,15 +287,8 @@ def _parse_json(raw: str) -> Dict[str, Any]:
     return json.loads(raw)
 
 
-def call_openai_compat(cfg: dict, messages: List[Dict]) -> Dict[str, Any]:
-    api_key = os.getenv(cfg["env_key"], "")
-    # LLM7 works without a key; send a placeholder so the header is valid
-    if not api_key:
-        if cfg.get("label") == "LLM7.io":
-            api_key = "llm7"
-        else:
-            return {"action": "respond", "content": f"{cfg['env_key']} is not set."}
-
+def _call_openai_compat(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
+    api_key = os.getenv(cfg["env_key"], "") or ("llm7" if cfg.get("keyless") else "")
     url = cfg["base_url"].rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
@@ -245,10 +303,8 @@ def call_openai_compat(cfg: dict, messages: List[Dict]) -> Dict[str, Any]:
     return _parse_json(raw)
 
 
-def call_grok(messages: List[Dict]) -> Dict[str, Any]:
+def _call_grok(messages: List[Dict]) -> Dict[str, Any]:
     api_key = os.getenv("GROK_API_KEY", "")
-    if not api_key:
-        return {"action": "respond", "content": "GROK_API_KEY is not set."}
     url = "https://api.x.ai/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     payload = {
@@ -263,10 +319,8 @@ def call_grok(messages: List[Dict]) -> Dict[str, Any]:
     return _parse_json(raw)
 
 
-def call_claude(messages: List[Dict]) -> Dict[str, Any]:
+def _call_claude(messages: List[Dict]) -> Dict[str, Any]:
     api_key = os.getenv("CLAUDE_API_KEY", "")
-    if not api_key:
-        return {"action": "respond", "content": "CLAUDE_API_KEY is not set."}
     url = "https://api.anthropic.com/v1/messages"
     headers = {
         "x-api-key":         api_key,
@@ -274,9 +328,9 @@ def call_claude(messages: List[Dict]) -> Dict[str, Any]:
         "Content-Type":      "application/json",
     }
     payload = {
-        "model":     os.getenv("LLM_MODEL", "claude-sonnet-4-20250514"),
-        "system":    TOOLS_DESCRIPTION,
-        "messages":  messages,
+        "model":      os.getenv("LLM_MODEL", "claude-sonnet-4-20250514"),
+        "system":     TOOLS_DESCRIPTION,
+        "messages":   messages,
         "max_tokens": 4096,
     }
     resp = requests.post(url, json=payload, headers=headers, timeout=90)
@@ -285,17 +339,53 @@ def call_claude(messages: List[Dict]) -> Dict[str, Any]:
     return _parse_json(raw)
 
 
-def call_llm(messages: List[Dict]) -> Dict[str, Any]:
-    cfg = PROVIDERS.get(PROVIDER)
-    if not cfg:
-        return {"action": "respond", "content": f"Unknown provider: {PROVIDER}"}
+def _call_single_provider(provider_id: str, messages: List[Dict]) -> Dict[str, Any]:
+    """Call one specific provider. Raises on any error."""
+    cfg = PROVIDERS[provider_id]
     if cfg["openai_compat"]:
-        return call_openai_compat(cfg, messages)
-    if PROVIDER == "grok":
-        return call_grok(messages)
-    if PROVIDER == "claude":
-        return call_claude(messages)
-    return {"action": "respond", "content": f"No caller implemented for: {PROVIDER}"}
+        return _call_openai_compat(cfg, messages)
+    if provider_id == "grok":
+        return _call_grok(messages)
+    if provider_id == "claude":
+        return _call_claude(messages)
+    raise ValueError(f"No caller implemented for: {provider_id}")
+
+
+# ── auto-fallback caller ──────────────────────────────────────────────────────
+class AllProvidersExhausted(Exception):
+    pass
+
+
+def call_llm_with_fallback(messages: List[Dict]) -> tuple[Dict[str, Any], str]:
+    """
+    Try providers in order. On rate-limit, mark cooldown and try the next.
+    Returns (action_dict, provider_id_that_succeeded).
+    Raises AllProvidersExhausted if every provider is rate-limited or errored.
+    """
+    order = _fallback_order()
+    if not order:
+        raise AllProvidersExhausted("No providers are available (all rate-limited or no keys set).")
+
+    last_error: Optional[Exception] = None
+
+    for pid in order:
+        if _is_rate_limited(pid):
+            continue
+        try:
+            result = _call_single_provider(pid, messages)
+            return result, pid
+        except Exception as e:
+            last_error = e
+            if _is_rate_limit_error(e):
+                _mark_rate_limited(pid)
+                print(f"↩️  {pid} rate-limited, trying next provider…")
+            else:
+                # Non-rate-limit error: log and skip this provider
+                print(f"⚠️  {pid} error ({type(e).__name__}: {e}), skipping…")
+
+    raise AllProvidersExhausted(
+        f"All providers exhausted. Last error: {last_error}"
+    )
 
 
 # ── agent loop ────────────────────────────────────────────────────────────────
@@ -308,11 +398,25 @@ def run_agent_task(task: str, history: list | None = None) -> Dict[str, Any]:
     messages: List[Dict] = list(history or [])
     messages.append({"role": "user", "content": task})
 
-    tool_log: List[str] = []
+    tool_log:     List[str] = []
     final_response = ""
+    providers_used: List[str] = []   # track which providers got used this turn
 
     for _ in range(MAX_LOOP):
-        action = call_llm(messages)
+        try:
+            action, used_pid = call_llm_with_fallback(messages)
+        except AllProvidersExhausted as e:
+            return {
+                "result":         f"❌ {e}",
+                "history":        messages,
+                "provider":       "none",
+                "model":          "none",
+                "providers_used": providers_used,
+            }
+
+        cfg = PROVIDERS[used_pid]
+        if used_pid not in providers_used:
+            providers_used.append(used_pid)
 
         if action.get("action") == "respond":
             final_response = action.get("content", "")
@@ -332,27 +436,39 @@ def run_agent_task(task: str, history: list | None = None) -> Dict[str, Any]:
 
     shown = ("\n\n".join(tool_log) + "\n\n---\n\n" + final_response) if tool_log else final_response
 
-    cfg = PROVIDERS.get(PROVIDER, {})
+    # Show fallback notice if we had to hop providers
+    if len(providers_used) > 1:
+        hops = " → ".join(PROVIDERS[p]["label"] for p in providers_used)
+        shown = f"*↩️ Auto-fallback: {hops}*\n\n" + shown
+
+    active_pid  = providers_used[-1] if providers_used else "none"
+    active_cfg  = PROVIDERS.get(active_pid, {})
+
     return {
-        "result":   shown,
-        "history":  messages,
-        "provider": cfg.get("label", PROVIDER),
-        "model":    os.getenv("LLM_MODEL", cfg.get("default_model", "?")),
+        "result":         shown,
+        "history":        messages,
+        "provider":       active_cfg.get("label", active_pid),
+        "model":          os.getenv("LLM_MODEL", active_cfg.get("default_model", "?")),
+        "providers_used": providers_used,
     }
 
 
+# ── UI helpers ────────────────────────────────────────────────────────────────
 def get_providers_list() -> List[Dict]:
-    """Returns provider info for the UI — marks which ones have their key set."""
     result = []
-    for key, cfg in PROVIDERS.items():
-        api_key = os.getenv(cfg["env_key"], "")
-        # LLM7 is keyless
-        available = bool(api_key) or cfg.get("label") == "LLM7.io"
+    for pid, cfg in PROVIDERS.items():
+        has_key    = _has_key(cfg)
+        cooling    = _is_rate_limited(pid)
+        expires_in = max(0, int(_cooldowns.get(pid, 0) - time.time()))
         result.append({
-            "id":        key,
-            "label":     cfg["label"],
-            "model":     os.getenv("LLM_MODEL", cfg["default_model"]),
-            "available": available,
-            "active":    key == PROVIDER,
+            "id":          pid,
+            "label":       cfg["label"],
+            "model":       os.getenv("LLM_MODEL", cfg["default_model"]),
+            "available":   has_key and not cooling,
+            "has_key":     has_key,
+            "rate_limited": cooling,
+            "cooldown_remaining": expires_in,
+            "active":      pid == PROVIDER or PROVIDER == "auto",
+            "keyless":     cfg.get("keyless", False),
         })
     return result

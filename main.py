@@ -45,10 +45,11 @@ async def agent_post(request: Request):
     if sid:
         sessions[sid] = result["history"]
     return {
-        "result":   result["result"],
-        "provider": result["provider"],
-        "model":    result["model"],
-        "session_id": sid,
+        "result":         result["result"],
+        "provider":       result["provider"],
+        "model":          result["model"],
+        "providers_used": result.get("providers_used", []),
+        "session_id":     sid,
     }
 
 
