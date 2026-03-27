@@ -789,7 +789,16 @@ async function send(){
         let evt;try{evt=JSON.parse(part.slice(5).trim())}catch{continue}
         if(!gotFirst){showTyping(false);gotFirst=true}
 
-        if(evt.type==='think'){
+        if(evt.type==='complexity'){
+          const colors={high:'#f59e0b',medium:'#7c6af7',low:'#22c55e'};
+          const labels={high:'🧠 Complex — routing to strongest provider',
+                        medium:'⚡ Medium complexity',low:'💬 Simple query'};
+          const tag=document.createElement('div');
+          tag.style.cssText=`font-size:.65rem;color:${colors[evt.level]||'var(--muted)'};margin-bottom:3px;opacity:.75`;
+          tag.textContent=labels[evt.level]||evt.level;
+          agentBub.appendChild(tag);scrollBottom();
+
+        } else if(evt.type==='think'){
           const el=document.createElement('div');
           el.className='think-step';el.textContent=evt.thought;
           agentBub.appendChild(el);scrollBottom();
