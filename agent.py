@@ -3,6 +3,17 @@ import re
 import json
 import glob
 import time
+
+# ── GitHub URL extraction ─────────────────────────────────────────────────────
+_GITHUB_URL_RE = re.compile(r'https://github\.com/[\w\-\.]+/[\w\-\.]+')
+
+def _inject_github_urls(task: str) -> str:
+    """Prepend any GitHub URLs found in task so the LLM can't substitute placeholders."""
+    urls = _GITHUB_URL_RE.findall(task)
+    if not urls:
+        return task
+    url_list = "\n".join(f"- {u}" for u in urls)
+    return f"[GITHUB URLS — clone these exactly, do not use placeholders]\n{url_list}\n\n{task}"
 import base64
 import requests
 import subprocess
@@ -174,7 +185,7 @@ Available actions (pick one per reply):
   { "action": "commit_push",  "message": "feat: ..." }
 
 Critical rules:
-- If the user gives you a GitHub URL, clone it with run_command IMMEDIATELY. Do not ask for more info.
+- If you see [GITHUB URLS] at the top of the message, clone EXACTLY those URLs — never use placeholders like username/repo-name.
 - If the user says "continue development", start by listing/reading files, then make improvements.
 - Use "think" only before genuinely complex multi-step tasks, not simple ones.
 - Use get_time for ANY time/date/timezone question — never web_search for this.
@@ -447,7 +458,8 @@ def stream_agent_task(task: str, history: list,
         return
 
     messages: List[Dict] = list(history)
-    messages.append({"role": "user", "content": _build_user_content(task, files or [])})
+    enriched_task = _inject_github_urls(task)
+    messages.append({"role": "user", "content": _build_user_content(enriched_task, files or [])})
 
     providers_used: List[str] = []
 
