@@ -31,7 +31,7 @@ def update_config(provider: str | None = None, model: str | None = None,
 REPO_DIR    = os.getenv("REPO_DIR", "/tmp/repo")
 GITHUB_REPO = os.getenv("GITHUB_REPO")
 GH_TOKEN    = os.getenv("GH_TOKEN")
-MAX_LOOP    = 8
+MAX_LOOP    = 16
 COOLDOWN_SECONDS = int(os.getenv("RATE_LIMIT_COOLDOWN", "60"))
 
 # ── provider registry ─────────────────────────────────────────────────────────
@@ -156,11 +156,13 @@ def _try_direct_answer(task: str) -> str | None:
     return None
 
 # ── tool description ──────────────────────────────────────────────────────────
-TOOLS_DESCRIPTION = """You are a self-hosted code agent with web access. Reply ONLY with valid JSON.
+TOOLS_DESCRIPTION = """You are a self-hosted code agent. You take action immediately using your tools. You do NOT ask clarifying questions when you have enough information to proceed.
+
+Reply ONLY with valid JSON — no markdown fences, no extra text.
 
 Available actions (pick one per reply):
 
-  { "action": "think",        "thought": "reasoning before acting..." }
+  { "action": "think",        "thought": "brief reasoning before a complex task" }
   { "action": "respond",      "content": "<markdown>" }
   { "action": "get_time",     "timezone": "Europe/Stockholm" }
   { "action": "web_search",   "query": "search terms" }
@@ -171,12 +173,16 @@ Available actions (pick one per reply):
   { "action": "run_command",  "cmd": "git log --oneline -5" }
   { "action": "commit_push",  "message": "feat: ..." }
 
-Rules:
-- Use "think" before complex multi-step tasks to plan your approach.
+Critical rules:
+- If the user gives you a GitHub URL, clone it with run_command IMMEDIATELY. Do not ask for more info.
+- If the user says "continue development", start by listing/reading files, then make improvements.
+- Use "think" only before genuinely complex multi-step tasks, not simple ones.
 - Use get_time for ANY time/date/timezone question — never web_search for this.
-- Use web_search when asked about current events, docs, or anything you're unsure of.
+- Use web_search for current events, docs, or facts you are unsure about.
 - Always finish code-edit tasks with commit_push.
-- run_command: no destructive operations.
+- run_command: no destructive operations (no rm -rf, sudo, etc).
+- Never ask the user for information you can discover yourself with tools.
+- Never ask for authentication details upfront — just attempt the action and report if it fails.
 """
 
 # ── repo helpers ──────────────────────────────────────────────────────────────
@@ -266,11 +272,18 @@ def tool_delete_file(path: str) -> str:
     return f"Deleted {path}"
 
 def tool_run_command(cmd: str) -> str:
-    BLOCKED = ["rm -rf", "sudo", "curl", "wget", "nc ", "ncat", "bash -c", "sh -c"]
+    BLOCKED = ["rm -rf", "sudo", "ncat", "bash -c", "sh -c"]
     for b in BLOCKED:
         if b in cmd:
             return f"Blocked: {cmd}"
-    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=REPO_DIR, timeout=15)
+    # Run in /tmp if it's a clone command targeting outside REPO_DIR,
+    # otherwise run inside REPO_DIR for context
+    cwd = "/tmp" if cmd.strip().startswith("git clone") else REPO_DIR
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                           cwd=cwd, timeout=60)
+    except subprocess.TimeoutExpired:
+        return "Command timed out after 60s"
     out = (r.stdout + r.stderr).strip()
     return out[:3000] if out else "(no output)"
 
