@@ -238,12 +238,21 @@ def dispatch_tool(action: Dict[str, Any]) -> str:
 # ── LLM callers ───────────────────────────────────────────────────────────────
 def _parse_json(raw: str) -> Dict[str, Any]:
     raw = raw.strip()
+    if not raw:
+        raise ValueError("Empty response from model")
+    # Strip markdown fences
     if raw.startswith("```"):
         parts = raw.split("```")
         raw = parts[1].strip()
         if raw.lower().startswith("json"):
             raw = raw[4:].strip()
-    return json.loads(raw)
+    # Try JSON first
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # Model returned plain text — wrap it as a respond action
+        # (happens with simple questions that models answer directly)
+        return {"action": "respond", "content": raw}
 
 def _build_user_content(text: str, files: List[Dict]) -> Any:
     """Build message content, supporting image files for vision models."""
@@ -336,8 +345,11 @@ def call_llm_with_fallback(messages: List[Dict]) -> tuple[Dict[str, Any], str]:
             if _is_rate_limit_error(e):
                 _mark_rate_limited(pid)
                 print(f"↩️  {pid} rate-limited, trying next…")
+            elif isinstance(e, (requests.ConnectionError, requests.Timeout)):
+                print(f"⚠️  {pid} connection error, skipping…")
             else:
-                print(f"⚠️  {pid} error: {e}")
+                # For other errors (auth, unexpected format, etc) log but don't blacklist
+                print(f"⚠️  {pid} error ({type(e).__name__}: {e}), skipping…")
     raise AllProvidersExhausted(f"All providers exhausted. Last error: {last_err}")
 
 # ── streaming agent (sync generator) ─────────────────────────────────────────
