@@ -545,7 +545,11 @@ def call_llm_with_fallback(messages: List[Dict],
 
 # ── streaming agent ───────────────────────────────────────────────────────────
 def stream_agent_task(task: str, history: list,
-                      files: list | None = None) -> Iterator[Dict[str, Any]]:
+                      files: list | None = None,
+                      stop_evt=None) -> Iterator[Dict[str, Any]]:
+    def _stopped():
+        return stop_evt is not None and stop_evt.is_set()
+
     try:
         setup_repo()
     except Exception as e:
@@ -587,6 +591,10 @@ def stream_agent_task(task: str, history: list,
     yield {"type": "complexity", "level": complexity}
 
     for loop_i in range(MAX_LOOP):
+        if _stopped():
+            yield {"type": "done", "content": "*(Stopped)*",
+                   "provider": "—", "model": "—", "history": messages}
+            return
         try:
             action, pid = call_llm_with_fallback(messages, task)
         except AllProvidersExhausted as e:
