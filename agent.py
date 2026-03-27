@@ -177,15 +177,71 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 def _has_key(cfg: Dict) -> bool:
     return cfg.get("keyless", False) or bool(os.getenv(cfg["env_key"], "").strip())
 
-def _fallback_order() -> List[str]:
-    provider = _config["provider"]
-    available = [pid for pid, cfg in PROVIDERS.items()
-                 if _has_key(cfg) and not _is_rate_limited(pid)]
-    if provider == "auto":
-        return available
-    ordered = [provider] if provider in available else []
-    ordered += [p for p in available if p != provider]
+# ── task complexity routing ───────────────────────────────────────────────────
+# Providers ranked by capability tier (best first within each tier)
+PROVIDER_TIERS = {
+    "high":   ["claude", "grok", "gemini", "openrouter", "mistral"],
+    "medium": ["groq", "cerebras", "cohere", "github_models", "nvidia"],
+    "low":    ["llm7", "groq", "cerebras"],
+}
+
+# Signals that indicate a complex task needing a strong model
+_HIGH_COMPLEXITY_RE = re.compile(
+    r'\b(develop|implement|architect|refactor|build|create|design|'
+    r'clone.*repo|continue.*development|add.*feature|fix.*bug|'
+    r'write.*tests?|full.*stack|entire|complete|production)\b',
+    re.IGNORECASE
+)
+_MEDIUM_COMPLEXITY_RE = re.compile(
+    r'\b(explain|summarize|compare|analyze|review|suggest|improve|'
+    r'read.*file|list.*files|search|find|what does)\b',
+    re.IGNORECASE
+)
+
+def _score_task_complexity(task: str) -> str:
+    """Returns 'high', 'medium', or 'low' based on task signals."""
+    # Long tasks are inherently more complex
+    if len(task) > 300:
+        return "high"
+    if _HIGH_COMPLEXITY_RE.search(task):
+        return "high"
+    if _MEDIUM_COMPLEXITY_RE.search(task):
+        return "medium"
+    return "low"
+
+def _smart_fallback_order(task: str) -> List[str]:
+    """
+    Returns providers sorted by suitability for this task's complexity.
+    High complexity tasks try the strongest capable providers first.
+    Low complexity tasks use cheap/fast providers first to conserve quota.
+    """
+    complexity = _score_task_complexity(task)
+    available  = {pid for pid, cfg in PROVIDERS.items()
+                  if _has_key(cfg) and not _is_rate_limited(pid)}
+
+    ordered: List[str] = []
+
+    # Add providers in tier order, skipping unavailable ones
+    for tier_name in (["high", "medium", "low"] if complexity == "high"
+                      else ["medium", "low", "high"] if complexity == "medium"
+                      else ["low", "medium", "high"]):
+        for pid in PROVIDER_TIERS[tier_name]:
+            if pid in available and pid not in ordered:
+                ordered.append(pid)
+
+    # Append any available providers not covered by tiers
+    for pid in PROVIDERS:
+        if pid in available and pid not in ordered:
+            ordered.append(pid)
+
+    # Respect explicit PROVIDER preference — move it to front
+    preferred = _config["provider"]
+    if preferred != "auto" and preferred in ordered:
+        ordered.remove(preferred)
+        ordered.insert(0, preferred)
+
     return ordered
+
 
 # ── direct intent detection ───────────────────────────────────────────────────
 _TIME_RE = re.compile(
@@ -461,10 +517,15 @@ def _call_single(pid: str, messages: List[Dict]) -> Dict[str, Any]:
 class AllProvidersExhausted(Exception):
     pass
 
-def call_llm_with_fallback(messages: List[Dict]) -> tuple[Dict[str, Any], str]:
-    order = _fallback_order()
+def call_llm_with_fallback(messages: List[Dict],
+                           task: str = "") -> tuple[Dict[str, Any], str]:
+    order = _smart_fallback_order(task) if task else _smart_fallback_order(
+        messages[-1]["content"] if messages else ""
+    )
     if not order:
         raise AllProvidersExhausted("No providers available (all rate-limited or no keys set).")
+    complexity = _score_task_complexity(task or "")
+    print(f"🧠 Task complexity: {complexity} → trying: {' → '.join(order[:4])}{'…' if len(order)>4 else ''}")
     last_err: Optional[Exception] = None
     for pid in order:
         if _is_rate_limited(pid):
@@ -522,15 +583,17 @@ def stream_agent_task(task: str, history: list,
         messages.append({"role": "user", "content": _build_user_content(task, files or [])})
 
     providers_used: List[str] = []
+    complexity = _score_task_complexity(task)
+    yield {"type": "complexity", "level": complexity}
 
     for loop_i in range(MAX_LOOP):
         try:
-            action, pid = call_llm_with_fallback(messages)
+            action, pid = call_llm_with_fallback(messages, task)
         except AllProvidersExhausted as e:
             print(f"All exhausted, waiting 8s…")
             time.sleep(8)
             try:
-                action, pid = call_llm_with_fallback(messages)
+                action, pid = call_llm_with_fallback(messages, task)
             except AllProvidersExhausted:
                 yield {"type": "error",
                        "message": str(e) + "\n\nTip: add more provider API keys to avoid rate limits."}
