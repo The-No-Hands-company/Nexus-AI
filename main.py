@@ -46,6 +46,21 @@ def debug_env():
             "prefix":  val[:4] + "…" if val else "(not set)",
         }
     return result
+
+@app.get("/debug/allenv")
+def debug_all_env():
+    """Shows ALL env var names visible to the process (no values)."""
+    keys = sorted(os.environ.keys())
+    # Show names only — no values
+    railway_vars = [k for k in keys if "RAILWAY" in k]
+    api_vars     = [k for k in keys if any(x in k for x in ["KEY", "TOKEN", "SECRET", "API"])]
+    other_vars   = [k for k in keys if k not in railway_vars and k not in api_vars]
+    return {
+        "total_env_vars": len(keys),
+        "railway_vars":   railway_vars,
+        "api_key_vars":   api_vars,
+        "other_vars":     other_vars,
+    }
     return {"providers": get_providers_list()}
 
 
