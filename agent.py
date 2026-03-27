@@ -83,8 +83,11 @@ def _is_rate_limited(pid: str) -> bool:
     return time.time() < _cooldowns.get(pid, 0)
 
 def _mark_rate_limited(pid: str) -> None:
-    _cooldowns[pid] = time.time() + COOLDOWN_SECONDS
-    print(f"⏳ {pid} rate-limited, cooling {COOLDOWN_SECONDS}s")
+    # Keyless providers get a shorter cooldown — they're the last resort
+    cfg = PROVIDERS.get(pid, {})
+    cooldown = 15 if cfg.get("keyless") else COOLDOWN_SECONDS
+    _cooldowns[pid] = time.time() + cooldown
+    print(f"⏳ {pid} rate-limited, cooling {cooldown}s")
 
 def _is_rate_limit_error(exc: Exception) -> bool:
     msg = str(exc).lower()
@@ -153,7 +156,42 @@ def _git(args: List[str]) -> subprocess.CompletedProcess:
                           env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
 
 # ── tools ─────────────────────────────────────────────────────────────────────
-def tool_get_time(timezone: str = "UTC") -> str:
+import re
+
+# ── direct intent detection (no LLM needed) ───────────────────────────────────
+_TIME_RE = re.compile(
+    r'\b(what(?:\'s| is)(?: the)? (?:current )?time(?: in| at)?|'
+    r'current time(?: in)?|'
+    r'time(?: right)? now(?: in)?|'
+    r'what time(?: is it)?(?: in)?)\b',
+    re.IGNORECASE
+)
+_DATE_RE = re.compile(
+    r'\b(what(?:\'s| is)(?: the)? (?:current |today\'?s? )?date|'
+    r'today\'?s? date|what day is(?: it| today))\b',
+    re.IGNORECASE
+)
+
+def _extract_location(text: str) -> str:
+    """Pull the location/timezone out of a time query."""
+    # "time in Sweden", "time in New York", "time at Tokyo" etc.
+    m = re.search(r'\b(?:in|at|for)\s+([A-Za-z][A-Za-z\s/]{1,30})\??$', text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip().rstrip('?').strip()
+    return "UTC"
+
+def _try_direct_answer(task: str) -> str | None:
+    """Return an instant answer for simple time/date queries, skipping the LLM."""
+    if _TIME_RE.search(task):
+        loc = _extract_location(task)
+        result = tool_get_time(loc)
+        return result
+    if _DATE_RE.search(task):
+        result = tool_get_time("UTC")
+        return result
+    return None
+
+
     try:
         from datetime import datetime
         from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -401,6 +439,16 @@ def stream_agent_task(task: str, history: list,
     except Exception as e:
         print(f"setup_repo warning: {e}")
 
+    # ── direct answer: bypass LLM entirely for simple queries ─────────────────
+    direct = _try_direct_answer(task)
+    if direct and not files:
+        messages = list(history)
+        messages.append({"role": "user",      "content": task})
+        messages.append({"role": "assistant", "content": direct})
+        yield {"type": "done", "content": direct,
+               "provider": "Built-in", "model": "direct", "history": messages}
+        return
+
     messages: List[Dict] = list(history)
 
     # First message — attach files if present
@@ -414,8 +462,14 @@ def stream_agent_task(task: str, history: list,
         try:
             action, pid = call_llm_with_fallback(messages)
         except AllProvidersExhausted as e:
-            yield {"type": "error", "message": str(e)}
-            return
+            # One retry after a short wait — providers may just be temporarily throttled
+            print(f"All providers exhausted, waiting 8s before retry…")
+            time.sleep(8)
+            try:
+                action, pid = call_llm_with_fallback(messages)
+            except AllProvidersExhausted:
+                yield {"type": "error", "message": str(e) + "\n\nTip: add more provider API keys to avoid hitting rate limits."}
+                return
 
         if pid not in providers_used:
             providers_used.append(pid)
