@@ -3,12 +3,11 @@ import uuid
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from agent import run_agent_task, PROVIDER
+from agent import run_agent_task, get_providers_list, PROVIDER
 
 app = FastAPI(title="Claude Alt - Self-hosted Code Agent")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# In-memory session store  {session_id: [messages]}
 sessions: dict[str, list] = {}
 
 
@@ -22,6 +21,11 @@ def health():
     return {"status": "healthy", "provider": PROVIDER}
 
 
+@app.get("/providers")
+def providers():
+    return {"providers": get_providers_list()}
+
+
 @app.post("/session")
 def new_session():
     sid = str(uuid.uuid4())
@@ -31,23 +35,19 @@ def new_session():
 
 @app.post("/agent")
 async def agent_post(request: Request):
-    data    = await request.json()
-    task    = data.get("task", "").strip()
-    sid     = data.get("session_id")
-
+    data  = await request.json()
+    task  = data.get("task", "").strip()
+    sid   = data.get("session_id")
     if not task:
         return {"error": "task is required"}
-
     history = sessions.get(sid, []) if sid else []
     result  = run_agent_task(task, history)
-
-    # Persist updated history
     if sid:
         sessions[sid] = result["history"]
-
     return {
-        "result":     result["result"],
-        "provider":   result["provider"],
+        "result":   result["result"],
+        "provider": result["provider"],
+        "model":    result["model"],
         "session_id": sid,
     }
 
