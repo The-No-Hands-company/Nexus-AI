@@ -7,6 +7,7 @@ from agent import (run_agent_task, stream_agent_task, get_providers_list,
                    get_config, update_config, call_llm_with_fallback,
                    get_session_dir, set_session_token, _session_state,
                    _config, PERSONAS)
+from gist_backup import restore_from_gist
 from db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats,
                load_chat as db_load_chat, delete_chat as db_delete_chat,
                save_share as db_save_share, load_share as db_load_share)
@@ -21,6 +22,7 @@ sessions: dict[str, list] = {}
 _active_streams: dict[str, threading.Event] = {}
 
 # ── init DB and seed in-memory caches ─────────────────────────────────────────
+restore_from_gist()   # pull from Gist before opening DB
 init_db()
 
 # Seed chats from DB
