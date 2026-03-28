@@ -274,6 +274,25 @@
     }
     .toast-dismiss:hover { color: var(--text); }
 
+
+    /* ── OVERFLOW MENU ── */
+    .overflow-menu-wrap { position: relative; }
+    .overflow-menu {
+      position: absolute; top: calc(100% + 6px); right: 0;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 6px; min-width: 200px;
+      box-shadow: 0 8px 32px rgba(0,0,0,.4); z-index: 100;
+      display: flex; flex-direction: column; gap: 2px;
+      animation: fadeUp .15s ease;
+    }
+    .overflow-menu button {
+      background: none; border: none; color: var(--text);
+      padding: 8px 12px; border-radius: 8px; text-align: left;
+      font-size: .82rem; cursor: pointer; width: 100%;
+      transition: background .12s; display: flex; align-items: center; gap: 8px;
+    }
+    .overflow-menu button:hover { background: var(--surface2); }
+
     /* ── THEMES ── */
     body.light {
       --bg:#f8fafc; --surface:#ffffff; --surface2:#f1f5f9;
@@ -856,23 +875,30 @@
 </div>
 
 <header>
-  <button class="btn-icon" onclick="toggleSidebar()" title="History">☰</button>
+  <button class="btn-icon" onclick="toggleSidebar()" title="History (Cmd+/)">☰</button>
   <div class="logo">Claude <em>Alt</em></div>
   <div class="header-spacer"></div>
   <div id="autosave-dot" title="Auto-saving…"></div>
-  <button class="btn-icon" onclick="openUsageModal()" title="Usage dashboard">📊</button>
-  <button class="btn-icon" onclick="openHealthModal()" title="Provider health">🏥</button>
-  <button class="btn-icon" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">☀️</button>
-  <button class="btn-icon" onclick="toggleSearch()" title="Search chats">🔍</button>
-  <button class="btn-icon" onclick="openProjectsModal()" title="Projects">🗂️</button>
-  <button class="btn-icon" onclick="openCIModal()" title="Custom instructions">📋</button>
-  <button class="btn-icon" onclick="openMemoryModal()" title="Memory">🧠</button>
-  <button class="btn-icon" onclick="showTokenBar()" title="Set GitHub token">🔑</button>
   <button class="pill pill-providers" id="provider-pill" onclick="toggleDrawer()">
     <div class="dot"></div>
     <span id="provider-label">Loading…</span>
   </button>
+  <button class="btn-icon" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">☀️</button>
   <button class="btn-icon" onclick="openSettings()" title="Settings">⚙</button>
+  <!-- overflow menu -->
+  <div class="overflow-menu-wrap">
+    <button class="btn-icon" id="overflow-btn" onclick="toggleOverflow()" title="More">⋮</button>
+    <div id="overflow-menu" class="overflow-menu" style="display:none">
+      <button onclick="toggleSearch();toggleOverflow()">🔍 Search chats</button>
+      <button onclick="openProjectsModal();toggleOverflow()">🗂️ Projects</button>
+      <button onclick="openCIModal();toggleOverflow()">📋 Custom instructions</button>
+      <button onclick="openMemoryModal();toggleOverflow()">🧠 Memory</button>
+      <button onclick="openUsageModal();toggleOverflow()">📊 Usage</button>
+      <button onclick="openHealthModal();toggleOverflow()">🏥 Provider health</button>
+      <button onclick="showTokenBar();toggleOverflow()">🔑 GitHub token</button>
+      <button onclick="openPersonaEditor();toggleOverflow()">🎭 Persona editor</button>
+    </div>
+  </div>
 </header>
 
 <!-- PWA install banner (hidden until beforeinstallprompt fires) -->
@@ -1955,7 +1981,7 @@ async function send(){
   } catch(err){
     if(err.name!=='AbortError'){
       showTyping(false);
-      const errEl2=document.createElement('div');errEl2.style.cssText='color:var(--red);font-size:.82rem;margin-top:4px';errEl2.textContent='⚠️ '+esc(String(err));agentBub.appendChild(        `<span style="color:var(--red)">❌ ${esc(String(err))}</span>`;
+      const errEl2=document.createElement('div');errEl2.style.cssText='color:var(--red);font-size:.82rem;margin-top:4px';errEl2.textContent='⚠️ '+esc(String(err));agentBub.appendChild(errEl2);
     }
   }
 
@@ -2148,34 +2174,6 @@ function openShortcuts()  { document.getElementById('shortcuts-overlay').classLi
 function closeShortcuts() { document.getElementById('shortcuts-overlay').classList.remove('open'); }
 
 
-// ── SEARCH ────────────────────────────────────────────────────────────────────
-let _searchTimer = null;
-function onSearch(val) {
-  clearTimeout(_searchTimer);
-  const results = document.getElementById('search-results');
-  if (!val.trim()) { results.style.display='none'; return; }
-  _searchTimer = setTimeout(async () => {
-    const d = await fetch('/search?q='+encodeURIComponent(val)).then(r=>r.json()).catch(()=>({results:[]}));
-    const items = d.results || [];
-    if (!items.length) {
-      results.innerHTML = '<div class="search-empty">No results</div>';
-    } else {
-      results.innerHTML = items.map(r => `
-        <div class="search-result" onclick="loadChat('${r.id}');document.getElementById('search-input').value='';document.getElementById('search-results').style.display='none'">
-          <div class="search-result-title">${esc(r.title)}</div>
-          ${r.snippet ? `<div class="search-result-snippet">${esc(r.snippet)}</div>` : ''}
-        </div>`).join('');
-    }
-    results.style.display = 'block';
-  }, 250);
-}
-// Close search on click outside
-document.addEventListener('click', e => {
-  if (!e.target.closest('.search-bar') && !e.target.closest('#search-results'))
-    document.getElementById('search-results').style.display = 'none';
-});
-
-
 // ── PINS ──────────────────────────────────────────────────────────────────────
 async function togglePin(cid, isPinned) {
   haptic('light');
@@ -2281,7 +2279,7 @@ async function loadUsageStats() {
       const h = Math.max(4, Math.round(d.calls / maxDaily * 56));
       html += `<div class="usage-day-bar" style="height:${h}px" title="${d.day}: ${d.calls} req"></div>`;
     });
-    html += '</div><div style="display:flex;justify-content:space-between;font-size:.62rem;color:var(--muted);margin-top:3px"><span>${daily[0]?.day||''}</span><span>${daily[daily.length-1]?.day||''}</span></div>';
+    html += `</div><div style="display:flex;justify-content:space-between;font-size:.62rem;color:var(--muted);margin-top:3px"><span>${daily[0]?.day||''}</span><span>${daily[daily.length-1]?.day||''}</span></div>`;
   }
 
   body.innerHTML = html;
@@ -2352,6 +2350,21 @@ function addReactionButtons(wrap, msgIdx) {
   wrap.appendChild(row);
 }
 
+
+
+// ── OVERFLOW MENU ──────────────────────────────────────────────────────────────
+function toggleOverflow() {
+  const menu = document.getElementById('overflow-menu');
+  const isOpen = menu.style.display !== 'none';
+  menu.style.display = isOpen ? 'none' : 'flex';
+}
+document.addEventListener('click', e => {
+  const wrap = document.querySelector('.overflow-menu-wrap');
+  if (wrap && !wrap.contains(e.target)) {
+    const menu = document.getElementById('overflow-menu');
+    if (menu) menu.style.display = 'none';
+  }
+});
 
 // ── RATE LIMIT TOAST ──────────────────────────────────────────────────────────
 let _retryTask = null;
