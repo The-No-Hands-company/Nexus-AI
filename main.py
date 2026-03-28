@@ -165,7 +165,8 @@ async def save_chat(request: Request):
     data    = await request.json()
     sid     = data.get("session_id")
     history = sessions.get(sid,[]) if sid else data.get("messages",[])
-    title   = data.get("title") or _auto_title(history)
+    # Explicit title always wins (rename case); otherwise auto-generate
+    title   = data.get("title") or (chats[cid]["title"] if cid in chats else None) or _auto_title(history)
     now     = datetime.utcnow().isoformat()
     cid     = data.get("chat_id") or str(uuid.uuid4())
     created = chats[cid]["created_at"] if cid in chats else now
