@@ -374,12 +374,3 @@ def tool_diff(original: str, modified: str, filename: str = "file") -> str:
         diff_text = diff_text[:4000] + "\n… (diff truncated)"
     return f"```diff\n{diff_text}\n```"
 
-
-# Update dispatch to include new tools
-_ORIG_DISPATCH_END = "    if kind == 'youtube':
-        return tool_youtube(action.get('url',''))
-    if kind == 'read_pdf':
-        return tool_read_pdf(action.get('path',''), action.get('workdir','/tmp'))
-    if kind == 'diff':
-        return tool_diff(action.get('original',''), action.get('modified',''), action.get('filename','file'))
-    if kind == 'generate_image':"
