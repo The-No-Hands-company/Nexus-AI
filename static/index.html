@@ -1880,14 +1880,31 @@ async function send(){
 
         } else if(evt.type==='tool'){haptic('light');
           if(!toolContainer){toolContainer=document.createElement('div');agentBub.appendChild(toolContainer)}
-          const el=document.createElement('div');el.className='tool-step';
-          // Detect if result looks like a raw JSON parse error
-          const resultText = evt.result||'';
-          const isParseErr = resultText.startsWith('{"action"') || resultText.startsWith('Unknown action');
-          el.innerHTML=`<span class="t-icon">${esc(evt.icon)}</span>
-            <span class="t-label">${esc(evt.action)}</span>
-            <span class="t-result" style="${isParseErr?'color:var(--red)':''}">${esc(evt.label)}${isParseErr?' ⚠️ parse error':''}</span>`;
-          toolContainer.appendChild(el);
+          // Deduplicate: if the last tool step has the same action+label, increment its counter
+          const lastStep = toolContainer.querySelector('.tool-step:last-child');
+          const stepKey  = evt.action + '|' + evt.label;
+          if(lastStep && lastStep.dataset.key === stepKey){
+            const cnt = parseInt(lastStep.dataset.count||1) + 1;
+            lastStep.dataset.count = cnt;
+            const countEl = lastStep.querySelector('.t-count');
+            if(countEl) countEl.textContent = `×${cnt}`;
+            else {
+              const span = document.createElement('span');
+              span.className='t-count';
+              span.style.cssText='color:var(--accent);margin-left:6px;font-size:.7rem;font-weight:700';
+              span.textContent=`×${cnt}`;
+              lastStep.appendChild(span);
+            }
+          } else {
+            const el=document.createElement('div');el.className='tool-step';
+            el.dataset.key=stepKey;el.dataset.count='1';
+            const resultText = evt.result||'';
+            const isParseErr = resultText.startsWith('{"action"') || resultText.startsWith('Unknown action');
+            el.innerHTML=`<span class="t-icon">${esc(evt.icon)}</span>
+              <span class="t-label">${esc(evt.action)}</span>
+              <span class="t-result" style="${isParseErr?'color:var(--red)':''}">${esc(evt.label)}${isParseErr?' ⚠️ parse error':''}</span>`;
+              toolContainer.appendChild(el);
+          } // end dedup else
           // Source cards for web_search results
           if(evt.action==='web_search' && evt.result){
             const sources=extractSources(evt.result);
