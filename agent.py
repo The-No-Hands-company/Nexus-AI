@@ -257,7 +257,7 @@ Available actions:
   { "action": "api_call",   "method": "GET", "url": "https://api.example.com/data", "headers": {}, "body": null }
   { "action": "read_page",  "url": "https://example.com" }
   { "action": "sub_agent",  "task": "focused subtask description", "context": "relevant context" }
-  { "action": "write_file", "path": "src/app.py", "content": "..." }
+  { "action": "write_file", "path": "src/app.py", "content": "..." }  ← ensure content is valid JSON string (escape quotes, newlines)
   { "action": "read_file",  "path": "README.md" }
   { "action": "list_files", "pattern": "**/*.py" }
   { "action": "delete_file","path": "old.txt" }
@@ -498,8 +498,27 @@ def _parse_json(raw: str) -> Dict[str, Any]:
     if raw.startswith("```"):
         parts = raw.split("```"); raw = parts[1].strip()
         if raw.lower().startswith("json"): raw = raw[4:].strip()
-    try: return json.loads(raw)
-    except json.JSONDecodeError: return {"action":"respond","content":raw}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        # Try to salvage write_file actions with broken content fields
+        # by extracting action + path and using raw content between first/last quote pairs
+        if '"action": "write_file"' in raw or '"action":"write_file"' in raw:
+            try:
+                # Extract path
+                import re as _re
+                path_m = _re.search(r'"path"\s*:\s*"([^"]+)"', raw)
+                # Extract content as everything between first "content": " and last "
+                cont_m = _re.search(r'"content"\s*:\s*"(.*)"', raw, _re.DOTALL)
+                if path_m and cont_m:
+                    content = cont_m.group(1)
+                    # Basic unescape
+                    content = content.replace("\\n","\n").replace("\\t","\t").replace('\\"',"\"")
+                    return {"action":"write_file","path":path_m.group(1),"content":content}
+            except Exception:
+                pass
+        # Fall back to treating as plain text response
+        return {"action": "respond", "content": raw}
 
 def _is_bad_output(action: Dict[str, Any]) -> bool:
     """Detect clearly malformed or useless responses worth retrying."""

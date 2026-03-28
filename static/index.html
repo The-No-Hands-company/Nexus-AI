@@ -1719,7 +1719,9 @@ async function send(){
           const ol=document.createElement('ul');ol.className='plan-steps';
           (evt.steps||[]).forEach((step,i)=>{
             const li=document.createElement('li');li.className='plan-step';
-            li.innerHTML=`<span class="plan-step-num">${i+1}</span><span>${esc(step)}</span>`;
+            // Strip leading number if model already numbered it (e.g. "1. Do thing")
+            const numRe=/^\d+[.)\s]+/;const clean=numRe.test(step)?step.replace(numRe,''):step;
+            li.innerHTML=`<span class="plan-step-num">${i+1}</span><span>${esc(clean)}</span>`;
             ol.appendChild(li);
           });
           card.appendChild(ol);agentBub.appendChild(card);scrollBottom();
@@ -1748,9 +1750,12 @@ async function send(){
         } else if(evt.type==='tool'){haptic('light');
           if(!toolContainer){toolContainer=document.createElement('div');agentBub.appendChild(toolContainer)}
           const el=document.createElement('div');el.className='tool-step';
+          // Detect if result looks like a raw JSON parse error
+          const resultText = evt.result||'';
+          const isParseErr = resultText.startsWith('{"action"') || resultText.startsWith('Unknown action');
           el.innerHTML=`<span class="t-icon">${esc(evt.icon)}</span>
             <span class="t-label">${esc(evt.action)}</span>
-            <span class="t-result">${esc(evt.label)}</span>`;
+            <span class="t-result" style="${isParseErr?'color:var(--red)':''}">${esc(evt.label)}${isParseErr?' ⚠️ parse error':''}</span>`;
           toolContainer.appendChild(el);
           // Source cards for web_search results
           if(evt.action==='web_search' && evt.result){
