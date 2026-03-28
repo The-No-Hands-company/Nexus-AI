@@ -190,3 +190,18 @@ def dispatch_builtin(action: dict) -> str | None:
     if kind == "json_format":
         return tool_json_format(action.get("text", ""))
     return None
+
+
+# ── IMAGE GENERATION ──────────────────────────────────────────────────────────
+def tool_generate_image(prompt: str, width: int = 1024, height: int = 1024,
+                         model: str = "flux") -> dict:
+    """
+    Generate an image via Pollinations.ai (free, no API key).
+    Returns a dict with the image URL and prompt used.
+    """
+    import urllib.parse
+    encoded = urllib.parse.quote(prompt)
+    seed    = hash(prompt) % 9999
+    url     = (f"https://image.pollinations.ai/prompt/{encoded}"
+               f"?width={width}&height={height}&model={model}&seed={seed}&nologo=true")
+    return {"url": url, "prompt": prompt, "width": width, "height": height}
