@@ -462,7 +462,7 @@
     .btn-clear-mem:hover{color:var(--red);background:rgba(248,113,113,.1)}
 
     /* ── MAIN ── */
-    #main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
+    #main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;min-height:0}
 
     /* ── HEADER ── */
     header{display:flex;align-items:center;padding:0 14px;height:52px;min-height:52px;
@@ -484,11 +484,22 @@
       display:flex;align-items:center;justify-content:center;
       font-size:15px;transition:all .15s}
     .btn-icon:hover{background:var(--surface2);color:var(--text);border-color:var(--accent)}
-    #save-btn{font-size:.7rem;color:var(--muted);background:none;border:none;
-      cursor:pointer;padding:4px 8px;border-radius:6px;
-      transition:all .13s;display:none}
-    #save-btn.visible{display:block}
-    #save-btn:hover{color:var(--text);background:var(--surface2)}
+    /* autosave indicator */
+    #autosave-dot{
+      width:7px;height:7px;border-radius:50%;
+      background:var(--green);opacity:0;
+      transition:opacity .4s;flex-shrink:0;
+    }
+    #autosave-dot.saving{opacity:1;animation:savepulse 1s ease infinite}
+    #autosave-dot.saved{opacity:.6;animation:none}
+    @keyframes savepulse{0%,100%{opacity:.3}50%{opacity:1}}
+
+    /* rename input in sidebar */
+    .chat-rename-input{
+      flex:1;background:var(--bg);border:1px solid var(--accent);
+      border-radius:5px;padding:2px 6px;color:var(--text);
+      font-size:.78rem;outline:none;min-width:0;
+    }
 
     /* ── PROVIDER DRAWER ── */
     #drawer{background:var(--surface);border-bottom:1px solid var(--border);
@@ -551,7 +562,7 @@
     .settings-status{font-size:.72rem;color:var(--teal);text-align:center;min-height:16px}
 
     /* ── CHAT ── */
-    #chat{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0}
+    #chat{flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0;position:relative}
     #welcome{flex:1;display:flex;flex-direction:column;align-items:center;
       justify-content:center;text-align:center;gap:13px;padding:32px 20px}
     .welcome-icon{font-size:2rem}
@@ -565,7 +576,8 @@
     .chip:hover,.chip:active{border-color:var(--accent);color:var(--text);background:var(--surface2)}
 
     #messages{flex:1;overflow-y:auto;overflow-x:hidden;padding:18px 0 6px;
-      display:flex;flex-direction:column;gap:14px;-webkit-overflow-scrolling:touch}
+      display:flex;flex-direction:column;gap:14px;-webkit-overflow-scrolling:touch;
+      min-height:0;position:relative}
     #messages::-webkit-scrollbar{width:3px}
     #messages::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
 
@@ -829,7 +841,7 @@
   <button class="btn-icon" onclick="toggleSidebar()" title="History">☰</button>
   <div class="logo">Claude <em>Alt</em></div>
   <div class="header-spacer"></div>
-  <button id="save-btn" onclick="saveCurrentChat()">💾 Save</button>
+  <div id="autosave-dot" title="Auto-saving…"></div>
   <button class="btn-icon" onclick="openUsageModal()" title="Usage dashboard">📊</button>
   <button class="btn-icon" onclick="openHealthModal()" title="Provider health">🏥</button>
   <button class="btn-icon" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">☀️</button>
@@ -1379,10 +1391,11 @@ function renderChatList(chats){
     const date=new Date(c.updated_at).toLocaleDateString('en',{month:'short',day:'numeric'});
     const active=c.id===activeChatId?'active':'';
     return `<div class="chat-item ${active}" onclick="loadChat('${c.id}')">
-      <span class="chat-item-title">${esc(c.title)}</span>
+      <span class="chat-item-title" id="chat-title-${c.id}" ondblclick="event.stopPropagation();startRename('${c.id}')" title="Double-click to rename">${esc(c.title)}</span>
       <span class="chat-item-date">${date}</span>
       <div class="chat-actions">
-  <button class="chat-act-btn" onclick="event.stopPropagation();togglePin('${c.id}','${c.pinned?'true':'false'}')" title="${c.pinned?'Unpin':'Pin'}">${c.pinned?'📌':'📍'}</button>
+  <button class="chat-act-btn" onclick="event.stopPropagation();togglePin('${c.id}','${c.pinned?'true':'false'}')" title="${c.pinned?'Unstar':'Star'}" style="${c.pinned?'color:var(--amber)':''}">${c.pinned?'★':'☆'}</button>
+        <button class="chat-act-btn" onclick="event.stopPropagation();startRename('${c.id}')" title="Rename">✏️</button>
         <button class="chat-act-btn" onclick="event.stopPropagation();exportChat('${c.id}')" title="Export">⬇</button>
         <button class="chat-act-btn" onclick="event.stopPropagation();shareChat('${c.id}')" title="Share">🔗</button>
         <button class="chat-act-btn" onclick="event.stopPropagation();deleteChat('${c.id}')" title="Delete" style="color:var(--red)">🗑</button>
@@ -1390,18 +1403,77 @@ function renderChatList(chats){
     </div>`;
   }).join('');
 }
-async function saveCurrentChat(){
-  const msgs=document.getElementById('messages');
-  if(![...msgs.children].some(c=>c.id!=='typing')){return}
-  const resp=await fetch('/chats',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({session_id:sid,chat_id:activeChatId})
-  }).then(r=>r.json());
-  activeChatId=resp.chat_id;
-  const btn=document.getElementById('save-btn');
-  btn.textContent='✓ Saved';
-  setTimeout(()=>{btn.textContent='💾 Save'},1800);
-  await Promise.all([loadChatList(),loadMemoryCount()]);
+// ── AUTO-SAVE ─────────────────────────────────────────────────────────────────
+let _autoSaveTimer = null;
+
+function triggerAutoSave(delay = 1500) {
+  clearTimeout(_autoSaveTimer);
+  _autoSaveTimer = setTimeout(autoSave, delay);
+}
+
+async function autoSave() {
+  const msgs = document.getElementById('messages');
+  const hasContent = [...msgs.children].some(c => c.id !== 'typing');
+  if (!hasContent) return;
+
+  const dot = document.getElementById('autosave-dot');
+  dot.className = 'saving';
+
+  const resp = await fetch('/chats', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sid, chat_id: activeChatId})
+  }).then(r => r.json()).catch(() => null);
+
+  if (resp?.chat_id) {
+    activeChatId = resp.chat_id;
+    dot.className = 'saved';
+    setTimeout(() => { dot.className = ''; }, 2000);
+    await Promise.all([loadChatList(), loadMemoryCount()]);
+  } else {
+    dot.className = '';
+  }
+}
+
+// ── RENAME CHAT ────────────────────────────────────────────────────────────────
+function startRename(cid) {
+  const titleEl = document.getElementById('chat-title-' + cid);
+  if (!titleEl) return;
+  const current = titleEl.textContent;
+
+  const input = document.createElement('input');
+  input.className = 'chat-rename-input';
+  input.value = current;
+  input.onclick = e => e.stopPropagation();
+
+  const finishRename = async () => {
+    const newTitle = input.value.trim();
+    if (!newTitle || newTitle === current) {
+      titleEl.style.display = '';
+      input.remove();
+      return;
+    }
+    titleEl.style.display = '';
+    titleEl.textContent = newTitle;
+    input.remove();
+    // Update server
+    await fetch('/chats', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: sid, chat_id: cid, title: newTitle})
+    });
+    await loadChatList();
+  };
+
+  input.addEventListener('keydown', e => {
+    if (e.key === 'Enter') { e.preventDefault(); finishRename(); }
+    if (e.key === 'Escape') { titleEl.style.display = ''; input.remove(); }
+  });
+  input.addEventListener('blur', finishRename);
+
+  titleEl.style.display = 'none';
+  titleEl.parentNode.insertBefore(input, titleEl.nextSibling);
+  setTimeout(() => input.focus(), 10);
 }
 async function loadChat(cid){
   const d=await fetch(`/chats/${cid}`).then(r=>r.json());
@@ -1422,7 +1494,7 @@ async function loadChat(cid){
       addBubble('agent',renderMd(m.content));
     }
   }
-  document.getElementById('save-btn').classList.add('visible');
+  triggerAutoSave(500);
   closeSidebar();loadChatList();
 }
 async function deleteChat(cid){
@@ -1625,7 +1697,7 @@ async function send(){
   if(isListening){voiceRecognition?.stop();setListening(false)}
 
   showChat();
-  document.getElementById('save-btn').classList.add('visible');
+  triggerAutoSave(500);  // create entry in sidebar as soon as user sends
 
   let userHtml=esc(val).replace(/\n/g,'<br>');
   if(attachedFiles.length){
@@ -1834,6 +1906,7 @@ async function send(){
           // Token counter
           addTokenCount(agentWrap, val, evt.content||'');
           scrollBottom();refreshProviders();
+          triggerAutoSave();  // auto-save after every response
 
         } else if(evt.type==='error'){
           agentBub.innerHTML=`<span style="color:var(--red)">❌ ${esc(evt.message)}</span>`;
@@ -1876,7 +1949,7 @@ async function newChat(){
   sid=s.session_id;activeChatId=null;
   attachedFiles=[];renderFileChips();clearMessages();
   document.getElementById('welcome').style.display='flex';
-  document.getElementById('save-btn').classList.remove('visible');
+  // autosave handles this
   showTyping(false);if(drawerOpen)toggleDrawer();closeSidebar();ta.focus();
 }
 
@@ -2032,7 +2105,7 @@ document.addEventListener('keydown', e => {
   if (mod && e.key === 'k') { e.preventDefault(); newChat(); return; }
   if (mod && e.key === '/') { e.preventDefault(); toggleSidebar(); return; }
   if (mod && e.key === 'l') { e.preventDefault(); ta.focus(); ta.select(); return; }
-  if (mod && e.key === 's') { e.preventDefault(); saveCurrentChat(); return; }
+  if (mod && e.key === 's') { e.preventDefault(); autoSave(); return; }
 });
 function openShortcuts()  { document.getElementById('shortcuts-overlay').classList.add('open'); }
 function closeShortcuts() { document.getElementById('shortcuts-overlay').classList.remove('open'); }
