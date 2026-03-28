@@ -1,4 +1,4 @@
-const CACHE = 'claude-alt-v1';
+const CACHE = 'claude-alt-v3';
 const PRECACHE = ['/', '/static/manifest.json'];
 
 self.addEventListener('install', e => {
@@ -14,12 +14,13 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  // Network-first for API calls
+  // Network-first for API calls AND HTML pages — always get fresh UI
   if (e.request.url.includes('/agent') || e.request.url.includes('/session') ||
-      e.request.url.includes('/chats') || e.request.url.includes('/providers')) {
+      e.request.url.includes('/chats') || e.request.url.includes('/providers') ||
+      e.request.headers.get('accept')?.includes('text/html')) {
     return;
   }
-  // Cache-first for static assets
+  // Cache-first only for static assets (JS libs, icons, manifest)
   e.respondWith(
     caches.match(e.request).then(cached => {
       if (cached) return cached;
