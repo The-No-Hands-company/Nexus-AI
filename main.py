@@ -152,7 +152,7 @@ async def set_token(sid: str, request: Request):
 # ── chat history ──────────────────────────────────────────────────────────────
 @app.get("/chats")
 def list_chats():
-    pinned_ids = get_pinned_ids()
+    pinned_ids = set(get_pinned_chats())
     def _sort(ch):
         return (ch["id"] not in pinned_ids, ch["updated_at"])
     listed = sorted(chats.values(), key=_sort, reverse=True)
@@ -477,22 +477,22 @@ def get_reactions(chat_id: str = ""):
 def search_chats_endpoint(q: str = ""):
     if not q.strip():
         return {"results": []}
-    return {"results": db_search(q)}
+    return {"results": db_search_chats(q)}
 
 
 # ── pins ──────────────────────────────────────────────────────────────────────
-_pins: set = get_pinned_ids()
+_pins: set = set(get_pinned_chats())
 
 @app.post("/chats/{cid}/pin")
 def pin_chat_endpoint(cid: str):
     _pins.add(cid)
-    db_pin(cid)
+    db_pin_chat(cid, True)
     return {"pinned": cid}
 
 @app.delete("/chats/{cid}/pin")
 def unpin_chat_endpoint(cid: str):
     _pins.discard(cid)
-    db_unpin(cid)
+    db_pin_chat(cid, False)
     return {"unpinned": cid}
 
 @app.get("/chats/pinned")
