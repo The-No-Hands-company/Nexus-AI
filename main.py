@@ -38,7 +38,7 @@ try:
     init_usage_table()
 except Exception:
     pass
-init_pins_table()
+
 
 # Seed chats from DB
 chats: dict[str, dict] = {}
