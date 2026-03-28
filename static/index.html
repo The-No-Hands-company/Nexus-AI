@@ -1681,18 +1681,32 @@ async function send(){
             const qDiv=document.createElement('div');qDiv.className='clarify-q';
             const qText=document.createElement('div');qText.className='clarify-q-text';
             qText.textContent=q.text;qDiv.appendChild(qText);
-            const opts=document.createElement('div');opts.className='clarify-options';
-            (q.options||[]).forEach(opt=>{
-              const btn=document.createElement('button');btn.className='clarify-opt';
-              btn.textContent=opt;
-              btn.onclick=()=>{
-                opts.querySelectorAll('.clarify-opt').forEach(b=>b.classList.remove('selected'));
-                btn.classList.add('selected');
-                answers[q.id||q.text]=opt;
-              };
-              opts.appendChild(btn);
-            });
-            qDiv.appendChild(opts);card.appendChild(qDiv);
+
+            if(q.type==='text'||(!q.options||!q.options.length)){
+              // Free-text input (e.g. GitHub username, repo name)
+              const inp=document.createElement('input');
+              inp.type='text';inp.placeholder=q.placeholder||'Type your answer…';
+              inp.style.cssText='width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:7px 11px;color:var(--text);font-size:.82rem;outline:none;margin-top:2px';
+              inp.addEventListener('focus',()=>inp.style.borderColor='var(--accent)');
+              inp.addEventListener('blur', ()=>inp.style.borderColor='var(--border)');
+              inp.addEventListener('input',()=>{ answers[q.id||q.text]=inp.value.trim(); });
+              qDiv.appendChild(inp);
+            } else {
+              // Multiple choice
+              const opts=document.createElement('div');opts.className='clarify-options';
+              (q.options||[]).forEach(opt=>{
+                const btn=document.createElement('button');btn.className='clarify-opt';
+                btn.textContent=opt;
+                btn.onclick=()=>{
+                  opts.querySelectorAll('.clarify-opt').forEach(b=>b.classList.remove('selected'));
+                  btn.classList.add('selected');
+                  answers[q.id||q.text]=opt;
+                };
+                opts.appendChild(btn);
+              });
+              qDiv.appendChild(opts);
+            }
+            card.appendChild(qDiv);
           });
           // Submit button — sends answers back as a follow-up message
           const sub=document.createElement('button');sub.className='clarify-submit';
