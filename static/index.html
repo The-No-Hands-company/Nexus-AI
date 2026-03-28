@@ -2279,7 +2279,8 @@ async function loadUsageStats() {
       const h = Math.max(4, Math.round(d.calls / maxDaily * 56));
       html += `<div class="usage-day-bar" style="height:${h}px" title="${d.day}: ${d.calls} req"></div>`;
     });
-    html += `</div><div style="display:flex;justify-content:space-between;font-size:.62rem;color:var(--muted);margin-top:3px"><span>${daily[0]?.day||''}</span><span>${daily[daily.length-1]?.day||''}</span></div>`;
+    const d0 = daily[0]?.day||""; const dN = daily[daily.length-1]?.day||"";
+    html += `</div><div style="display:flex;justify-content:space-between;font-size:.62rem;color:var(--muted);margin-top:3px"><span>${d0}</span><span>${dN}</span></div>`;
   }
 
   body.innerHTML = html;
