@@ -374,3 +374,97 @@ def tool_diff(original: str, modified: str, filename: str = "file") -> str:
         diff_text = diff_text[:4000] + "\n… (diff truncated)"
     return f"```diff\n{diff_text}\n```"
 
+
+
+# ── SPREADSHEET (CSV) ─────────────────────────────────────────────────────────
+def tool_read_csv(path: str, workdir: str = "/tmp") -> str:
+    import os, csv
+    full = os.path.join(workdir, path) if not os.path.isabs(path) else path
+    if not os.path.exists(full):
+        return f"File not found: {path}"
+    try:
+        with open(full, newline='', encoding='utf-8', errors='replace') as f:
+            reader = list(csv.reader(f))
+        if not reader:
+            return "Empty CSV."
+        headers = reader[0]
+        rows    = reader[1:51]   # first 50 data rows
+        lines   = [" | ".join(headers)]
+        lines  += ["-+-".join("-" * max(1,len(h)) for h in headers)]
+        for row in rows:
+            lines.append(" | ".join(str(v)[:30] for v in row))
+        suffix = f"\n…({len(reader)-51} more rows)" if len(reader) > 51 else ""
+        return f"**{path}** — {len(reader)-1} rows × {len(headers)} cols\n\n```\n" + "\n".join(lines) + f"\n```{suffix}"
+    except Exception as e:
+        return f"CSV read failed: {e}"
+
+
+def tool_write_csv(path: str, data: list, workdir: str = "/tmp") -> str:
+    """data: list of lists (first row = headers)"""
+    import os, csv
+    full = os.path.join(workdir, path) if not os.path.isabs(path) else path
+    os.makedirs(os.path.dirname(full), exist_ok=True)
+    try:
+        with open(full, 'w', newline='', encoding='utf-8') as f:
+            csv.writer(f).writerows(data)
+        return f"Wrote {path} ({len(data)} rows)"
+    except Exception as e:
+        return f"CSV write failed: {e}"
+
+
+# ── API CALLER ────────────────────────────────────────────────────────────────
+def tool_api_call(method: str, url: str, headers: dict | None = None,
+                  body: dict | str | None = None, timeout: int = 15) -> str:
+    import requests as _r, json as _j
+    BLOCKED_HOSTS = ["169.254.", "192.168.", "10.", "127.", "0.0.0.0", "localhost"]
+    for b in BLOCKED_HOSTS:
+        if b in url:
+            return f"Blocked: cannot call internal/local addresses."
+    try:
+        method = method.upper()
+        hdrs   = {"User-Agent": "ClaudeAlt/1.0", **(headers or {})}
+        kwargs = {"headers": hdrs, "timeout": timeout}
+        if body:
+            if isinstance(body, dict):
+                kwargs["json"] = body
+            else:
+                kwargs["data"] = body
+        resp = getattr(_r, method.lower())(url, **kwargs)
+        ct   = resp.headers.get("Content-Type", "")
+        if "json" in ct:
+            try:
+                data = resp.json()
+                text = _j.dumps(data, indent=2)[:3000]
+            except Exception:
+                text = resp.text[:3000]
+        else:
+            text = resp.text[:3000]
+        return f"**{method} {url}**\nStatus: {resp.status_code}\n\n```\n{text}\n```"
+    except Exception as e:
+        return f"API call failed: {e}"
+
+
+# ── PAGE READER ───────────────────────────────────────────────────────────────
+def tool_read_page(url: str) -> str:
+    """Fetch a webpage and return readable text (strips HTML tags)."""
+    import requests as _r, re as _re, html as _html
+    BLOCKED = ["localhost", "127.", "192.168.", "10.", "169.254."]
+    for b in BLOCKED:
+        if b in url:
+            return "Blocked: internal addresses."
+    try:
+        resp = _r.get(url, headers={"User-Agent":"Mozilla/5.0"},
+                      timeout=15, allow_redirects=True)
+        resp.raise_for_status()
+        text = resp.text
+        # Strip scripts/styles
+        text = _re.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', text, flags=_re.S|_re.I)
+        # Strip tags
+        text = _re.sub(r'<[^>]+>', ' ', text)
+        # Decode entities
+        text = _html.unescape(text)
+        # Collapse whitespace
+        text = _re.sub(r'\s{3,}', '\n\n', text).strip()
+        return text[:5000] + ("…*(truncated)*" if len(text) > 5000 else "")
+    except Exception as e:
+        return f"Page read failed: {e}"

@@ -462,3 +462,65 @@ def load_pref(key: str, default: str = "") -> str:
         return row["value"] if row else default
     except Exception:
         return default
+
+
+# ── USAGE TRACKING ────────────────────────────────────────────────────────────
+
+def init_usage_table() -> None:
+    _conn().executescript("""
+        CREATE TABLE IF NOT EXISTS usage_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          REAL NOT NULL,
+            provider    TEXT NOT NULL,
+            model       TEXT NOT NULL,
+            in_tokens   INTEGER NOT NULL DEFAULT 0,
+            out_tokens  INTEGER NOT NULL DEFAULT 0,
+            task_type   TEXT NOT NULL DEFAULT 'chat'
+        );
+        CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_log(ts DESC);
+    """)
+    _conn().commit()
+
+
+def log_usage(provider: str, model: str, in_tokens: int,
+              out_tokens: int, task_type: str = "chat") -> None:
+    import time as _t
+    try:
+        _conn().execute(
+            "INSERT INTO usage_log(ts,provider,model,in_tokens,out_tokens,task_type) VALUES(?,?,?,?,?,?)",
+            (_t.time(), provider, model, in_tokens, out_tokens, task_type)
+        )
+        _conn().commit()
+    except Exception:
+        pass   # never crash on usage logging
+
+
+def get_usage_stats(days: int = 7) -> dict:
+    import time as _t
+    since = _t.time() - days * 86400
+    rows  = _conn().execute(
+        "SELECT provider, model, COUNT(*) as calls, SUM(in_tokens) as in_tok, SUM(out_tokens) as out_tok "
+        "FROM usage_log WHERE ts >= ? GROUP BY provider, model ORDER BY calls DESC",
+        (since,)
+    ).fetchall()
+    total_row = _conn().execute(
+        "SELECT COUNT(*) as calls, SUM(in_tokens) as in_tok, SUM(out_tokens) as out_tok "
+        "FROM usage_log WHERE ts >= ?", (since,)
+    ).fetchone()
+    return {
+        "days":       days,
+        "total":      dict(total_row) if total_row else {},
+        "by_provider": [dict(r) for r in rows],
+    }
+
+
+def get_usage_daily(days: int = 14) -> list:
+    import time as _t
+    since = _t.time() - days * 86400
+    rows  = _conn().execute(
+        "SELECT date(ts,'unixepoch') as day, COUNT(*) as calls, "
+        "SUM(in_tokens+out_tokens) as tokens "
+        "FROM usage_log WHERE ts >= ? GROUP BY day ORDER BY day",
+        (since,)
+    ).fetchall()
+    return [dict(r) for r in rows]

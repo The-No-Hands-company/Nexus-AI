@@ -17,6 +17,7 @@ from db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats,
                save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci,
                update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory,
                pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats,
+               get_usage_stats, get_usage_daily, init_usage_table,
                save_custom_persona as db_save_persona, load_custom_personas as db_load_personas,
                delete_custom_persona as db_del_persona)
 from personas import list_personas, set_persona, get_active_persona_name, get_persona
@@ -33,6 +34,10 @@ _active_streams: dict[str, threading.Event] = {}
 restore_from_gist()   # pull from Gist before opening DB
 init_db()
 init_projects_table()
+try:
+    init_usage_table()
+except Exception:
+    pass
 init_pins_table()
 
 # Seed chats from DB
@@ -311,6 +316,61 @@ def delete_memory_item(entry_id: int):
     return {"deleted": entry_id}
 
 
+# ── usage dashboard ───────────────────────────────────────────────────────────
+@app.get("/usage")
+def usage_stats(days: int = 7):
+    try:
+        stats = get_usage_stats(days)
+        daily = get_usage_daily(days)
+        return {"stats": stats, "daily": daily}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── provider health ────────────────────────────────────────────────────────────
+@app.get("/providers/health")
+async def provider_health():
+    """Quick pre-flight check on each provider."""
+    import asyncio, time
+    from agent import PROVIDERS, _has_key, _is_rate_limited, _cooldowns
+
+    results = {}
+    for pid, cfg in PROVIDERS.items():
+        has_key = _has_key(cfg)
+        cooling = _is_rate_limited(pid)
+        cd_left = max(0, int(_cooldowns.get(pid, 0) - time.time()))
+        results[pid] = {
+            "label":     cfg["label"],
+            "has_key":   has_key,
+            "cooling":   cooling,
+            "cd_left":   cd_left,
+            "available": has_key and not cooling,
+        }
+    return {"health": results, "ts": time.time()}
+
+
+# ── message reactions ─────────────────────────────────────────────────────────
+_reactions: dict[str, dict] = {}   # {reaction_id: {chat_id, msg_idx, reaction}}
+
+@app.post("/reactions")
+async def add_reaction(request: Request):
+    data = await request.json()
+    rid  = str(uuid.uuid4())[:8]
+    _reactions[rid] = {
+        "chat_id":  data.get("chat_id"),
+        "msg_idx":  data.get("msg_idx"),
+        "reaction": data.get("reaction"),   # "up" or "down"
+        "text":     data.get("text","")[:200],
+    }
+    return {"id": rid}
+
+@app.get("/reactions")
+def get_reactions(chat_id: str = ""):
+    if chat_id:
+        return {"reactions": {k:v for k,v in _reactions.items() if v.get("chat_id")==chat_id}}
+    return {"reactions": _reactions}
+
+
 # ── search ────────────────────────────────────────────────────────────────────
 @app.get("/chats/search")
 def search_chats_endpoint(q: str = ""):
@@ -355,6 +415,61 @@ async def create_custom_persona(request: Request):
 def delete_custom_persona_endpoint(pid: str):
     db_del_persona(pid)
     return {"deleted": pid}
+
+
+# ── usage dashboard ───────────────────────────────────────────────────────────
+@app.get("/usage")
+def usage_stats(days: int = 7):
+    try:
+        stats = get_usage_stats(days)
+        daily = get_usage_daily(days)
+        return {"stats": stats, "daily": daily}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── provider health ────────────────────────────────────────────────────────────
+@app.get("/providers/health")
+async def provider_health():
+    """Quick pre-flight check on each provider."""
+    import asyncio, time
+    from agent import PROVIDERS, _has_key, _is_rate_limited, _cooldowns
+
+    results = {}
+    for pid, cfg in PROVIDERS.items():
+        has_key = _has_key(cfg)
+        cooling = _is_rate_limited(pid)
+        cd_left = max(0, int(_cooldowns.get(pid, 0) - time.time()))
+        results[pid] = {
+            "label":     cfg["label"],
+            "has_key":   has_key,
+            "cooling":   cooling,
+            "cd_left":   cd_left,
+            "available": has_key and not cooling,
+        }
+    return {"health": results, "ts": time.time()}
+
+
+# ── message reactions ─────────────────────────────────────────────────────────
+_reactions: dict[str, dict] = {}   # {reaction_id: {chat_id, msg_idx, reaction}}
+
+@app.post("/reactions")
+async def add_reaction(request: Request):
+    data = await request.json()
+    rid  = str(uuid.uuid4())[:8]
+    _reactions[rid] = {
+        "chat_id":  data.get("chat_id"),
+        "msg_idx":  data.get("msg_idx"),
+        "reaction": data.get("reaction"),   # "up" or "down"
+        "text":     data.get("text","")[:200],
+    }
+    return {"id": rid}
+
+@app.get("/reactions")
+def get_reactions(chat_id: str = ""):
+    if chat_id:
+        return {"reactions": {k:v for k,v in _reactions.items() if v.get("chat_id")==chat_id}}
+    return {"reactions": _reactions}
 
 
 # ── search ───────────────────────────────────────────────────────────────────
