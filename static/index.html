@@ -4,6 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Claude Alt</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#7c6af7">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Claude Alt">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#7c6af7">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Claude Alt">
+  <link rel="apple-touch-icon" href="/static/icon-192.svg">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -24,6 +36,44 @@
 
     /* ── LAYOUT ── */
     #app{flex:1;display:flex;overflow:hidden;min-height:0}
+
+
+    /* ── PERSONA SWITCHER ── */
+    .persona-strip{display:flex;gap:6px;padding:8px 14px;
+      border-bottom:1px solid var(--border);background:var(--surface);
+      overflow-x:auto;flex-shrink:0;-webkit-overflow-scrolling:touch}
+    .persona-strip::-webkit-scrollbar{display:none}
+    .persona-btn{display:flex;align-items:center;gap:5px;
+      padding:5px 12px;border-radius:99px;border:1px solid var(--border);
+      background:none;color:var(--muted);font-size:.72rem;font-weight:600;
+      cursor:pointer;transition:all .15s;white-space:nowrap;flex-shrink:0;
+      -webkit-tap-highlight-color:transparent}
+    .persona-btn:hover{border-color:var(--accent);color:var(--text)}
+    .persona-btn.active{color:#fff;border-color:transparent}
+    .persona-btn .p-icon{font-size:14px}
+
+    /* ── IMAGE BUBBLE ── */
+    .img-bubble{margin:4px 0;border-radius:12px;overflow:hidden;
+      max-width:min(400px,80vw);animation:fadeUp .2s ease}
+    .img-bubble img{width:100%;display:block;border-radius:12px;
+      cursor:pointer;transition:transform .15s}
+    .img-bubble img:hover{transform:scale(1.02)}
+    .img-prompt{font-size:.65rem;color:var(--muted);padding:4px 6px;
+      font-style:italic;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
+
+    /* ── PWA INSTALL BANNER ── */
+    #install-banner{display:none;align-items:center;justify-content:space-between;
+      background:color-mix(in srgb,var(--accent)12%,var(--surface));
+      border-bottom:1px solid color-mix(in srgb,var(--accent)25%,transparent);
+      padding:8px 14px;font-size:.75rem;gap:10px;flex-shrink:0}
+    #install-banner.show{display:flex}
+    .install-text{color:var(--text);flex:1}
+    .install-text span{color:var(--accent);font-weight:600}
+    .btn-install{background:var(--accent);color:#fff;border:none;
+      border-radius:7px;padding:5px 14px;font-size:.73rem;
+      font-weight:600;cursor:pointer}
+    .btn-install-dismiss{background:none;border:none;color:var(--muted);
+      cursor:pointer;font-size:18px;line-height:1;padding:0 4px}
 
     /* ── SIDEBAR ── */
     #sidebar{width:var(--sidebar-w);flex-shrink:0;background:var(--surface);
@@ -250,6 +300,37 @@
     .plan-step-num{color:var(--accent);font-weight:700;font-size:.72rem;flex-shrink:0}
 
 
+
+    /* persona switcher */
+    .persona-switcher{display:flex;gap:5px;padding:6px 14px;
+      border-bottom:1px solid var(--border);background:var(--surface);
+      overflow-x:auto;flex-shrink:0;-webkit-overflow-scrolling:touch}
+    .persona-switcher::-webkit-scrollbar{display:none}
+    .persona-btn{display:flex;align-items:center;gap:5px;
+      padding:5px 12px;border-radius:99px;border:1px solid var(--border);
+      background:var(--bg);color:var(--muted);cursor:pointer;
+      font-size:.73rem;font-weight:500;white-space:nowrap;
+      transition:all .14s;-webkit-tap-highlight-color:transparent;flex-shrink:0}
+    .persona-btn:hover{border-color:var(--accent);color:var(--text)}
+    .persona-btn.active{border-color:var(--accent);
+      background:color-mix(in srgb,var(--accent)15%,transparent);
+      color:var(--text);font-weight:600}
+    /* install prompt */
+    #install-prompt{display:none;position:fixed;bottom:80px;left:50%;
+      transform:translateX(-50%);z-index:40;
+      background:var(--surface);border:1px solid var(--border);
+      border-radius:12px;padding:12px 16px;
+      display:flex;align-items:center;gap:10px;font-size:.8rem;
+      box-shadow:0 8px 32px rgba(0,0,0,.4);max-width:320px;width:90%}
+    #install-prompt.show{display:flex}
+    .install-btn{background:var(--accent);color:#fff;border:none;
+      border-radius:8px;padding:6px 14px;font-size:.78rem;
+      font-weight:600;cursor:pointer;white-space:nowrap}
+    .install-dismiss{background:none;border:none;color:var(--muted);
+      cursor:pointer;font-size:18px;line-height:1;padding:0 2px}
+    /* image in bubble */
+    .bubble img{max-width:100%;border-radius:8px;margin:.4em 0;display:block}
+
     /* artifact renderer */
     .artifact-wrap{margin:6px 0;border:1px solid var(--border);border-radius:10px;overflow:hidden;animation:fadeUp .18s ease}
     .artifact-header{display:flex;align-items:center;justify-content:space-between;
@@ -392,6 +473,13 @@
   <button class="btn-icon" onclick="openSettings()" title="Settings">⚙</button>
 </header>
 
+<!-- PWA install banner -->
+<div id="install-banner">
+  <div class="install-text">Add <span>Claude Alt</span> to your home screen for the best experience</div>
+  <button class="btn-install" id="install-btn">Install</button>
+  <button class="btn-install-dismiss" onclick="dismissInstall()">×</button>
+</div>
+
 <div id="app">
   <div id="sidebar" class="hidden">
     <div class="sidebar-head">
@@ -408,6 +496,11 @@
   </div>
 
   <div id="main">
+    <!-- Persona strip -->
+    <div class="persona-strip" id="persona-strip">
+      <!-- filled by JS -->
+    </div>
+
     <div id="drawer">
       <div class="drawer-inner">
         <div class="drawer-head">
@@ -420,6 +513,8 @@
         </div>
       </div>
     </div>
+
+    <div id="persona-switcher" class="persona-switcher"></div>
 
     <div id="chat">
       <div id="welcome">
@@ -468,6 +563,56 @@
 </div>
 
 <script>
+marked.setOptions({breaks:true,gfm:true});
+
+// ── PWA SERVICE WORKER ────────────────────────────────────────────────────────
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/sw.js').catch(()=>{});
+}
+let deferredInstall=null;
+window.addEventListener('beforeinstallprompt',e=>{
+  e.preventDefault(); deferredInstall=e;
+  document.getElementById('install-banner').classList.add('show');
+});
+document.getElementById('install-btn')?.addEventListener('click',async()=>{
+  if(!deferredInstall) return;
+  deferredInstall.prompt();
+  const {outcome}=await deferredInstall.userChoice;
+  deferredInstall=null;
+  document.getElementById('install-banner').classList.remove('show');
+});
+function dismissInstall(){
+  document.getElementById('install-banner').classList.remove('show');
+  localStorage.setItem('install-dismissed','1');
+}
+if(localStorage.getItem('install-dismissed')){
+  // don't show again this session
+}
+
+// ── HAPTIC HELPER ─────────────────────────────────────────────────────────────
+function haptic(type='light'){
+  if(!navigator.vibrate) return;
+  if(type==='light') navigator.vibrate(10);
+  else if(type==='medium') navigator.vibrate(25);
+  else if(type==='success') navigator.vibrate([10,50,10]);
+}
+
+// ── SWIPE TO OPEN SIDEBAR ─────────────────────────────────────────────────────
+(()=>{
+  let startX=0, startY=0;
+  document.addEventListener('touchstart',e=>{
+    startX=e.touches[0].clientX;
+    startY=e.touches[0].clientY;
+  },{passive:true});
+  document.addEventListener('touchend',e=>{
+    const dx=e.changedTouches[0].clientX-startX;
+    const dy=Math.abs(e.changedTouches[0].clientY-startY);
+    if(dy>40) return; // vertical swipe — ignore
+    if(dx>60 && startX<40 && !sidebarOpen){toggleSidebar();haptic('light')}
+    if(dx<-60 && sidebarOpen){closeSidebar();haptic('light')}
+  },{passive:true});
+})();
+
 marked.setOptions({breaks:true,gfm:true});
 
 let sid=null, busy=false, drawerOpen=false, sidebarOpen=false;
@@ -526,6 +671,46 @@ function addSysMsg(text){
 }
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
+// ── PERSONAS ──────────────────────────────────────────────────────────────────
+let activePersona = {id:'assistant',icon:'🤖',label:'Assistant',color:'#7c6af7'};
+
+async function loadPersonas(){
+  const d=await fetch('/personas').then(r=>r.json()).catch(()=>({personas:[],active:'assistant'}));
+  renderPersonaStrip(d.personas||[],d.active||'assistant');
+  const found=(d.personas||[]).find(p=>p.id===d.active);
+  if(found) setActivePersonaUI(found);
+}
+
+function renderPersonaStrip(personas,activeId){
+  const strip=document.getElementById('persona-strip');
+  strip.innerHTML=personas.map(p=>`
+    <button class="persona-btn ${p.id===activeId?'active':''}" id="pb-${p.id}"
+      onclick="switchPersona('${p.id}')"
+      style="${p.id===activeId?`background:${p.color};border-color:${p.color}`:''}">
+      <span class="p-icon">${p.icon}</span>${p.label}
+    </button>`).join('');
+}
+
+async function switchPersona(id){
+  haptic('light');
+  const d=await fetch(`/personas/${id}`,{method:'POST'}).then(r=>r.json()).catch(()=>null);
+  if(!d) return;
+  await loadPersonas();
+  const personas=await fetch('/personas').then(r=>r.json()).then(d=>d.personas).catch(()=>[]);
+  const p=personas.find(x=>x.id===id);
+  if(p) setActivePersonaUI(p);
+}
+
+function setActivePersonaUI(p){
+  activePersona=p;
+  // Update theme color
+  document.querySelector('meta[name=theme-color]')?.setAttribute('content',p.color);
+  // Update accent CSS var
+  document.documentElement.style.setProperty('--accent',p.color);
+  const accentD=p.color+'cc';
+  document.documentElement.style.setProperty('--accent-d',accentD);
+}
+
 async function init(){
   const [,pd,sd,cfg] = await Promise.all([
     fetch('/health').then(r=>r.json()).catch(()=>({})),
@@ -538,7 +723,7 @@ async function init(){
   updateProviderUI(pd.providers||[]);
   populateSettings(cfg, pd.providers||[]);
   setInterval(refreshProviders, 15000);
-  await Promise.all([loadChatList(), loadMemoryCount()]);
+  await Promise.all([loadChatList(), loadMemoryCount(), loadPersonas()]);
   setupDrop();
   setupVoice();
 }
@@ -840,6 +1025,7 @@ async function send(){
     document.getElementById('token-bar').style.display='flex';
   }
   setBusy(true);
+  haptic('medium');
   if(drawerOpen) toggleDrawer();
   if(isListening){voiceRecognition?.stop();setListening(false)}
 
@@ -859,6 +1045,8 @@ async function send(){
 
   const files=[...attachedFiles];
   attachedFiles=[];renderFileChips();
+  // Store task for clarify continuation
+  window._lastTask = val;
   ta.value='';ta.style.height='auto';
   showTyping(true);
 
@@ -919,7 +1107,9 @@ async function send(){
               .map(([k,v])=>`${k}: ${v}`).join('\n');
             if(!answerText){alert('Please select at least one option.');return}
             card.style.opacity='.5';card.style.pointerEvents='none';
-            ta.value=answerText;
+            // Include original task so agent has full context
+            const original=window._lastTask||'';
+            ta.value=`[Clarification answers for: "${original}"]\n${answerText}\n\nNow proceed with the original task.`;
             await new Promise(r=>setTimeout(r,100));
             send();
           };
@@ -955,7 +1145,7 @@ async function send(){
         } else if(evt.type==='system'){
           addSysMsg(evt.message||'');
 
-        } else if(evt.type==='tool'){
+        } else if(evt.type==='tool'){haptic('light');
           if(!toolContainer){toolContainer=document.createElement('div');agentBub.appendChild(toolContainer)}
           const el=document.createElement('div');el.className='tool-step';
           el.innerHTML=`<span class="t-icon">${esc(evt.icon)}</span>
@@ -970,12 +1160,25 @@ async function send(){
           }
           scrollBottom();
 
+        } else if(evt.type==='image'){
+          // Render image inline
+          const imgWrap=document.createElement('div');imgWrap.className='img-bubble';
+          const img=document.createElement('img');
+          img.src=evt.url;
+          img.alt=evt.prompt||'Generated image';
+          img.loading='lazy';
+          img.onclick=()=>window.open(evt.url,'_blank');
+          const prompt=document.createElement('div');
+          prompt.className='img-prompt';prompt.textContent=evt.prompt||'';
+          imgWrap.appendChild(img);imgWrap.appendChild(prompt);
+          agentBub.appendChild(imgWrap);scrollBottom();
+
         } else if(evt.type==='fallback'){
           const tag=document.createElement('div');tag.className='fallback-tag';
           tag.innerHTML=`↩️ Auto-fallback: ${esc(evt.chain)}`;
           agentBub.insertBefore(tag,agentBub.firstChild);
 
-        } else if(evt.type==='done'){
+        } else if(evt.type==='done'){haptic('success');
           if(toolContainer){agentBub.appendChild(document.createElement('hr'))}
           const textNode=document.createElement('div');
           agentBub.appendChild(textNode);
@@ -1035,5 +1238,10 @@ function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 
 init();
 </script>
+<div id="install-prompt">
+  <span>📱 Install Claude Alt as an app</span>
+  <button class="install-btn" onclick="installPWA()">Install</button>
+  <button class="install-dismiss" onclick="dismissInstall()">×</button>
+</div>
 </body>
 </html>

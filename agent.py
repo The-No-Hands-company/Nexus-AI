@@ -2,18 +2,21 @@ import os, re, json, glob, time, subprocess, threading, resource
 from datetime import datetime
 from typing import Dict, Any, List, Iterator, Optional
 from tools_builtin import dispatch_builtin
+from personas import build_system_prompt, get_active_persona_name, get_persona
 
 # ── runtime config ────────────────────────────────────────────────────────────
 _config: Dict[str, Any] = {
     "provider":    os.getenv("PROVIDER", "auto").lower(),
     "model":       os.getenv("LLM_MODEL", ""),
     "temperature": float(os.getenv("LLM_TEMPERATURE", "0.2")),
+    "persona":     os.getenv("PERSONA", "general"),
 }
 def get_config() -> Dict[str, Any]: return dict(_config)
-def update_config(provider=None, model=None, temperature=None):
+def update_config(provider=None, model=None, temperature=None, persona=None):
     if provider    is not None: _config["provider"]    = provider.lower()
     if model       is not None: _config["model"]       = model
     if temperature is not None: _config["temperature"] = float(temperature)
+    if persona     is not None: _config["persona"]     = persona
     return dict(_config)
 
 # ── env ───────────────────────────────────────────────────────────────────────
@@ -148,6 +151,64 @@ def _smart_order(task: str) -> List[str]:
         ordered.remove(pref); ordered.insert(0, pref)
     return ordered
 
+# ── personas ──────────────────────────────────────────────────────────────────
+PERSONAS: Dict[str, Dict] = {
+    "general": {
+        "label": "General",
+        "emoji": "⚡",
+        "description": "Balanced assistant for any task",
+        "temperature": 0.2,
+        "system_extra": "",
+    },
+    "coder": {
+        "label": "Coder",
+        "emoji": "💻",
+        "description": "Focused on writing, reviewing and shipping code",
+        "temperature": 0.1,
+        "system_extra": (
+            "You are in CODER mode. Prioritise: write_file, run_command, read_file, commit_push. "
+            "Always write complete, production-quality code. Add error handling and comments. "
+            "Prefer plan → write files → run tests → commit. Never leave TODOs without implementing them."
+        ),
+    },
+    "researcher": {
+        "label": "Researcher",
+        "emoji": "🔬",
+        "description": "Deep dives, web research and structured summaries",
+        "temperature": 0.3,
+        "system_extra": (
+            "You are in RESEARCHER mode. Prioritise: web_search, respond with citations. "
+            "Do multiple searches to cross-reference. Structure responses with headers, "
+            "bullet points, and sources. Be thorough — search at least 3 angles before concluding. "
+            "Always note confidence level and limitations of the information found."
+        ),
+    },
+    "creative": {
+        "label": "Creative",
+        "emoji": "🎨",
+        "description": "Writing, brainstorming, image prompts and ideas",
+        "temperature": 0.8,
+        "system_extra": (
+            "You are in CREATIVE mode. Be imaginative, expressive and original. "
+            "For writing tasks: vary sentence length, use vivid language, show don't tell. "
+            "For image generation: craft rich detailed prompts (style, lighting, mood, composition). "
+            "Use image_gen to visualise ideas. Suggest unexpected angles and perspectives."
+        ),
+    },
+}
+
+def get_active_persona() -> Dict:
+    return PERSONAS.get(_config["persona"], PERSONAS["general"])
+
+def get_system_prompt() -> str:
+    """Build the system prompt for the current persona."""
+    persona = get_active_persona()
+    extra = persona["system_extra"]
+    base = TOOLS_DESCRIPTION
+    if extra:
+        base = base.rstrip() + f"\n\nPersona instructions:\n{extra}\n"
+    return base
+
 # ── system prompt ─────────────────────────────────────────────────────────────
 TOOLS_DESCRIPTION = """You are a self-hosted code agent. Smart, structured, builds things properly.
 
@@ -161,6 +222,7 @@ Available actions:
   { "action": "respond",    "content": "<markdown>" }
   { "action": "get_time",   "timezone": "Europe/Stockholm" }
   { "action": "web_search", "query": "search terms" }
+  { "action": "image_gen",  "prompt": "a cyberpunk city at night, neon lights, rain", "width": 512, "height": 512 }
   { "action": "calculate",  "expr": "2 ** 32 / 1024" }
   { "action": "weather",    "location": "Stockholm" }
   { "action": "currency",   "amount": 100, "from": "USD", "to": "SEK" }
@@ -168,6 +230,7 @@ Available actions:
   { "action": "regex",      "pattern": "\\d+", "text": "abc 123", "flags": "i" }
   { "action": "base64",     "text": "hello", "mode": "encode" }
   { "action": "json_format","text": "{\"a\":1}" }
+  { "action": "generate_image","prompt": "a glowing neon city at night","width": 1024,"height": 1024 }
   { "action": "write_file", "path": "src/app.py", "content": "..." }
   { "action": "read_file",  "path": "README.md" }
   { "action": "list_files", "pattern": "**/*.py" }
@@ -183,7 +246,8 @@ Rules:
 - commit_push: always include repo_url so the right repo gets pushed.
 - run_command: no rm -rf, sudo, or destructive ops.
 - get_time for any time/date question — never web_search for this.
-- calculate/weather/currency/convert for math, weather, money, units — don't web_search these.
+- calculate/weather/currency/convert for math, weather, money, units.
+- image_gen for any request to generate, draw, create, or visualise an image.
 - write_file produces artifacts if it's HTML/SVG/CSS+JS — the UI will render them.
 - Never ask for info you can get with tools.
 """
@@ -223,6 +287,16 @@ def tool_web_search(query: str) -> str:
         if not results: return "No results found."
         return "\n\n".join(f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results)
     except Exception as e: return f"Search failed: {e}"
+
+def tool_image_gen(prompt: str, width: int = 512, height: int = 512) -> str:
+    """Generate image via Pollinations.ai — completely free, no API key."""
+    import urllib.parse
+    w = min(max(int(width), 256), 1024)
+    h = min(max(int(height), 256), 1024)
+    encoded = urllib.parse.quote(prompt)
+    # Pollinations returns a direct image URL
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&nologo=true"
+    return f"![Generated image]({url})\n\n*Prompt: {prompt}*"
 
 def tool_write_file(path: str, content: str, workdir: str) -> str:
     full = os.path.join(workdir, path)
@@ -366,7 +440,7 @@ def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
         cfg["base_url"].rstrip("/")+"/chat/completions",
         headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"},
         json={"model":_config["model"] or cfg["default_model"],
-              "messages":[{"role":"system","content":TOOLS_DESCRIPTION}]+messages,
+              "messages":[{"role":"system","content":get_system_prompt()}]+messages,
               "temperature":_config["temperature"],"max_tokens":4096},
         timeout=90)
     resp.raise_for_status()
@@ -377,8 +451,8 @@ def _call_grok(messages):
     resp = requests.post("https://api.x.ai/v1/chat/completions",
         headers={"Authorization":f"Bearer {os.getenv('GROK_API_KEY','')}","Content-Type":"application/json"},
         json={"model":_config["model"] or "grok-3",
-              "messages":[{"role":"system","content":TOOLS_DESCRIPTION}]+messages,
-              "temperature":_config["temperature"],"max_tokens":4096},timeout=90)
+              "messages":[{"role":"system","content":get_system_prompt()}]+messages,
+              "temperature":_config["temperature"] or get_active_persona()["temperature"],"max_tokens":4096},timeout=90)
     resp.raise_for_status()
     return _parse_json(resp.json()["choices"][0]["message"]["content"])
 
@@ -387,8 +461,8 @@ def _call_claude_api(messages):
     resp = requests.post("https://api.anthropic.com/v1/messages",
         headers={"x-api-key":os.getenv("CLAUDE_API_KEY",""),"anthropic-version":"2023-06-01","Content-Type":"application/json"},
         json={"model":_config["model"] or "claude-sonnet-4-20250514",
-              "system":TOOLS_DESCRIPTION,"messages":messages,
-              "temperature":_config["temperature"],"max_tokens":4096},timeout=90)
+              "system":get_system_prompt(),"messages":messages,
+              "temperature":_config["temperature"] or get_active_persona()["temperature"],"max_tokens":4096},timeout=90)
     resp.raise_for_status()
     return _parse_json(resp.json()["content"][0]["text"])
 
@@ -421,10 +495,10 @@ def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, 
 # ── tool icons ────────────────────────────────────────────────────────────────
 TOOL_ICONS = {
     "clarify":"❓","plan":"📋","think":"💭","get_time":"🕐",
-    "web_search":"🔍","calculate":"🧮","weather":"🌤️","currency":"💱",
+    "web_search":"🔍","image_gen":"🎨","calculate":"🧮","weather":"🌤️","currency":"💱",
     "convert":"📐","regex":"🔎","base64":"🔡","json_format":"📄",
     "write_file":"📝","read_file":"📖","list_files":"📂","delete_file":"🗑️",
-    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀",
+    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","generate_image":"🎨",
 }
 
 # ── streaming agent ───────────────────────────────────────────────────────────
@@ -508,10 +582,13 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
         if kind == "clarify":
             yield {"type":"clarify","questions":action.get("questions",[])}
+            # Preserve full message history — when user answers, the next
+            # stream call receives this history and continues with full context
             messages.append({"role":"assistant","content":json.dumps(action)})
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "",{})
             yield {"type":"done","content":"","provider":cfg.get("label","?"),
-                   "model":_config["model"] or cfg.get("default_model","?"),"history":messages}
+                   "model":_config["model"] or cfg.get("default_model","?"),
+                   "history":messages}   # full history returned and stored in session
             return
 
         if kind == "plan":
@@ -545,6 +622,16 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                  action.get("timezone") or kind)
 
         if builtin_result is not None:
+            # Image generation returns a dict with url
+            if isinstance(builtin_result, dict) and "url" in builtin_result:
+                yield {"type":"image","url":builtin_result["url"],
+                       "prompt":builtin_result.get("prompt",""),
+                       "width":builtin_result.get("width",1024),
+                       "height":builtin_result.get("height",1024)}
+                img_result_str = f"Image generated: {builtin_result['url']}"
+                messages.append({"role":"assistant","content":json.dumps(action)})
+                messages.append({"role":"user","content":f"Image generated successfully. URL: {builtin_result['url']}\n\nContinue."})
+                continue
             yield {"type":"tool","icon":icon,"action":kind,"label":str(label)[:120],
                    "result":str(builtin_result)[:600],"file_path":None,"file_content":None}
             messages.append({"role":"assistant","content":json.dumps(action)})
@@ -569,6 +656,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 result = tool_list_files(action.get("pattern","**/*"), workdir)
             elif kind == "delete_file":
                 result = tool_delete_file(action.get("path",""), workdir)
+            elif kind == "image_gen":
+                result = tool_image_gen(
+                    action.get("prompt",""), action.get("width",512), action.get("height",512))
             elif kind == "run_command":
                 result = tool_run_command(action.get("cmd",""), workdir)
             elif kind == "clone_repo":

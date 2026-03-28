@@ -5,7 +5,9 @@ from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from agent import (run_agent_task, stream_agent_task, get_providers_list,
                    get_config, update_config, call_llm_with_fallback,
-                   get_session_dir, set_session_token, _session_state)
+                   get_session_dir, set_session_token, _session_state,
+                   _config, PERSONAS)
+from personas import list_personas, set_persona, get_active_persona_name, get_persona
 from memory import (add_memory, get_memory_context, summarize_history,
                     delete_all as delete_all_memory, get_all as get_all_memory)
 
@@ -39,6 +41,24 @@ def providers(): return {"providers":get_providers_list()}
 
 
 # ── settings ──────────────────────────────────────────────────────────────────
+@app.get("/manifest.json")
+def manifest():
+    return FileResponse("static/manifest.json", media_type="application/manifest+json")
+
+@app.get("/sw.js")
+def service_worker():
+    return FileResponse("static/sw.js", media_type="application/javascript",
+                        headers={"Service-Worker-Allowed": "/"})
+
+@app.get("/personas")
+def get_personas():
+    return {"personas": list_personas(), "active": get_active_persona_name()}
+
+@app.post("/personas/{persona_id}")
+def switch_persona(persona_id: str):
+    p = set_persona(persona_id)
+    return {"active": persona_id, "persona": p}
+
 @app.get("/settings")
 def get_settings(): return get_config()
 
@@ -47,7 +67,17 @@ async def post_settings(request: Request):
     data = await request.json()
     return update_config(provider=data.get("provider"),
                          model=data.get("model"),
-                         temperature=data.get("temperature"))
+                         temperature=data.get("temperature"),
+                         persona=data.get("persona"))
+
+@app.get("/personas")
+def list_personas():
+    active = _config["persona"]
+    return {"personas": [
+        {"id": k, "label": v["label"], "emoji": v["emoji"],
+         "description": v["description"], "active": k == active}
+        for k, v in PERSONAS.items()
+    ]}
 
 
 # ── memory ────────────────────────────────────────────────────────────────────
