@@ -15,7 +15,10 @@ from db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats,
                load_projects as db_load_projects, delete_project as db_delete_project,
                assign_chat_to_project, get_project_chats,
                save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci,
-               update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory)
+               update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory,
+               pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats,
+               save_custom_persona as db_save_persona, load_custom_personas as db_load_personas,
+               delete_custom_persona as db_del_persona)
 from personas import list_personas, set_persona, get_active_persona_name, get_persona
 from memory import (add_memory, get_memory_context, summarize_history,
                     delete_all as delete_all_memory, get_all as get_all_memory)
@@ -301,6 +304,52 @@ async def update_memory(entry_id: int, request: Request):
 def delete_memory_item(entry_id: int):
     db_delete_memory(entry_id)
     return {"deleted": entry_id}
+
+
+# ── search ────────────────────────────────────────────────────────────────────
+@app.get("/chats/search")
+def search_chats_endpoint(q: str = ""):
+    if not q.strip():
+        return {"results": []}
+    return {"results": db_search_chats(q)}
+
+
+# ── pin ────────────────────────────────────────────────────────────────────────
+@app.post("/chats/{cid}/pin")
+async def pin_chat_endpoint(cid: str, request: Request):
+    data   = await request.json()
+    pinned = data.get("pinned", True)
+    db_pin_chat(cid, pinned)
+    if cid in chats:
+        chats[cid]["pinned"] = pinned
+    return {"pinned": pinned}
+
+
+# ── custom personas ────────────────────────────────────────────────────────────
+@app.get("/personas/custom")
+def list_custom_personas():
+    return {"personas": db_load_personas()}
+
+@app.post("/personas/custom")
+async def create_custom_persona(request: Request):
+    data = await request.json()
+    pid  = data.get("id") or str(uuid.uuid4())
+    db_save_persona(
+        pid,
+        data.get("name","Custom"),
+        data.get("icon","🤖"),
+        data.get("description",""),
+        data.get("prompt_prefix",""),
+        data.get("color","#7c6af7"),
+        float(data.get("temperature",0.2)),
+        data.get("tier","medium"),
+    )
+    return {"id": pid}
+
+@app.delete("/personas/custom/{pid}")
+def delete_custom_persona_endpoint(pid: str):
+    db_del_persona(pid)
+    return {"deleted": pid}
 
 
 # ── agent ─────────────────────────────────────────────────────────────────────

@@ -88,7 +88,7 @@ Track what's been built, what's in progress, and what's coming next.
 
 ## 🔜 In Progress / Next Up
 
-- [ ] **Persistence** — SQLite storage so chats, memory and sessions survive restarts
+- [x] **Persistence** — SQLite storage so chats, memory and sessions survive restarts
 - [ ] **Streaming token counter** — input/output token count per response
 - [ ] **Conversation search** — full-text search across saved chats
 - [ ] **Pinned chats** — keep important conversations at top of sidebar
@@ -125,8 +125,8 @@ Track what's been built, what's in progress, and what's coming next.
 - [ ] **Keyboard shortcuts** — Cmd+K new chat, Cmd+/ sidebar, Esc stop
 - [ ] **Message reactions** — thumbs up/down for quality feedback
 - [ ] **Custom persona editor** — create personas with custom system prompts and colors
-- [ ] **Multi-file artifact viewer** — tabbed view when agent creates multiple related files
-- [ ] **Resizable split view** — chat on left, artifact preview on right
+- [x] **Multi-file artifact viewer** — tabbed view when agent creates multiple related files
+- [x] **Resizable split view** — chat on left, artifact preview on right
 
 ---
 

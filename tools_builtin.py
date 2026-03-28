@@ -205,3 +205,181 @@ def tool_generate_image(prompt: str, width: int = 1024, height: int = 1024,
     url     = (f"https://image.pollinations.ai/prompt/{encoded}"
                f"?width={width}&height={height}&model={model}&seed={seed}&nologo=true")
     return {"url": url, "prompt": prompt, "width": width, "height": height}
+
+
+# ── YOUTUBE TRANSCRIPT ────────────────────────────────────────────────────────
+def tool_youtube_transcript(url: str) -> str:
+    """Extract subtitles/transcript from a YouTube video using yt-dlp."""
+    try:
+        import yt_dlp, tempfile, os, json as _json
+        opts = {
+            "skip_download": True,
+            "writeautomaticsub": True,
+            "writesubtitles": True,
+            "subtitleslangs": ["en", "en-US"],
+            "subtitlesformat": "json3",
+            "quiet": True,
+            "no_warnings": True,
+            "outtmpl": os.path.join(tempfile.gettempdir(), "%(id)s.%(ext)s"),
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            vid_id  = info.get("id","")
+            title   = info.get("title","")
+            duration= info.get("duration", 0)
+
+        # Find downloaded subtitle file
+        tmp = tempfile.gettempdir()
+        for ext in [f"{vid_id}.en.json3", f"{vid_id}.en-US.json3"]:
+            fpath = os.path.join(tmp, ext)
+            if os.path.exists(fpath):
+                with open(fpath) as f:
+                    data = _json.load(f)
+                texts = []
+                for event in data.get("events", []):
+                    for seg in event.get("segs", []):
+                        t = seg.get("utf8", "").strip()
+                        if t and t != "\n":
+                            texts.append(t)
+                transcript = " ".join(texts)
+                os.remove(fpath)
+                mins = duration // 60
+                return (f"**{title}** ({mins}m)\n\n"
+                        f"{transcript[:4000]}"
+                        + (" …*(truncated)*" if len(transcript) > 4000 else ""))
+        return f"No English subtitles found for: {title or url}"
+    except Exception as e:
+        return f"YouTube transcript failed: {e}"
+
+
+# ── PDF READER ────────────────────────────────────────────────────────────────
+def tool_read_pdf(path: str, workdir: str = "/tmp") -> str:
+    """Extract text from a PDF file."""
+    import os
+    full = os.path.join(workdir, path) if not os.path.isabs(path) else path
+    if not os.path.exists(full):
+        return f"File not found: {path}"
+    try:
+        import fitz   # PyMuPDF
+        doc   = fitz.open(full)
+        pages = []
+        for i, page in enumerate(doc):
+            text = page.get_text().strip()
+            if text:
+                pages.append(f"--- Page {i+1} ---\n{text}")
+            if sum(len(p) for p in pages) > 6000:
+                pages.append("*(truncated — too long)*")
+                break
+        doc.close()
+        return "\n\n".join(pages) if pages else "No text found in PDF."
+    except ImportError:
+        return "PDF reading requires PyMuPDF (pip install pymupdf)"
+    except Exception as e:
+        return f"PDF read failed: {e}"
+
+
+# ── DIFF VIEWER ───────────────────────────────────────────────────────────────
+def tool_diff(original: str, modified: str, filename: str = "file") -> str:
+    """Generate a unified diff between two strings."""
+    import difflib
+    orig_lines = original.splitlines(keepends=True)
+    mod_lines  = modified.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(
+        orig_lines, mod_lines,
+        fromfile=f"a/{filename}", tofile=f"b/{filename}", lineterm=""
+    ))
+    if not diff:
+        return "No changes."
+    return "```diff\n" + "".join(diff[:200]) + ("…" if len(diff)>200 else "") + "\n```"
+
+
+# ── YOUTUBE TRANSCRIPT ────────────────────────────────────────────────────────
+def tool_youtube(url: str) -> str:
+    """Fetch YouTube transcript via youtube-transcript-api or scrape description."""
+    try:
+        from youtube_transcript_api import YouTubeTranscriptApi
+        import re as _re
+        vid_match = _re.search(r'(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})', url)
+        if not vid_match:
+            return f"❌ Could not extract video ID from URL: {url}"
+        vid_id = vid_match.group(1)
+        transcript = YouTubeTranscriptApi.get_transcript(vid_id)
+        text = " ".join(t["text"] for t in transcript)
+        # Truncate to ~4000 chars
+        if len(text) > 4000:
+            text = text[:4000] + f"\n… (transcript truncated, {len(text)} total chars)"
+        return f"**YouTube transcript** ({vid_id}):\n\n{text}"
+    except ImportError:
+        # Fallback: yt-dlp metadata only
+        try:
+            import subprocess, json as _json
+            r = subprocess.run(
+                ["yt-dlp", "--dump-json", "--no-download", url],
+                capture_output=True, text=True, timeout=20
+            )
+            if r.returncode == 0:
+                d = _json.loads(r.stdout)
+                return (f"**{d.get('title','')}** ({d.get('uploader','')})\n"
+                        f"Duration: {d.get('duration_string','?')}\n\n"
+                        f"{d.get('description','No description')[:1500]}")
+        except Exception:
+            pass
+        return "❌ youtube-transcript-api not installed. Run: pip install youtube-transcript-api"
+    except Exception as e:
+        return f"❌ YouTube transcript failed: {e}"
+
+
+# ── PDF READER ────────────────────────────────────────────────────────────────
+def tool_read_pdf(path: str, workdir: str = "/tmp") -> str:
+    """Extract text from a PDF file."""
+    import os as _os
+    full = _os.path.join(workdir, path) if not _os.path.isabs(path) else path
+    if not _os.path.exists(full):
+        return f"❌ File not found: {path}"
+    try:
+        import pypdf
+        reader = pypdf.PdfReader(full)
+        pages  = []
+        for i, page in enumerate(reader.pages[:20]):   # first 20 pages
+            text = page.extract_text() or ""
+            if text.strip():
+                pages.append(f"[Page {i+1}]\n{text.strip()}")
+        if not pages:
+            return "❌ No extractable text found (may be a scanned PDF)"
+        total = len(reader.pages)
+        content = "\n\n".join(pages)
+        if len(content) > 6000:
+            content = content[:6000] + f"\n\n… (truncated, {total} pages total)"
+        return content
+    except ImportError:
+        return "❌ pypdf not installed. Run: pip install pypdf"
+    except Exception as e:
+        return f"❌ PDF read failed: {e}"
+
+
+# ── DIFF VIEWER ───────────────────────────────────────────────────────────────
+def tool_diff(original: str, modified: str, filename: str = "file") -> str:
+    """Generate a unified diff between two text strings."""
+    import difflib
+    orig_lines = original.splitlines(keepends=True)
+    mod_lines  = modified.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(
+        orig_lines, mod_lines,
+        fromfile=f"a/{filename}", tofile=f"b/{filename}", lineterm=""
+    ))
+    if not diff:
+        return "No differences found."
+    diff_text = "\n".join(diff)
+    if len(diff_text) > 4000:
+        diff_text = diff_text[:4000] + "\n… (diff truncated)"
+    return f"```diff\n{diff_text}\n```"
+
+
+# Update dispatch to include new tools
+_ORIG_DISPATCH_END = "    if kind == 'youtube':
+        return tool_youtube(action.get('url',''))
+    if kind == 'read_pdf':
+        return tool_read_pdf(action.get('path',''), action.get('workdir','/tmp'))
+    if kind == 'diff':
+        return tool_diff(action.get('original',''), action.get('modified',''), action.get('filename','file'))
+    if kind == 'generate_image':"

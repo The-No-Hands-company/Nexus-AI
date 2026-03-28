@@ -232,6 +232,9 @@ Available actions:
   { "action": "base64",     "text": "hello", "mode": "encode" }
   { "action": "json_format","text": "{\"a\":1}" }
   { "action": "generate_image","prompt": "a glowing neon city at night","width": 1024,"height": 1024 }
+  { "action": "youtube_transcript","url": "https://youtube.com/watch?v=..." }
+  { "action": "read_pdf",  "path": "document.pdf" }
+  { "action": "diff",      "original": "old text", "modified": "new text", "filename": "app.py" }
   { "action": "write_file", "path": "src/app.py", "content": "..." }
   { "action": "read_file",  "path": "README.md" }
   { "action": "list_files", "pattern": "**/*.py" }
@@ -430,6 +433,18 @@ def _parse_json(raw: str) -> Dict[str, Any]:
     try: return json.loads(raw)
     except json.JSONDecodeError: return {"action":"respond","content":raw}
 
+def _is_bad_output(action: Dict[str, Any]) -> bool:
+    """Detect clearly malformed or useless responses worth retrying."""
+    kind    = action.get("action","")
+    content = action.get("content","").strip()
+    # Empty respond
+    if kind == "respond" and not content:
+        return True
+    # Responded with a placeholder URL
+    if kind in ("clone_repo","run_command") and "username/repo" in str(action):
+        return True
+    return False
+
 def _build_content(text: str, files: List[Dict]) -> Any:
     if not files: return text
     parts: List[Dict] = []
@@ -502,6 +517,20 @@ def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, 
             else: print(f"⚠️ {pid}: {e}")
     raise AllProvidersExhausted(f"All exhausted. Last: {last_err}")
 
+def _maybe_compress_history(history: List[Dict]) -> List[Dict]:
+    """If history is longer than 20 turns, keep first 2 + last 14 and add a summary marker."""
+    if len(history) <= 20:
+        return history
+    head = history[:2]
+    tail = history[-14:]
+    omitted = len(history) - 16
+    summary_msg = {
+        "role":    "user",
+        "content": f"[{omitted} earlier messages omitted to save context. Continue naturally.]"
+    }
+    return head + [summary_msg] + tail
+
+
 def _get_custom_instructions() -> str:
     try:
         return load_custom_instructions()
@@ -514,7 +543,7 @@ TOOL_ICONS = {
     "web_search":"🔍","image_gen":"🎨","calculate":"🧮","weather":"🌤️","currency":"💱",
     "convert":"📐","regex":"🔎","base64":"🔡","json_format":"📄",
     "write_file":"📝","read_file":"📖","list_files":"📂","delete_file":"🗑️",
-    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","generate_image":"🎨",
+    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","generate_image":"🎨","youtube_transcript":"▶️","read_pdf":"📑","diff":"±",
 }
 
 # ── streaming agent ───────────────────────────────────────────────────────────
@@ -565,7 +594,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         clean_task = (f"Repos cloned to {workdir}.\nFiles:\n{file_ctx}\n\n"
                       f"Task: {clean_task}\n\nNow read key files, improve, commit and push.")
 
-    messages: List[Dict] = list(history)
+    messages: List[Dict] = _maybe_compress_history(list(history))
     messages.append({"role":"user","content":_build_content(clean_task, files or [])})
 
     providers_used: List[str] = []
@@ -587,6 +616,14 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             except AllProvidersExhausted:
                 yield {"type":"error","message":str(e)+"\n\nAdd more API keys to avoid rate limits."}
                 return
+
+        # Auto-retry once if output is clearly bad
+        if _is_bad_output(action):
+            print(f"⚠️ Bad output from {pid}, retrying once…")
+            try:
+                action, pid = call_llm_with_fallback(messages, clean_task)
+            except AllProvidersExhausted:
+                pass   # give up, use original bad output
 
         if pid not in providers_used:
             providers_used.append(pid)
