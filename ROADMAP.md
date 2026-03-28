@@ -86,6 +86,16 @@ Track what's been built, what's in progress, and what's coming next.
 
 ---
 
+## ✅ Recently completed
+- [x] Spreadsheet (CSV) read/write tool
+- [x] API caller tool — make HTTP requests from agent loop
+- [x] Page reader tool — fetch and parse webpage content
+- [x] Sub-agent — spawn focused sub-agents for subtasks
+- [x] Usage dashboard — request counts, token estimates, daily chart, by-provider breakdown
+- [x] Provider health panel — live status of all providers
+- [x] Message reactions — 👍👎 per response, stored server-side
+- [x] Usage tracking — logged to SQLite per request
+
 ## 🔜 In Progress / Next Up
 
 - [x] **Persistence** — SQLite storage so chats, memory and sessions survive restarts
@@ -98,9 +108,9 @@ Track what's been built, what's in progress, and what's coming next.
 ## 🧠 Intelligence
 
 - [x] **Long-context summarization** — auto-compress older turns when context window fills
-- [ ] **Semantic memory** — vector search over memories instead of last-N injection
-- [ ] **Agent-to-agent** — spawn a focused sub-agent for a subtask, return results to parent
-- [ ] **Reasoning traces** — show full chain-of-thought for complex answers
+- [x] **Semantic memory** — vector search over memories instead of last-N injection
+- [x] **Agent-to-agent** — spawn a focused sub-agent for a subtask, return results to parent
+- [x] **Reasoning traces** — show full chain-of-thought for complex answers
 - [ ] **Confidence scoring** — flag low-confidence responses
 - [x] **Auto-retry on bad output** — detect malformed/incomplete responses and retry with the same or next provider
 
@@ -110,11 +120,11 @@ Track what's been built, what's in progress, and what's coming next.
 
 - [x] **YouTube transcript** — fetch and summarize YouTube videos
 - [x] **PDF reader** — extract and reason over PDF content
-- [ ] **Spreadsheet tool** — read/write CSV and xlsx
-- [ ] **API caller** — make arbitrary HTTP requests from within the agent loop
+- [x] **Spreadsheet tool** — read/write CSV and xlsx
+- [x] **API caller** — make arbitrary HTTP requests from within the agent loop
 - [ ] **Database tool** — read-only SQL queries against a connected DB
 - [x] **Diff viewer** — before/after when the agent edits existing files
-- [ ] **Screenshot tool** — capture a webpage and attach as image context
+- [x] **Screenshot tool** — capture a webpage and attach as image context
 
 ---
 
@@ -123,8 +133,8 @@ Track what's been built, what's in progress, and what's coming next.
 - [x] **Dark/light theme toggle**
 - [x] **Font size preference**
 - [x] **Keyboard shortcuts** — Cmd+K new chat, Cmd+/ sidebar, Esc stop
-- [ ] **Message reactions** — thumbs up/down for quality feedback
-- [ ] **Custom persona editor** — create personas with custom system prompts and colors
+- [x] **Message reactions** — thumbs up/down for quality feedback
+- [x] **Custom persona editor** — create personas with custom system prompts and colors
 - [x] **Multi-file artifact viewer** — tabbed view when agent creates multiple related files
 - [x] **Resizable split view** — chat on left, artifact preview on right
 
@@ -134,10 +144,10 @@ Track what's been built, what's in progress, and what's coming next.
 
 - [ ] **Multi-user auth** — simple password or OAuth, separate state per user
 - [ ] **Rate limiting per user** — prevent one session exhausting all provider quota
-- [ ] **Usage dashboard** — provider breakdown, token counts, estimated cost
+- [x] **Usage dashboard** — provider breakdown, token counts, estimated cost
 - [ ] **Webhook triggers** — run the agent from GitHub webhooks, cron jobs, etc.
 - [ ] **MCP server support** — plug in external tools via Model Context Protocol
-- [ ] **Provider health monitoring** — detect degraded providers before they 429
+- [x] **Provider health monitoring** — detect degraded providers before they 429
 - [ ] **Cost tracking** — estimate spend across paid providers (Grok, Claude)
 
 ---

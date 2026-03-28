@@ -3,7 +3,11 @@ from datetime import datetime
 from typing import Dict, Any, List, Iterator, Optional
 from tools_builtin import dispatch_builtin
 from personas import build_system_prompt, get_active_persona_name, get_persona
-from db import load_custom_instructions
+from db import load_custom_instructions, log_usage, init_usage_table
+try:
+    init_usage_table()
+except Exception:
+    pass
 
 # ── runtime config ────────────────────────────────────────────────────────────
 _config: Dict[str, Any] = {
@@ -234,7 +238,12 @@ Available actions:
   { "action": "generate_image","prompt": "a glowing neon city at night","width": 1024,"height": 1024 }
   { "action": "youtube_transcript","url": "https://youtube.com/watch?v=..." }
   { "action": "read_pdf",  "path": "document.pdf" }
-  { "action": "diff",      "original": "old text", "modified": "new text", "filename": "app.py" }
+  { "action": "diff",       "original": "old text", "modified": "new text", "filename": "app.py" }
+  { "action": "read_csv",   "path": "data.csv" }
+  { "action": "write_csv",  "path": "output.csv", "data": [["col1","col2"],["a","b"]] }
+  { "action": "api_call",   "method": "GET", "url": "https://api.example.com/data", "headers": {}, "body": null }
+  { "action": "read_page",  "url": "https://example.com" }
+  { "action": "sub_agent",  "task": "focused subtask description", "context": "relevant context" }
   { "action": "write_file", "path": "src/app.py", "content": "..." }
   { "action": "read_file",  "path": "README.md" }
   { "action": "list_files", "pattern": "**/*.py" }
@@ -512,7 +521,9 @@ def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, 
     last_err = None
     for pid in order:
         if _is_rate_limited(pid): continue
-        try: return _call_single(pid, messages), pid
+        try:
+            result = _call_single(pid, messages)
+            return result, pid
         except Exception as e:
             last_err = e
             if _is_rl_error(e): _mark_rate_limited(pid); print(f"↩️ {pid} rate-limited")
@@ -706,6 +717,25 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                    "model":_config["model"] or cfg.get("default_model","?"),
                    "history":messages}
             return
+
+        # Sub-agent: spawn a focused LLM call for a subtask
+        if kind == "sub_agent":
+            sub_task    = action.get("task", "")
+            sub_context = action.get("context", "")
+            sub_prompt  = f"{sub_context}\n\nTask: {sub_task}" if sub_context else sub_task
+            try:
+                sub_action, sub_pid = call_llm_with_fallback(
+                    [{"role": "user", "content": sub_prompt}], sub_task
+                )
+                sub_result = sub_action.get("content", str(sub_action))
+            except Exception as e:
+                sub_result = f"Sub-agent failed: {e}"
+            yield {"type": "tool", "icon": "🤖", "action": "sub_agent",
+                   "label": sub_task[:80], "result": sub_result[:400],
+                   "file_path": None, "file_content": None, "artifact": False}
+            messages.append({"role": "assistant", "content": json.dumps(action)})
+            messages.append({"role": "user", "content": f"Sub-agent result:\n{sub_result}\n\nContinue."})
+            continue
 
         # Built-in tools (no LLM needed)
         builtin_result = dispatch_builtin(action)
