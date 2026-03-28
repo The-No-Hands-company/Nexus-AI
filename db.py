@@ -11,7 +11,12 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
-DB_PATH = os.getenv("DB_PATH", "/data/claude_alt.db")
+try:
+    from gist_backup import schedule_push as _schedule_push
+except ImportError:
+    def _schedule_push(): pass
+
+DB_PATH = os.getenv("DB_PATH", "/tmp/claude_alt.db")
 _local  = threading.local()
 
 
@@ -73,6 +78,7 @@ def save_chat(cid: str, title: str, created_at: str,
         (cid, title[:80], created_at, updated_at, json.dumps(messages))
     )
     _conn().commit()
+    _schedule_push()
 
 
 def load_chats() -> list[dict]:
@@ -106,6 +112,7 @@ def save_share(sid: str, title: str, created_at: str, messages: list) -> None:
         (sid, title, created_at, json.dumps(messages))
     )
     _conn().commit()
+    _schedule_push()
 
 
 def load_share(sid: str) -> dict | None:
@@ -133,6 +140,7 @@ def add_memory_entry(summary: str, tags: list, ts: float) -> None:
         )
     """)
     _conn().commit()
+    _schedule_push()
 
 
 def load_memory_entries(limit: int = 20) -> list[dict]:
@@ -151,3 +159,4 @@ def load_memory_entries(limit: int = 20) -> list[dict]:
 def delete_all_memory() -> None:
     _conn().execute("DELETE FROM memory")
     _conn().commit()
+    _schedule_push()
