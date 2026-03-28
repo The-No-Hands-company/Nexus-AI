@@ -89,40 +89,40 @@ Track what's been built, what's in progress, and what's coming next.
 ## 🔜 In Progress / Next Up
 
 - [x] **Persistence** — SQLite storage so chats, memory and sessions survive restarts
-- [ ] **Streaming token counter** — input/output token count per response
-- [ ] **Conversation search** — full-text search across saved chats
-- [ ] **Pinned chats** — keep important conversations at top of sidebar
+- [x] **Streaming token counter** — input/output token count per response
+- [x] **Conversation search** — full-text search across saved chats
+- [x] **Pinned chats** — keep important conversations at top of sidebar
 
 ---
 
 ## 🧠 Intelligence
 
-- [ ] **Long-context summarization** — auto-compress older turns when context window fills
+- [x] **Long-context summarization** — auto-compress older turns when context window fills
 - [ ] **Semantic memory** — vector search over memories instead of last-N injection
 - [ ] **Agent-to-agent** — spawn a focused sub-agent for a subtask, return results to parent
 - [ ] **Reasoning traces** — show full chain-of-thought for complex answers
 - [ ] **Confidence scoring** — flag low-confidence responses
-- [ ] **Auto-retry on bad output** — detect malformed/incomplete responses and retry with the same or next provider
+- [x] **Auto-retry on bad output** — detect malformed/incomplete responses and retry with the same or next provider
 
 ---
 
 ## 🛠️ More Tools
 
-- [ ] **YouTube transcript** — fetch and summarize YouTube videos
-- [ ] **PDF reader** — extract and reason over PDF content
+- [x] **YouTube transcript** — fetch and summarize YouTube videos
+- [x] **PDF reader** — extract and reason over PDF content
 - [ ] **Spreadsheet tool** — read/write CSV and xlsx
 - [ ] **API caller** — make arbitrary HTTP requests from within the agent loop
 - [ ] **Database tool** — read-only SQL queries against a connected DB
-- [ ] **Diff viewer** — before/after when the agent edits existing files
+- [x] **Diff viewer** — before/after when the agent edits existing files
 - [ ] **Screenshot tool** — capture a webpage and attach as image context
 
 ---
 
 ## 🎨 UI / UX
 
-- [ ] **Dark/light theme toggle**
-- [ ] **Font size preference**
-- [ ] **Keyboard shortcuts** — Cmd+K new chat, Cmd+/ sidebar, Esc stop
+- [x] **Dark/light theme toggle**
+- [x] **Font size preference**
+- [x] **Keyboard shortcuts** — Cmd+K new chat, Cmd+/ sidebar, Esc stop
 - [ ] **Message reactions** — thumbs up/down for quality feedback
 - [ ] **Custom persona editor** — create personas with custom system prompts and colors
 - [x] **Multi-file artifact viewer** — tabbed view when agent creates multiple related files

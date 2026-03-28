@@ -33,6 +33,7 @@ _active_streams: dict[str, threading.Event] = {}
 restore_from_gist()   # pull from Gist before opening DB
 init_db()
 init_projects_table()
+init_pins_table()
 
 # Seed chats from DB
 chats: dict[str, dict] = {}
@@ -146,9 +147,13 @@ async def set_token(sid: str, request: Request):
 # ── chat history ──────────────────────────────────────────────────────────────
 @app.get("/chats")
 def list_chats():
-    listed = sorted(chats.values(), key=lambda c: c["updated_at"], reverse=True)
+    pinned_ids = get_pinned_ids()
+    def _sort(ch):
+        return (ch["id"] not in pinned_ids, ch["updated_at"])
+    listed = sorted(chats.values(), key=_sort, reverse=True)
     return {"chats":[{"id":c["id"],"title":c["title"],"created_at":c["created_at"],
-                      "updated_at":c["updated_at"],"message_count":len(c["messages"])} for c in listed]}
+                      "updated_at":c["updated_at"],"message_count":len(c["messages"]),
+                      "pinned": c["id"] in pinned_ids} for c in listed]}
 
 @app.post("/chats")
 async def save_chat(request: Request):
@@ -350,6 +355,52 @@ async def create_custom_persona(request: Request):
 def delete_custom_persona_endpoint(pid: str):
     db_del_persona(pid)
     return {"deleted": pid}
+
+
+# ── search ───────────────────────────────────────────────────────────────────
+@app.get("/search")
+def search_chats_endpoint(q: str = ""):
+    if not q.strip():
+        return {"results": []}
+    return {"results": db_search(q)}
+
+
+# ── pins ──────────────────────────────────────────────────────────────────────
+_pins: set = get_pinned_ids()
+
+@app.post("/chats/{cid}/pin")
+def pin_chat_endpoint(cid: str):
+    _pins.add(cid)
+    db_pin(cid)
+    return {"pinned": cid}
+
+@app.delete("/chats/{cid}/pin")
+def unpin_chat_endpoint(cid: str):
+    _pins.discard(cid)
+    db_unpin(cid)
+    return {"unpinned": cid}
+
+@app.get("/chats/pinned")
+def get_pinned():
+    result = [chats[cid] for cid in _pins if cid in chats]
+    return {"chats": result}
+
+
+# ── user preferences ──────────────────────────────────────────────────────────
+@app.get("/prefs")
+def get_prefs():
+    return {
+        "theme":     db_load_pref("theme", "dark"),
+        "font_size": db_load_pref("font_size", "15"),
+    }
+
+@app.post("/prefs")
+async def set_prefs(request: Request):
+    data = await request.json()
+    for key in ("theme", "font_size"):
+        if key in data:
+            db_save_pref(key, str(data[key]))
+    return {"saved": True}
 
 
 # ── agent ─────────────────────────────────────────────────────────────────────

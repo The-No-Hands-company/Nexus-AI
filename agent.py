@@ -242,6 +242,9 @@ Available actions:
   { "action": "run_command","cmd": "pip install flask" }
   { "action": "clone_repo", "url": "https://github.com/user/repo" }
   { "action": "commit_push","message": "feat: ...", "repo_url": "https://github.com/user/repo" }
+  { "action": "youtube",      "url": "https://youtube.com/watch?v=..." }
+  { "action": "read_pdf",     "path": "document.pdf" }
+  { "action": "diff",         "original": "old text", "modified": "new text", "filename": "app.py" }
 
 Rules:
 - clarify ONLY for new project creation where architecture choices matter. 2-4 questions max.
@@ -543,8 +546,46 @@ TOOL_ICONS = {
     "web_search":"🔍","image_gen":"🎨","calculate":"🧮","weather":"🌤️","currency":"💱",
     "convert":"📐","regex":"🔎","base64":"🔡","json_format":"📄",
     "write_file":"📝","read_file":"📖","list_files":"📂","delete_file":"🗑️",
-    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","generate_image":"🎨","youtube_transcript":"▶️","read_pdf":"📑","diff":"±",
+    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","generate_image":"🎨","youtube":"▶️","read_pdf":"📑","diff":"📊","youtube_transcript":"▶️","read_pdf":"📑","diff":"±",
 }
+
+# ── long-context compression ──────────────────────────────────────────────────
+MAX_HISTORY_TURNS = 20   # keep last N turns before summarising older ones
+
+def _compress_history(history: List[Dict]) -> List[Dict]:
+    """
+    If history is longer than MAX_HISTORY_TURNS, summarise the oldest half
+    into a single system-style message to stay within context limits.
+    """
+    # Count real turns (skip tool result / continue messages)
+    real = [(i, m) for i, m in enumerate(history)
+            if isinstance(m.get("content"), str)
+            and not m["content"].startswith("Tool result:")
+            and not m["content"].startswith("Continue")
+            and not m["content"].startswith("[MEMORY")]
+    if len(real) <= MAX_HISTORY_TURNS:
+        return history
+
+    # Summarise the first half of real turns
+    cutoff_idx = real[len(real) // 2][0]
+    old_turns  = history[:cutoff_idx]
+    new_turns  = history[cutoff_idx:]
+
+    lines = []
+    for m in old_turns:
+        role    = m.get("role", "")
+        content = m.get("content", "")
+        if not isinstance(content, str): continue
+        if content.startswith("Tool result:") or content.startswith("Continue"): continue
+        prefix = "User" if role == "user" else "Assistant"
+        lines.append(f"{prefix}: {content[:200]}")
+
+    nl = "\n"
+    summary = "[EARLIER CONVERSATION SUMMARY]" + nl + nl.join(lines[-30:])
+    compressed_msg = {"role": "user", "content": summary}
+    follow_up      = {"role": "assistant", "content": "Understood, I have context from our earlier conversation."}
+    return [compressed_msg, follow_up] + new_turns
+
 
 # ── streaming agent ───────────────────────────────────────────────────────────
 def stream_agent_task(task: str, history: list, files: list | None = None,
@@ -714,6 +755,8 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     action.get("prompt",""), action.get("width",512), action.get("height",512))
             elif kind == "run_command":
                 result = tool_run_command(action.get("cmd",""), workdir)
+            elif kind == "read_pdf":
+                action["workdir"] = workdir
             elif kind == "clone_repo":
                 url    = action.get("url","")
                 result = tool_clone_repo(url, session_token, workdir)
