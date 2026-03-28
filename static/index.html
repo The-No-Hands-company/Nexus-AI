@@ -62,11 +62,11 @@
       font-style:italic;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
 
     /* ── PWA INSTALL BANNER ── */
-    #install-banner{display:none;align-items:center;justify-content:space-between;
+    #install-banner{display:none !important;align-items:center;justify-content:space-between;
       background:color-mix(in srgb,var(--accent)12%,var(--surface));
       border-bottom:1px solid color-mix(in srgb,var(--accent)25%,transparent);
       padding:8px 14px;font-size:.75rem;gap:10px;flex-shrink:0}
-    #install-banner.show{display:flex}
+    #install-banner.show{display:flex !important}
     .install-text{color:var(--text);flex:1}
     .install-text span{color:var(--accent);font-weight:600}
     .btn-install{background:var(--accent);color:#fff;border:none;
@@ -710,7 +710,7 @@
       transform:translateX(-50%);z-index:40;
       background:var(--surface);border:1px solid var(--border);
       border-radius:12px;padding:12px 16px;
-      display:flex;align-items:center;gap:10px;font-size:.8rem;
+      align-items:center;gap:10px;font-size:.8rem;
       box-shadow:0 8px 32px rgba(0,0,0,.4);max-width:320px;width:90%}
     #install-prompt.show{display:flex}
     .install-btn{background:var(--accent);color:#fff;border:none;
@@ -1837,7 +1837,7 @@ async function send(){
           (evt.steps||[]).forEach((step,i)=>{
             const li=document.createElement('li');li.className='plan-step';
             // Strip leading number if model already numbered it (e.g. "1. Do thing")
-            const numRe=/^\d+[.)\s]+/;const clean=numRe.test(step)?step.replace(numRe,''):step;
+            const clean=step.replace(/^\d+[\.\)\]\s]+/,'').trim();
             li.innerHTML=`<span class="plan-step-num">${i+1}</span><span>${esc(clean)}</span>`;
             ol.appendChild(li);
           });

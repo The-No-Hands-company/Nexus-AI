@@ -721,8 +721,10 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 all_files += [os.path.relpath(os.path.join(dp,f), workdir)
                               for dp,_,fs in os.walk(rdir) for f in fs][:50]
         file_ctx = "\n".join(all_files[:60])
-        clean_task = (f"Repos cloned to {workdir}.\nFiles:\n{file_ctx}\n\n"
-                      f"Task: {clean_task}\n\nNow read key files, improve, commit and push.")
+        clean_task = (f"[REPOS ALREADY CLONED — do NOT call clone_repo again]\n"
+                      f"Cloned to {workdir}.\nFiles:\n{file_ctx}\n\n"
+                      f"Original task: {clean_task}\n\n"
+                      f"Now read key files, make improvements, commit and push.")
 
     messages: List[Dict] = _maybe_compress_history(list(history))
     messages.append({"role":"user","content":_build_content(clean_task, files or [])})
@@ -880,7 +882,12 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     set_session_repo(sid, m.group(1))
             elif kind == "clone_repo":
                 url    = action.get("url","")
-                result = tool_clone_repo(url, session_token, workdir)
+                repo_name = url.rstrip("/").split("/")[-1].replace(".git","")
+                already_cloned = os.path.exists(os.path.join(workdir, repo_name, ".git"))
+                if already_cloned:
+                    result = f"Already cloned at {os.path.join(workdir, repo_name)} — skipping."
+                else:
+                    result = tool_clone_repo(url, session_token, workdir)
                 if sid and "Clone failed" not in result and url:
                     set_session_repo(sid, url)
             elif kind == "commit_push":
