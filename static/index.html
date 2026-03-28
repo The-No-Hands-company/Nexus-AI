@@ -75,6 +75,156 @@
     .btn-install-dismiss{background:none;border:none;color:var(--muted);
       cursor:pointer;font-size:18px;line-height:1;padding:0 4px}
 
+
+    /* ── SPLIT VIEW ── */
+    #app { position: relative; }
+    #artifact-panel {
+      width: 0; flex-shrink: 0; background: var(--surface);
+      border-left: 1px solid var(--border);
+      display: flex; flex-direction: column;
+      transition: width .25s cubic-bezier(.4,0,.2,1);
+      overflow: hidden;
+    }
+    #artifact-panel.open { width: 45%; min-width: 280px; }
+    @media(max-width:700px){
+      #artifact-panel.open { position:absolute;inset:0;width:100%;z-index:25; }
+    }
+    .artifact-panel-head {
+      display:flex;align-items:center;justify-content:space-between;
+      padding:8px 12px;border-bottom:1px solid var(--border);
+      background:var(--surface2);flex-shrink:0;gap:8px;
+    }
+    .artifact-tabs {
+      display:flex;gap:4px;flex:1;overflow-x:auto;
+    }
+    .artifact-tabs::-webkit-scrollbar{display:none}
+    .artifact-tab {
+      font-size:.7rem;padding:3px 10px;border-radius:5px;border:none;
+      background:none;color:var(--muted);cursor:pointer;white-space:nowrap;
+      transition:all .13s;
+    }
+    .artifact-tab.active { background:var(--accent);color:#fff; }
+    .artifact-tab:hover:not(.active) { background:var(--border);color:var(--text); }
+    .artifact-panel-body { flex:1;overflow:hidden;position:relative; }
+    .artifact-iframe-wrap { position:absolute;inset:0;display:none; }
+    .artifact-iframe-wrap.active { display:block; }
+    .artifact-iframe-wrap iframe {
+      width:100%;height:100%;border:none;background:#fff;
+    }
+    .panel-btn {
+      width:28px;height:28px;border-radius:6px;border:none;
+      background:none;color:var(--muted);cursor:pointer;font-size:14px;
+      display:flex;align-items:center;justify-content:center;transition:all .13s;
+    }
+    .panel-btn:hover{background:var(--border);color:var(--text)}
+    #dragger {
+      width:4px;background:transparent;cursor:col-resize;flex-shrink:0;
+      transition:background .15s;
+    }
+    #dragger:hover,#dragger.dragging { background:var(--accent); }
+
+    /* ── EDIT/RETRY/TTS BUTTONS ── */
+    .msg-actions {
+      display:flex;gap:4px;margin-top:3px;opacity:0;transition:opacity .13s;
+    }
+    .msg-wrap:hover .msg-actions { opacity:1; }
+    .msg-action-btn {
+      font-size:12px;background:none;border:none;color:var(--muted);
+      cursor:pointer;padding:2px 6px;border-radius:4px;line-height:1.4;
+      transition:all .12s;
+    }
+    .msg-action-btn:hover { background:var(--border);color:var(--text); }
+    .msg-action-btn.tts-active { color:var(--accent); }
+
+    /* ── SEARCH SOURCE CARDS ── */
+    .search-sources {
+      display:flex;flex-direction:column;gap:5px;margin:6px 0;
+    }
+    .source-card {
+      display:flex;align-items:flex-start;gap:8px;
+      background:var(--surface2);border:1px solid var(--border);
+      border-radius:8px;padding:7px 10px;text-decoration:none;
+      transition:border-color .13s;
+    }
+    .source-card:hover { border-color:var(--accent); }
+    .source-favicon {
+      width:16px;height:16px;border-radius:3px;flex-shrink:0;margin-top:2px;
+    }
+    .source-info { flex:1;min-width:0; }
+    .source-title {
+      font-size:.75rem;font-weight:600;color:var(--text);
+      white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+    }
+    .source-domain { font-size:.65rem;color:var(--teal);margin-bottom:2px; }
+    .source-snippet { font-size:.7rem;color:var(--muted);line-height:1.4;
+      display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden; }
+    .source-num {
+      font-size:.6rem;font-weight:700;color:var(--accent);flex-shrink:0;
+      background:color-mix(in srgb,var(--accent)15%,transparent);
+      padding:1px 5px;border-radius:3px;margin-top:2px;
+    }
+
+    /* ── MODALS: custom instructions + memory panel + projects ── */
+    .modal-overlay {
+      display:none;position:fixed;inset:0;z-index:50;
+      background:rgba(0,0,0,.65);backdrop-filter:blur(5px);
+      align-items:center;justify-content:center;padding:20px;
+    }
+    .modal-overlay.open { display:flex; }
+    .modal-box {
+      background:var(--surface);border:1px solid var(--border);
+      border-radius:16px;width:100%;max-width:520px;
+      display:flex;flex-direction:column;max-height:80vh;
+    }
+    .modal-header {
+      display:flex;align-items:center;justify-content:space-between;
+      padding:16px 20px;border-bottom:1px solid var(--border);flex-shrink:0;
+    }
+    .modal-header h2 { font-size:.95rem;font-weight:700; }
+    .modal-x { background:none;border:none;color:var(--muted);cursor:pointer;font-size:20px;line-height:1; }
+    .modal-x:hover { color:var(--text); }
+    .modal-body { flex:1;overflow-y:auto;padding:16px 20px; }
+    .modal-footer { padding:12px 20px;border-top:1px solid var(--border);display:flex;gap:8px;justify-content:flex-end; }
+    .modal-body textarea {
+      width:100%;background:var(--bg);border:1px solid var(--border);
+      border-radius:8px;padding:10px 12px;color:var(--text);
+      font-size:.85rem;resize:vertical;outline:none;min-height:120px;
+      line-height:1.6;transition:border-color .15s;
+    }
+    .modal-body textarea:focus { border-color:var(--accent); }
+    .modal-hint { font-size:.72rem;color:var(--muted);margin-top:6px;line-height:1.5; }
+    .btn-primary { background:var(--accent);color:#fff;border:none;border-radius:8px;
+      padding:8px 18px;font-size:.83rem;font-weight:600;cursor:pointer;transition:background .14s; }
+    .btn-primary:hover { background:var(--accent-d); }
+    .btn-ghost { background:none;border:1px solid var(--border);color:var(--muted);
+      border-radius:8px;padding:8px 14px;font-size:.83rem;cursor:pointer;transition:all .14s; }
+    .btn-ghost:hover { border-color:var(--accent);color:var(--text); }
+
+    /* memory entries */
+    .memory-entry {
+      display:flex;align-items:flex-start;gap:8px;padding:8px 0;
+      border-bottom:1px solid var(--border);
+    }
+    .memory-entry:last-child { border-bottom:none; }
+    .memory-date { font-size:.65rem;color:var(--muted);flex-shrink:0;margin-top:2px;width:60px; }
+    .memory-text { flex:1;font-size:.8rem;line-height:1.5; }
+    .memory-text[contenteditable=true] {
+      outline:1px solid var(--accent);border-radius:4px;padding:2px 4px;
+    }
+    .memory-del { background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;flex-shrink:0; }
+    .memory-del:hover { color:var(--red); }
+
+    /* project list */
+    .project-item {
+      display:flex;align-items:center;gap:8px;padding:8px 10px;
+      border-radius:9px;cursor:pointer;transition:background .12s;margin-bottom:3px;
+    }
+    .project-item:hover,.project-item.active { background:var(--surface2); }
+    .project-dot { width:8px;height:8px;border-radius:50%;flex-shrink:0; }
+    .project-name { flex:1;font-size:.78rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap; }
+    .project-actions { display:flex;gap:3px;opacity:0;transition:opacity .1s; }
+    .project-item:hover .project-actions { opacity:1; }
+
     /* ── SIDEBAR ── */
     #sidebar{width:var(--sidebar-w);flex-shrink:0;background:var(--surface);
       border-right:1px solid var(--border);display:flex;flex-direction:column;
@@ -465,6 +615,9 @@
   <div class="logo">Claude <em>Alt</em></div>
   <div class="header-spacer"></div>
   <button id="save-btn" onclick="saveCurrentChat()">💾 Save</button>
+  <button class="btn-icon" onclick="openProjectsModal()" title="Projects">🗂️</button>
+  <button class="btn-icon" onclick="openCIModal()" title="Custom instructions">📋</button>
+  <button class="btn-icon" onclick="openMemoryModal()" title="Memory">🧠</button>
   <button class="btn-icon" onclick="showTokenBar()" title="Set GitHub token">🔑</button>
   <button class="pill pill-providers" id="provider-pill" onclick="toggleDrawer()">
     <div class="dot"></div>
@@ -478,6 +631,93 @@
   <div class="install-text">Add <span>Claude Alt</span> to your home screen for the best experience</div>
   <button class="btn-install" id="install-btn">Install</button>
   <button class="btn-install-dismiss" onclick="dismissInstall()">×</button>
+</div>
+
+
+<!-- Custom instructions modal -->
+<div class="modal-overlay" id="ci-modal" onclick="if(event.target===this)closeCIModal()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>📋 Custom Instructions</h2>
+      <button class="modal-x" onclick="closeCIModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <textarea id="ci-text" placeholder="Tell the AI about yourself and how you want it to respond.&#10;&#10;Examples:&#10;- I'm a senior developer, skip basic explanations&#10;- Always respond in Swedish&#10;- Keep answers concise unless I ask for detail&#10;- My projects use Python 3.12 and FastAPI"></textarea>
+      <div class="modal-hint">These instructions are added to every conversation automatically.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeCIModal()">Cancel</button>
+      <button class="btn-primary" onclick="saveCIModal()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Memory panel modal -->
+<div class="modal-overlay" id="memory-modal" onclick="if(event.target===this)closeMemoryModal()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>🧠 Memory</h2>
+      <button class="modal-x" onclick="closeMemoryModal()">×</button>
+    </div>
+    <div class="modal-body" id="memory-modal-body">
+      <div style="color:var(--muted);font-size:.8rem">Loading…</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="clearAllMemory()">Clear all</button>
+      <button class="btn-primary" onclick="closeMemoryModal()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Projects modal -->
+<div class="modal-overlay" id="projects-modal" onclick="if(event.target===this)closeProjectsModal()">
+  <div class="modal-box" style="max-width:480px">
+    <div class="modal-header">
+      <h2>🗂️ Projects</h2>
+      <button class="modal-x" onclick="closeProjectsModal()">×</button>
+    </div>
+    <div class="modal-body" id="projects-modal-body">Loading…</div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="newProject()">+ New project</button>
+      <button class="btn-primary" onclick="closeProjectsModal()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Project edit modal -->
+<div class="modal-overlay" id="project-edit-modal" onclick="if(event.target===this)closeProjectEdit()">
+  <div class="modal-box" style="max-width:440px">
+    <div class="modal-header">
+      <h2 id="pe-title">Edit Project</h2>
+      <button class="modal-x" onclick="closeProjectEdit()">×</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
+      <input type="hidden" id="pe-id">
+      <div class="field" style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Name</label>
+        <input type="text" id="pe-name" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:.875rem;outline:none" placeholder="My Project">
+      </div>
+      <div class="field" style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Custom Instructions</label>
+        <textarea id="pe-instructions" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:.85rem;resize:vertical;outline:none;min-height:90px;line-height:1.6" placeholder="What should the AI know about this project?"></textarea>
+      </div>
+      <div class="field" style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Color</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap" id="pe-colors">
+          <div class="color-swatch" data-color="#7c6af7" style="width:24px;height:24px;border-radius:50%;background:#7c6af7;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#22c55e" style="width:24px;height:24px;border-radius:50%;background:#22c55e;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#5eead4" style="width:24px;height:24px;border-radius:50%;background:#5eead4;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#f59e0b" style="width:24px;height:24px;border-radius:50%;background:#f59e0b;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#f87171" style="width:24px;height:24px;border-radius:50%;background:#f87171;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#60a5fa" style="width:24px;height:24px;border-radius:50%;background:#60a5fa;cursor:pointer;border:2px solid transparent"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeProjectEdit()">Cancel</button>
+      <button class="btn-primary" onclick="saveProjectEdit()">Save</button>
+    </div>
+  </div>
 </div>
 
 <div id="app">
@@ -559,6 +799,18 @@
       </div>
       <div class="input-hint">Enter · Shift+Enter newline · 🎤 voice · 📎 attach</div>
     </footer>
+  </div>
+  <!-- draggable divider -->
+  <div id="dragger"></div>
+
+  <!-- artifact side panel -->
+  <div id="artifact-panel">
+    <div class="artifact-panel-head">
+      <div class="artifact-tabs" id="artifact-tabs"></div>
+      <button class="panel-btn" onclick="toggleArtifactPanel()" title="Close">✕</button>
+      <button class="panel-btn" onclick="openArtifactExternal()" title="Open in new tab">↗</button>
+    </div>
+    <div class="artifact-panel-body" id="artifact-panel-body"></div>
   </div>
 </div>
 
@@ -976,15 +1228,17 @@ function clearMessages(){
   [...msgs.children].forEach(c=>{if(c!==typing)c.remove()});
 }
 function scrollBottom(){const m=document.getElementById('messages');m.scrollTop=m.scrollHeight}
-function addBubble(role,content='',meta=''){
+function addBubble(role,content='',meta='',rawText=''){
   const msgs=document.getElementById('messages'),typing=document.getElementById('typing');
   const row=document.createElement('div');row.className=`msg-row ${role}`;
   const wrap=document.createElement('div');wrap.className='msg-wrap';
   const bub=document.createElement('div');bub.className='bubble';bub.innerHTML=content;
   wrap.appendChild(bub);
   if(meta){const m=document.createElement('div');m.className='msg-meta';m.textContent=meta;wrap.appendChild(m)}
+  // Add edit/retry/tts actions
+  addMessageActions(wrap, role, rawText||bub.innerText, row);
   row.appendChild(wrap);msgs.insertBefore(row,typing);scrollBottom();
-  return{wrap,bub};
+  return{wrap,bub,row};
 }
 function showTyping(v){document.getElementById('typing').style.display=v?'block':'none';if(v)scrollBottom()}
 
@@ -1152,9 +1406,23 @@ async function send(){
             <span class="t-label">${esc(evt.action)}</span>
             <span class="t-result">${esc(evt.label)}</span>`;
           toolContainer.appendChild(el);
-          // Artifact renderer — HTML/SVG files rendered inline
+          // Source cards for web_search results
+          if(evt.action==='web_search' && evt.result){
+            const sources=extractSources(evt.result);
+            if(sources?.length){
+              const cardsDiv=document.createElement('div');
+              cardsDiv.innerHTML=renderSourceCards(sources);
+              toolContainer.appendChild(cardsDiv);
+            }
+          }
+          // Artifact — open in side panel + show mini badge inline
           if(evt.artifact && evt.file_content && evt.file_path){
-            toolContainer.insertAdjacentHTML('beforeend',makeArtifact(evt.file_path,evt.file_content));
+            openArtifactPanel(evt.file_path, evt.file_content);
+            const badge=document.createElement('div');
+            badge.style.cssText='font-size:.7rem;color:var(--teal);padding:3px 0;cursor:pointer';
+            badge.textContent=`✨ ${evt.file_path} opened in panel →`;
+            badge.onclick=()=>document.getElementById('artifact-panel').classList.add('open');
+            toolContainer.appendChild(badge);
           } else if(evt.file_content&&evt.file_path){
             toolContainer.insertAdjacentHTML('beforeend',makeCodeViewer(evt.file_path,evt.file_content));
           }
@@ -1235,6 +1503,341 @@ async function newChat(){
 }
 
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+
+// ── ARTIFACT SIDE PANEL ───────────────────────────────────────────────────────
+const artifactItems = [];   // [{id, title, url, content}]
+let activeArtifactIdx = 0;
+
+function openArtifactPanel(title, content, mimeType='text/html') {
+  const blob = new Blob([content], {type: mimeType});
+  const url  = URL.createObjectURL(blob);
+  const id   = 'ap-' + Date.now();
+  artifactItems.push({id, title, url, content});
+  activeArtifactIdx = artifactItems.length - 1;
+  renderArtifactPanel();
+  document.getElementById('artifact-panel').classList.add('open');
+}
+
+function renderArtifactPanel() {
+  const tabs = document.getElementById('artifact-tabs');
+  const body = document.getElementById('artifact-panel-body');
+  tabs.innerHTML = artifactItems.map((a,i) =>
+    `<button class="artifact-tab ${i===activeArtifactIdx?'active':''}"
+      onclick="switchArtifact(${i})">${esc(a.title)}</button>`
+  ).join('');
+  body.innerHTML = artifactItems.map((a,i) =>
+    `<div class="artifact-iframe-wrap ${i===activeArtifactIdx?'active':''}" id="${a.id}">
+       <iframe src="${a.url}" sandbox="allow-scripts allow-same-origin"></iframe>
+     </div>`
+  ).join('');
+}
+
+function switchArtifact(idx) {
+  activeArtifactIdx = idx;
+  renderArtifactPanel();
+}
+
+function toggleArtifactPanel() {
+  document.getElementById('artifact-panel').classList.toggle('open');
+}
+
+function openArtifactExternal() {
+  const a = artifactItems[activeArtifactIdx];
+  if (a) window.open(a.url, '_blank');
+}
+
+// Setup dragger
+(()=>{
+  const dragger = document.getElementById('dragger');
+  const panel   = document.getElementById('artifact-panel');
+  let dragging  = false, startX = 0, startW = 0;
+  dragger.addEventListener('mousedown', e => {
+    dragging = true; startX = e.clientX; startW = panel.offsetWidth;
+    dragger.classList.add('dragging'); e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!dragging) return;
+    const delta = startX - e.clientX;
+    const newW  = Math.max(220, Math.min(startW + delta, window.innerWidth * 0.65));
+    panel.style.width = newW + 'px';
+  });
+  document.addEventListener('mouseup', () => {
+    dragging = false; dragger.classList.remove('dragging');
+  });
+})();
+
+
+// ── EDIT & RETRY ──────────────────────────────────────────────────────────────
+function addMessageActions(wrap, role, content, rowEl) {
+  const actions = document.createElement('div');
+  actions.className = 'msg-actions';
+
+  if (role === 'user') {
+    const editBtn = document.createElement('button');
+    editBtn.className = 'msg-action-btn'; editBtn.textContent = '✏️ Edit';
+    editBtn.onclick = () => {
+      ta.value = content; ta.dispatchEvent(new Event('input')); ta.focus();
+      // Remove this message and everything after it
+      const msgs  = document.getElementById('messages');
+      const nodes = [...msgs.children];
+      const idx   = nodes.indexOf(rowEl);
+      nodes.slice(idx).forEach(n => { if (n.id !== 'typing') n.remove(); });
+    };
+    actions.appendChild(editBtn);
+  }
+
+  if (role === 'agent') {
+    const retryBtn = document.createElement('button');
+    retryBtn.className = 'msg-action-btn'; retryBtn.textContent = '↺ Retry';
+    retryBtn.onclick = () => {
+      // Re-send the last user message
+      const msgs    = document.getElementById('messages');
+      const userRows = [...msgs.querySelectorAll('.msg-row.user')];
+      if (!userRows.length) return;
+      const last = userRows[userRows.length - 1].querySelector('.bubble');
+      if (last) {
+        // Remove last agent bubble and re-send
+        rowEl.remove();
+        ta.value = last.innerText.trim();
+        send();
+      }
+    };
+
+    const ttsBtn = document.createElement('button');
+    ttsBtn.className = 'msg-action-btn'; ttsBtn.textContent = '🔊';
+    ttsBtn.title = 'Read aloud';
+    ttsBtn.onclick = () => toggleTTS(ttsBtn, content);
+    actions.appendChild(retryBtn);
+    actions.appendChild(ttsBtn);
+  }
+
+  wrap.appendChild(actions);
+}
+
+
+// ── TTS ───────────────────────────────────────────────────────────────────────
+let _ttsUtterance = null;
+
+function toggleTTS(btn, text) {
+  if (!window.speechSynthesis) return;
+  if (window.speechSynthesis.speaking) {
+    window.speechSynthesis.cancel();
+    document.querySelectorAll('.tts-active').forEach(b => b.classList.remove('tts-active'));
+    if (_ttsUtterance && _ttsUtterance._btn === btn) return;
+  }
+  const clean = text.replace(/[#*`_~>]/g,'').trim();
+  const utt   = new SpeechSynthesisUtterance(clean);
+  utt._btn    = btn;
+  utt.rate    = 1.05;
+  utt.onend   = () => btn.classList.remove('tts-active');
+  utt.onerror = () => btn.classList.remove('tts-active');
+  _ttsUtterance = utt;
+  btn.classList.add('tts-active');
+  window.speechSynthesis.speak(utt);
+}
+
+
+// ── CUSTOM INSTRUCTIONS ───────────────────────────────────────────────────────
+async function openCIModal() {
+  const d = await fetch('/instructions').then(r=>r.json()).catch(()=>({instructions:''}));
+  document.getElementById('ci-text').value = d.instructions || '';
+  document.getElementById('ci-modal').classList.add('open');
+}
+function closeCIModal() { document.getElementById('ci-modal').classList.remove('open'); }
+async function saveCIModal() {
+  const val = document.getElementById('ci-text').value.trim();
+  await fetch('/instructions', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({instructions: val})});
+  closeCIModal();
+  addSysMsg('📋 Custom instructions saved');
+}
+
+
+// ── MEMORY MODAL ──────────────────────────────────────────────────────────────
+async function openMemoryModal() {
+  document.getElementById('memory-modal').classList.add('open');
+  await refreshMemoryModal();
+}
+function closeMemoryModal() { document.getElementById('memory-modal').classList.remove('open'); }
+
+async function refreshMemoryModal() {
+  const body = document.getElementById('memory-modal-body');
+  const d    = await fetch('/memory').then(r=>r.json()).catch(()=>({memories:[]}));
+  const mems = d.memories || [];
+  if (!mems.length) {
+    body.innerHTML = '<div style="color:var(--muted);font-size:.8rem;text-align:center;padding:20px">No memories yet. Save a chat to create one.</div>';
+    document.getElementById('mem-count').textContent = '0';
+    return;
+  }
+  document.getElementById('mem-count').textContent = mems.length;
+  body.innerHTML = mems.map(m => {
+    const date = new Date(m.created_at * 1000).toLocaleDateString('en',{month:'short',day:'numeric'});
+    return `<div class="memory-entry" id="me-${m.id}">
+      <div class="memory-date">${date}</div>
+      <div class="memory-text" id="mt-${m.id}" contenteditable="false">${esc(m.summary)}</div>
+      <button class="msg-action-btn" onclick="editMemoryEntry(${m.id})" title="Edit">✏️</button>
+      <button class="memory-del" onclick="deleteMemoryEntry(${m.id})" title="Delete">🗑</button>
+    </div>`;
+  }).join('');
+}
+
+function editMemoryEntry(id) {
+  const el = document.getElementById('mt-'+id);
+  if (!el) return;
+  if (el.contentEditable === 'true') {
+    // Save
+    el.contentEditable = 'false';
+    fetch('/memory/'+id, {method:'PATCH',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({summary: el.textContent.trim()})});
+  } else {
+    el.contentEditable = 'true';
+    el.focus();
+    // Move cursor to end
+    const range = document.createRange();
+    range.selectNodeContents(el); range.collapse(false);
+    window.getSelection().removeAllRanges();
+    window.getSelection().addRange(range);
+  }
+}
+
+async function deleteMemoryEntry(id) {
+  await fetch('/memory/'+id, {method:'DELETE'});
+  document.getElementById('me-'+id)?.remove();
+  const remaining = document.querySelectorAll('.memory-entry').length;
+  document.getElementById('mem-count').textContent = remaining;
+  if (!remaining) refreshMemoryModal();
+}
+
+async function clearAllMemory() {
+  if (!confirm('Clear all memory entries?')) return;
+  await fetch('/memory', {method:'DELETE'});
+  await refreshMemoryModal();
+}
+
+
+// ── PROJECTS ──────────────────────────────────────────────────────────────────
+let activeProjectId = null;
+let projectsData    = [];
+let peSelectedColor = '#7c6af7';
+
+async function openProjectsModal() {
+  document.getElementById('projects-modal').classList.add('open');
+  await refreshProjectsModal();
+}
+function closeProjectsModal() { document.getElementById('projects-modal').classList.remove('open'); }
+
+async function refreshProjectsModal() {
+  const d  = await fetch('/projects').then(r=>r.json()).catch(()=>({projects:[]}));
+  projectsData = d.projects || [];
+  const body   = document.getElementById('projects-modal-body');
+  if (!projectsData.length) {
+    body.innerHTML = '<div style="color:var(--muted);font-size:.8rem;padding:10px">No projects yet. Hit + New project to create one.</div>';
+    return;
+  }
+  body.innerHTML = projectsData.map(p => `
+    <div class="project-item ${p.id===activeProjectId?'active':''}" onclick="selectProject('${p.id}')">
+      <div class="project-dot" style="background:${p.color}"></div>
+      <div class="project-name">${esc(p.name)}</div>
+      <div class="project-actions">
+        <button class="chat-act-btn" onclick="event.stopPropagation();editProject('${p.id}')">✏️</button>
+        <button class="chat-act-btn" onclick="event.stopPropagation();deleteProject('${p.id}')" style="color:var(--red)">🗑</button>
+      </div>
+    </div>`).join('');
+}
+
+function selectProject(id) {
+  activeProjectId = activeProjectId === id ? null : id;
+  refreshProjectsModal();
+  const p = projectsData.find(x=>x.id===id);
+  if (p && activeProjectId) {
+    addSysMsg(`🗂️ Project: ${p.name}`);
+    // Show project instructions badge
+    if (p.instructions) addSysMsg(`📋 ${p.instructions.slice(0,80)}…`);
+  }
+  closeProjectsModal();
+}
+
+function newProject() {
+  openProjectEdit(null);
+}
+
+function editProject(id) {
+  openProjectEdit(id);
+}
+
+function openProjectEdit(id) {
+  const p = id ? projectsData.find(x=>x.id===id) : null;
+  document.getElementById('pe-id').value          = id || '';
+  document.getElementById('pe-name').value         = p?.name || '';
+  document.getElementById('pe-instructions').value = p?.instructions || '';
+  document.getElementById('pe-title').textContent  = id ? 'Edit Project' : 'New Project';
+  peSelectedColor = p?.color || '#7c6af7';
+  document.querySelectorAll('.color-swatch').forEach(s => {
+    s.style.border = s.dataset.color === peSelectedColor ? '2px solid white' : '2px solid transparent';
+    s.onclick = () => {
+      peSelectedColor = s.dataset.color;
+      document.querySelectorAll('.color-swatch').forEach(x =>
+        x.style.border = x.dataset.color === peSelectedColor ? '2px solid white' : '2px solid transparent');
+    };
+  });
+  document.getElementById('project-edit-modal').classList.add('open');
+}
+
+function closeProjectEdit() {
+  document.getElementById('project-edit-modal').classList.remove('open');
+}
+
+async function saveProjectEdit() {
+  const id   = document.getElementById('pe-id').value || undefined;
+  const name = document.getElementById('pe-name').value.trim();
+  if (!name) return;
+  await fetch('/projects', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      id, name,
+      instructions: document.getElementById('pe-instructions').value.trim(),
+      color: peSelectedColor,
+    })});
+  closeProjectEdit();
+  await refreshProjectsModal();
+}
+
+async function deleteProject(id) {
+  if (!confirm('Delete this project?')) return;
+  await fetch('/projects/'+id, {method:'DELETE'});
+  if (activeProjectId === id) activeProjectId = null;
+  await refreshProjectsModal();
+}
+
+
+// ── SOURCE CARDS ──────────────────────────────────────────────────────────────
+function renderSourceCards(sources) {
+  if (!sources?.length) return '';
+  const cards = sources.map((s, i) => `
+    <a class="source-card" href="${esc(s.url)}" target="_blank" rel="noopener">
+      <img class="source-favicon"
+           src="https://www.google.com/s2/favicons?domain=${esc(s.domain)}&sz=16"
+           onerror="this.style.display='none'" alt="">
+      <div class="source-info">
+        <div class="source-domain">${esc(s.domain)}</div>
+        <div class="source-title">${esc(s.title)}</div>
+        <div class="source-snippet">${esc(s.snippet)}</div>
+      </div>
+      <div class="source-num">[${i+1}]</div>
+    </a>`).join('');
+  return `<div class="search-sources">${cards}</div>`;
+}
+
+// Extract sources JSON from web_search results
+function extractSources(toolResult) {
+  const m = toolResult.match(/\[SOURCES_JSON\](.*?)\[\/SOURCES_JSON\]/s);
+  if (!m) return null;
+  try { return JSON.parse(m[1]); } catch { return null; }
+}
+
 
 init();
 </script>

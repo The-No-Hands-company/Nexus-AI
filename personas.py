@@ -85,7 +85,9 @@ def list_personas() -> list:
     return [{"id": k, **{kk: vv for kk, vv in v.items() if kk != "prompt_prefix"}}
             for k, v in PERSONAS.items()]
 
-def build_system_prompt(base_prompt: str, persona_name: str | None = None) -> str:
+def build_system_prompt(base_prompt: str, persona_name: str | None = None,
+                            custom_instructions: str = "") -> str:
     persona = get_persona(persona_name)
     prefix = persona["prompt_prefix"]
-    return f"{prefix}\n\n{base_prompt}"
+    ci_block = f"\n\n[USER INSTRUCTIONS — always follow these]\n{custom_instructions}" if custom_instructions.strip() else ""
+    return f"{prefix}{ci_block}\n\n{base_prompt}"
