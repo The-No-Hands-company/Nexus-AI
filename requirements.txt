@@ -2,3 +2,5 @@ fastapi==0.115.12
 uvicorn[standard]==0.34.0
 requests==2.32.3
 duckduckgo-search==8.1.1
+pymupdf==1.24.5
+yt-dlp==2024.11.18

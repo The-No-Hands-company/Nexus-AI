@@ -70,7 +70,26 @@ PERSONAS: Dict[str, Dict[str, Any]] = {
 _active_persona = "assistant"
 
 def get_persona(name: str | None = None) -> Dict[str, Any]:
-    return PERSONAS.get(name or _active_persona, PERSONAS["assistant"])
+    pid = name or _active_persona
+    if pid in PERSONAS:
+        return PERSONAS[pid]
+    # Check custom personas
+    try:
+        from db import load_custom_personas
+        for p in load_custom_personas():
+            if p["id"] == pid:
+                return {
+                    "label":        p["name"],
+                    "icon":         p["icon"],
+                    "description":  p["description"],
+                    "color":        p["color"],
+                    "temperature":  p["temperature"],
+                    "tier":         p["tier"],
+                    "prompt_prefix":p["prompt_prefix"],
+                }
+    except Exception:
+        pass
+    return PERSONAS["assistant"]
 
 def set_persona(name: str) -> Dict[str, Any]:
     global _active_persona
@@ -82,6 +101,31 @@ def get_active_persona_name() -> str:
     return _active_persona
 
 def list_personas() -> list:
+    """Returns built-in personas merged with any custom ones from DB."""
+    try:
+        from db import load_custom_personas
+        custom = load_custom_personas()
+        custom_converted = {
+            p["id"]: {
+                "label":        p["name"],
+                "icon":         p["icon"],
+                "description":  p["description"],
+                "color":        p["color"],
+                "temperature":  p["temperature"],
+                "tier":         p["tier"],
+                "prompt_prefix":p["prompt_prefix"],
+                "custom":       True,
+            }
+            for p in custom
+        }
+    except Exception:
+        custom_converted = {}
+
+    all_personas = {**PERSONAS, **custom_converted}
+    return [{"id": k, **{kk: vv for kk, vv in v.items() if kk != "prompt_prefix"}}
+            for k, v in all_personas.items()]
+
+def _list_personas_orig() -> list:
     return [{"id": k, **{kk: vv for kk, vv in v.items() if kk != "prompt_prefix"}}
             for k, v in PERSONAS.items()]
 

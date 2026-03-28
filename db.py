@@ -270,3 +270,195 @@ def delete_memory_entry(entry_id: int) -> None:
     _conn().execute("DELETE FROM memory WHERE id=?", (entry_id,))
     _conn().commit()
     _schedule_push()
+
+
+# ── PINNED CHATS ──────────────────────────────────────────────────────────────
+
+def pin_chat(cid: str, pinned: bool) -> None:
+    try:
+        _conn().execute("ALTER TABLE chats ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0")
+        _conn().commit()
+    except Exception:
+        pass   # column already exists
+    _conn().execute("UPDATE chats SET pinned=? WHERE id=?", (1 if pinned else 0, cid))
+    _conn().commit()
+    _schedule_push()
+
+
+def get_pinned_chats() -> list[str]:
+    try:
+        rows = _conn().execute("SELECT id FROM chats WHERE pinned=1 ORDER BY updated_at DESC").fetchall()
+        return [r["id"] for r in rows]
+    except Exception:
+        return []
+
+
+# ── FULL-TEXT SEARCH ──────────────────────────────────────────────────────────
+
+def search_chats(query: str) -> list[dict]:
+    """Simple case-insensitive search over chat titles and message content."""
+    rows = _conn().execute(
+        "SELECT id, title, updated_at, messages FROM chats ORDER BY updated_at DESC"
+    ).fetchall()
+    q    = query.lower()
+    hits = []
+    for row in rows:
+        title = (row["title"] or "").lower()
+        msgs  = row["messages"] or "[]"
+        # Search in title
+        if q in title:
+            hits.append({"id": row["id"], "title": row["title"],
+                         "updated_at": row["updated_at"], "match": "title"})
+            continue
+        # Search in message content
+        try:
+            import json as _j
+            for m in _j.loads(msgs):
+                content = m.get("content", "")
+                if isinstance(content, str) and q in content.lower():
+                    snippet = content[max(0, content.lower().find(q)-40):][:100]
+                    hits.append({"id": row["id"], "title": row["title"],
+                                 "updated_at": row["updated_at"],
+                                 "match": "content", "snippet": snippet})
+                    break
+        except Exception:
+            pass
+    return hits[:20]
+
+
+# ── CUSTOM PERSONAS ───────────────────────────────────────────────────────────
+
+def save_custom_persona(pid: str, name: str, icon: str, description: str,
+                        prompt_prefix: str, color: str,
+                        temperature: float, tier: str) -> None:
+    try:
+        _conn().executescript("""
+            CREATE TABLE IF NOT EXISTS custom_personas (
+                id           TEXT PRIMARY KEY,
+                name         TEXT NOT NULL,
+                icon         TEXT NOT NULL DEFAULT '🤖',
+                description  TEXT NOT NULL DEFAULT '',
+                prompt_prefix TEXT NOT NULL DEFAULT '',
+                color        TEXT NOT NULL DEFAULT '#7c6af7',
+                temperature  REAL NOT NULL DEFAULT 0.2,
+                tier         TEXT NOT NULL DEFAULT 'medium'
+            )
+        """)
+    except Exception:
+        pass
+    _conn().execute("""
+        INSERT INTO custom_personas(id,name,icon,description,prompt_prefix,color,temperature,tier)
+        VALUES(?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, icon=excluded.icon,
+            description=excluded.description, prompt_prefix=excluded.prompt_prefix,
+            color=excluded.color, temperature=excluded.temperature, tier=excluded.tier
+    """, (pid, name, icon, description, prompt_prefix, color, temperature, tier))
+    _conn().commit()
+    _schedule_push()
+
+
+def load_custom_personas() -> list[dict]:
+    try:
+        _conn().execute("CREATE TABLE IF NOT EXISTS custom_personas(id TEXT PRIMARY KEY, name TEXT, icon TEXT, description TEXT, prompt_prefix TEXT, color TEXT, temperature REAL, tier TEXT)")
+        rows = _conn().execute("SELECT * FROM custom_personas").fetchall()
+        return [dict(r) for r in rows]
+    except Exception:
+        return []
+
+
+def delete_custom_persona(pid: str) -> None:
+    _conn().execute("DELETE FROM custom_personas WHERE id=?", (pid,))
+    _conn().commit()
+    _schedule_push()
+
+
+# ── PINNED CHATS ──────────────────────────────────────────────────────────────
+
+def init_pins_table() -> None:
+    _conn().executescript("""
+        CREATE TABLE IF NOT EXISTS pinned_chats (
+            chat_id    TEXT PRIMARY KEY,
+            pinned_at  TEXT NOT NULL
+        );
+    """)
+    _conn().commit()
+
+def pin_chat(chat_id: str) -> None:
+    from datetime import datetime
+    _conn().execute(
+        "INSERT OR IGNORE INTO pinned_chats(chat_id, pinned_at) VALUES(?,?)",
+        (chat_id, datetime.utcnow().isoformat())
+    )
+    _conn().commit()
+    _schedule_push()
+
+def unpin_chat(chat_id: str) -> None:
+    _conn().execute("DELETE FROM pinned_chats WHERE chat_id=?", (chat_id,))
+    _conn().commit()
+    _schedule_push()
+
+def get_pinned_ids() -> set:
+    rows = _conn().execute("SELECT chat_id FROM pinned_chats").fetchall()
+    return {r["chat_id"] for r in rows}
+
+
+# ── FULL-TEXT SEARCH ──────────────────────────────────────────────────────────
+
+def search_chats(query: str) -> list[dict]:
+    """Search chat titles and message content."""
+    rows = _conn().execute(
+        "SELECT id, title, created_at, updated_at, messages FROM chats"
+    ).fetchall()
+    query_lower = query.lower()
+    results = []
+    for r in rows:
+        title = r["title"] or ""
+        msgs  = json.loads(r["messages"]) if isinstance(r["messages"], str) else r["messages"]
+        # Check title
+        title_match = query_lower in title.lower()
+        # Check message content
+        content_match = False
+        snippet = ""
+        for m in msgs:
+            content = m.get("content", "")
+            if not isinstance(content, str): continue
+            if query_lower in content.lower():
+                content_match = True
+                # Extract snippet around match
+                idx = content.lower().find(query_lower)
+                start = max(0, idx - 40)
+                end   = min(len(content), idx + len(query) + 80)
+                snippet = ("…" if start > 0 else "") + content[start:end] + ("…" if end < len(content) else "")
+                break
+        if title_match or content_match:
+            results.append({
+                "id":         r["id"],
+                "title":      title,
+                "updated_at": r["updated_at"],
+                "snippet":    snippet,
+                "title_match": title_match,
+            })
+    # Sort: title matches first, then by date
+    results.sort(key=lambda x: (not x["title_match"], x["updated_at"]), reverse=True)
+    return results[:20]
+
+
+# ── USER PREFERENCES ──────────────────────────────────────────────────────────
+
+def save_pref(key: str, value: str) -> None:
+    _conn().execute("CREATE TABLE IF NOT EXISTS user_prefs(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+    _conn().execute(
+        "INSERT INTO user_prefs(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (key, value)
+    )
+    _conn().commit()
+    _schedule_push()
+
+def load_pref(key: str, default: str = "") -> str:
+    try:
+        _conn().execute("CREATE TABLE IF NOT EXISTS user_prefs(key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        row = _conn().execute("SELECT value FROM user_prefs WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+    except Exception:
+        return default

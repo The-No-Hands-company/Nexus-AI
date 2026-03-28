@@ -225,6 +225,59 @@
     .project-actions { display:flex;gap:3px;opacity:0;transition:opacity .1s; }
     .project-item:hover .project-actions { opacity:1; }
 
+
+    /* ── THEMES ── */
+    body.light {
+      --bg:#f8fafc; --surface:#ffffff; --surface2:#f1f5f9;
+      --border:#e2e8f0; --text:#1e293b; --muted:#94a3b8;
+    }
+    body.light .user .bubble { background:var(--accent); color:#fff; }
+    body.light .agent .bubble { background:#fff; border-color:#e2e8f0; color:#1e293b; }
+    body.light #sidebar { background:#fff; }
+    body.light header, body.light footer { background:#fff; }
+    body.light #drawer { background:#f8fafc; }
+
+    /* ── TOKEN COUNTER ── */
+    .token-count {
+      font-size:.62rem; color:var(--muted); margin-top:2px;
+      display:flex; align-items:center; gap:6px;
+    }
+    .token-count .tc-in  { color:var(--muted); }
+    .token-count .tc-out { color:var(--teal); }
+
+    /* ── SEARCH BAR ── */
+    #search-wrap {
+      padding:8px 14px; border-bottom:1px solid var(--border);
+      display:none; flex-shrink:0;
+    }
+    #search-wrap.open { display:block; }
+    #search-input {
+      width:100%; background:var(--bg); border:1px solid var(--border);
+      border-radius:8px; padding:7px 12px; color:var(--text);
+      font-size:.8rem; outline:none; transition:border-color .15s;
+    }
+    #search-input:focus { border-color:var(--accent); }
+    .search-results { margin-top:6px; display:flex; flex-direction:column; gap:4px; }
+    .search-hit {
+      padding:7px 10px; border-radius:8px; cursor:pointer;
+      background:var(--surface2); border:1px solid var(--border);
+      transition:border-color .13s;
+    }
+    .search-hit:hover { border-color:var(--accent); }
+    .search-hit-title { font-size:.78rem; font-weight:600; }
+    .search-hit-snippet { font-size:.68rem; color:var(--muted); margin-top:2px;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+
+    /* ── CUSTOM PERSONA EDITOR ── */
+    .cpersona-item {
+      display:flex; align-items:center; gap:8px; padding:7px 10px;
+      border-radius:8px; background:var(--surface2); margin-bottom:5px;
+    }
+    .cpersona-icon { font-size:18px; flex-shrink:0; }
+    .cpersona-info { flex:1; min-width:0; }
+    .cpersona-name { font-size:.8rem; font-weight:600; }
+    .cpersona-desc { font-size:.68rem; color:var(--muted); }
+
     /* ── SIDEBAR ── */
     #sidebar{width:var(--sidebar-w);flex-shrink:0;background:var(--surface);
       border-right:1px solid var(--border);display:flex;flex-direction:column;
@@ -615,6 +668,8 @@
   <div class="logo">Claude <em>Alt</em></div>
   <div class="header-spacer"></div>
   <button id="save-btn" onclick="saveCurrentChat()">💾 Save</button>
+  <button class="btn-icon" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">☀️</button>
+  <button class="btn-icon" onclick="toggleSearch()" title="Search chats">🔍</button>
   <button class="btn-icon" onclick="openProjectsModal()" title="Projects">🗂️</button>
   <button class="btn-icon" onclick="openCIModal()" title="Custom instructions">📋</button>
   <button class="btn-icon" onclick="openMemoryModal()" title="Memory">🧠</button>
@@ -633,6 +688,57 @@
   <button class="btn-install-dismiss" onclick="dismissInstall()">×</button>
 </div>
 
+
+
+<!-- Custom persona editor modal -->
+<div class="modal-overlay" id="persona-editor-modal" onclick="if(event.target===this)closePersonaEditor()">
+  <div class="modal-box" style="max-width:460px">
+    <div class="modal-header">
+      <h2>🎭 Persona Editor</h2>
+      <button class="modal-x" onclick="closePersonaEditor()">×</button>
+    </div>
+    <div class="modal-body" id="persona-editor-body" style="display:flex;flex-direction:column;gap:14px">
+      <div id="existing-personas-list"></div>
+      <hr style="border-color:var(--border)">
+      <div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Create new persona</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field" style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:.7rem;color:var(--muted)">Name</label>
+          <input type="text" id="cpe-name" placeholder="My Persona"
+            style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 10px;color:var(--text);font-size:.82rem;outline:none">
+        </div>
+        <div class="field" style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:.7rem;color:var(--muted)">Icon (emoji)</label>
+          <input type="text" id="cpe-icon" placeholder="🧠" maxlength="2"
+            style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 10px;color:var(--text);font-size:.82rem;outline:none">
+        </div>
+      </div>
+      <div class="field" style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:.7rem;color:var(--muted)">System prompt</label>
+        <textarea id="cpe-prompt" placeholder="You are an expert in…"
+          style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 10px;color:var(--text);font-size:.82rem;outline:none;resize:vertical;min-height:80px;line-height:1.5"></textarea>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field" style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:.7rem;color:var(--muted)">Temperature (0–1)</label>
+          <input type="range" id="cpe-temp" min="0" max="1" step="0.05" value="0.2"
+            oninput="document.getElementById('cpe-temp-val').textContent=this.value"
+            style="accent-color:var(--accent)">
+          <span id="cpe-temp-val" style="font-size:.7rem;color:var(--accent)">0.2</span>
+        </div>
+        <div class="field" style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:.7rem;color:var(--muted)">Color</label>
+          <input type="color" id="cpe-color" value="#7c6af7"
+            style="width:100%;height:34px;border:1px solid var(--border);border-radius:7px;background:none;cursor:pointer">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closePersonaEditor()">Cancel</button>
+      <button class="btn-primary" onclick="saveCustomPersona()">Create Persona</button>
+    </div>
+  </div>
+</div>
 
 <!-- Custom instructions modal -->
 <div class="modal-overlay" id="ci-modal" onclick="if(event.target===this)closeCIModal()">
@@ -725,6 +831,11 @@
     <div class="sidebar-head">
       <span>History</span>
       <button class="btn-new-chat" onclick="newChat()">+ New</button>
+    </div>
+    <div id="search-wrap">
+      <input type="text" id="search-input" placeholder="🔍 Search chats…"
+        oninput="searchChats(this.value)">
+      <div class="search-results" id="search-results"></div>
     </div>
     <div id="chat-list"><div class="no-chats">No saved chats yet.<br>Hit 💾 to save one.</div></div>
     <div class="memory-bar">
@@ -1047,6 +1158,7 @@ function renderChatList(chats){
       <span class="chat-item-title">${esc(c.title)}</span>
       <span class="chat-item-date">${date}</span>
       <div class="chat-actions">
+  <button class="chat-act-btn" onclick="event.stopPropagation();togglePin('${c.id}','${c.pinned?'true':'false'}')" title="${c.pinned?'Unpin':'Pin'}">${c.pinned?'📌':'📍'}</button>
         <button class="chat-act-btn" onclick="event.stopPropagation();exportChat('${c.id}')" title="Export">⬇</button>
         <button class="chat-act-btn" onclick="event.stopPropagation();shareChat('${c.id}')" title="Share">🔗</button>
         <button class="chat-act-btn" onclick="event.stopPropagation();deleteChat('${c.id}')" title="Delete" style="color:var(--red)">🗑</button>
@@ -1455,6 +1567,8 @@ async function send(){
             const m=document.createElement('div');m.className='msg-meta';
             m.textContent=`${evt.provider} · ${evt.model}`;agentWrap.appendChild(m);
           }
+          // Token counter
+          addTokenCount(agentWrap, val, evt.content||'');
           scrollBottom();refreshProviders();
 
         } else if(evt.type==='error'){
@@ -1504,6 +1618,146 @@ async function newChat(){
 
 function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 
+
+
+// ── THEME ──────────────────────────────────────────────────────────────────────
+let isDark = localStorage.getItem('theme') !== 'light';
+function applyTheme() {
+  document.body.classList.toggle('light', !isDark);
+  document.getElementById('theme-btn').textContent = isDark ? '☀️' : '🌙';
+}
+function toggleTheme() {
+  isDark = !isDark;
+  localStorage.setItem('theme', isDark ? 'dark' : 'light');
+  applyTheme(); haptic('light');
+}
+applyTheme();
+
+
+// ── KEYBOARD SHORTCUTS ─────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key === 'k') { e.preventDefault(); newChat(); }
+  if (mod && e.key === '/') { e.preventDefault(); toggleSidebar(); }
+  if (mod && e.key === 'f') { e.preventDefault(); toggleSearch(); }
+  if (e.key === 'Escape') {
+    if (busy) stopStream();
+    // Close any open modal
+    document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
+    if (drawerOpen) toggleDrawer();
+  }
+});
+
+
+// ── SEARCH ─────────────────────────────────────────────────────────────────────
+function toggleSearch() {
+  const wrap = document.getElementById('search-wrap');
+  wrap.classList.toggle('open');
+  if (wrap.classList.contains('open')) {
+    if (!sidebarOpen) toggleSidebar();
+    document.getElementById('search-input').focus();
+  }
+}
+
+let _searchTimer = null;
+async function searchChats(q) {
+  clearTimeout(_searchTimer);
+  const resultsEl = document.getElementById('search-results');
+  if (!q.trim()) { resultsEl.innerHTML = ''; return; }
+  _searchTimer = setTimeout(async () => {
+    const d = await fetch(`/chats/search?q=${encodeURIComponent(q)}`).then(r=>r.json()).catch(()=>({results:[]}));
+    const hits = d.results || [];
+    if (!hits.length) {
+      resultsEl.innerHTML = '<div style="color:var(--muted);font-size:.75rem;padding:4px 0">No results</div>';
+      return;
+    }
+    resultsEl.innerHTML = hits.map(h => `
+      <div class="search-hit" onclick="loadChat('${h.id}');toggleSearch()">
+        <div class="search-hit-title">${esc(h.title)}</div>
+        ${h.snippet ? `<div class="search-hit-snippet">${esc(h.snippet)}</div>` : ''}
+      </div>`).join('');
+  }, 250);
+}
+
+
+// ── PIN CHAT ───────────────────────────────────────────────────────────────────
+async function togglePin(cid, currentlyPinned) {
+  const newVal = currentlyPinned !== 'true';
+  await fetch(`/chats/${cid}/pin`, {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({pinned: newVal})});
+  await loadChatList();
+}
+
+
+// ── TOKEN COUNTER ──────────────────────────────────────────────────────────────
+function estimateTokens(text) {
+  // Rough estimate: ~4 chars per token
+  return Math.ceil((text || '').length / 4);
+}
+
+function addTokenCount(wrap, inputText, outputText) {
+  const inToks  = estimateTokens(inputText);
+  const outToks = estimateTokens(outputText);
+  const el = document.createElement('div');
+  el.className = 'token-count';
+  el.innerHTML = `<span class="tc-in">↑ ~${inToks} tokens</span>
+                  <span class="tc-out">↓ ~${outToks} tokens</span>`;
+  wrap.appendChild(el);
+}
+
+
+// ── CUSTOM PERSONA EDITOR ──────────────────────────────────────────────────────
+async function openPersonaEditor() {
+  document.getElementById('persona-editor-modal').classList.add('open');
+  await refreshPersonaEditorList();
+}
+function closePersonaEditor() {
+  document.getElementById('persona-editor-modal').classList.remove('open');
+}
+
+async function refreshPersonaEditorList() {
+  const d    = await fetch('/personas/custom').then(r=>r.json()).catch(()=>({personas:[]}));
+  const list = document.getElementById('existing-personas-list');
+  if (!(d.personas||[]).length) {
+    list.innerHTML = '<div style="color:var(--muted);font-size:.75rem">No custom personas yet.</div>';
+    return;
+  }
+  list.innerHTML = (d.personas||[]).map(p => `
+    <div class="cpersona-item">
+      <div class="cpersona-icon">${p.icon||'🤖'}</div>
+      <div class="cpersona-info">
+        <div class="cpersona-name">${esc(p.name)}</div>
+        <div class="cpersona-desc">${esc(p.description||'')}</div>
+      </div>
+      <button class="memory-del" onclick="deleteCustomPersona('${p.id}')">🗑</button>
+    </div>`).join('');
+}
+
+async function saveCustomPersona() {
+  const name   = document.getElementById('cpe-name').value.trim();
+  const icon   = document.getElementById('cpe-icon').value.trim() || '🤖';
+  const prompt = document.getElementById('cpe-prompt').value.trim();
+  const temp   = parseFloat(document.getElementById('cpe-temp').value);
+  const color  = document.getElementById('cpe-color').value;
+  if (!name || !prompt) { alert('Name and system prompt are required.'); return; }
+  await fetch('/personas/custom', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({name, icon, prompt_prefix: prompt,
+                          description: prompt.slice(0,60)+'…',
+                          temperature: temp, color, tier:'medium'})});
+  // Clear form
+  ['cpe-name','cpe-icon','cpe-prompt'].forEach(id => document.getElementById(id).value='');
+  await refreshPersonaEditorList();
+  await loadPersonas();
+  addSysMsg(`🎭 Persona "${name}" created`);
+}
+
+async function deleteCustomPersona(id) {
+  await fetch(`/personas/custom/${id}`, {method:'DELETE'});
+  await refreshPersonaEditorList();
+  await loadPersonas();
+}
 
 // ── ARTIFACT SIDE PANEL ───────────────────────────────────────────────────────
 const artifactItems = [];   // [{id, title, url, content}]
