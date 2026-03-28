@@ -383,21 +383,95 @@ def tool_run_command(cmd: str, workdir: str) -> str:
     except Exception as e: return f"Error: {e}"
 
 def tool_clone_repo(url: str, token: str, workdir: str) -> str:
-    repo_name = url.rstrip('/').split('/')[-1].replace('.git','')
+    """
+    Fetch a GitHub repo via the Contents API (plain HTTPS, no git binary needed).
+    Works in sandboxes where outbound git:// / git+https is blocked.
+    Falls back to subprocess git clone if API fetch fails.
+    """
+    import requests as _req, base64 as _b64
+
+    # Parse owner/repo from URL
+    parts = url.rstrip('/').replace('.git','').split('/')
+    try:
+        owner, repo_name = parts[-2], parts[-1]
+    except IndexError:
+        return f"❌ Cannot parse owner/repo from URL: {url}"
+
     dest = os.path.join(workdir, repo_name)
-    if os.path.exists(os.path.join(dest, ".git")):
-        return f"Already cloned at {dest}"
-    auth_url = url
+    if os.path.exists(dest) and os.listdir(dest):
+        top = [f for f in os.listdir(dest) if not f.startswith('.')][:20]
+        return f"Already fetched at {dest}\nFiles: {', '.join(top)}"
+
+    os.makedirs(dest, exist_ok=True)
+    headers = {"Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28"}
     if token:
-        auth_url = url.replace("https://", f"https://{token}@")
-    r = subprocess.run(["git","clone", auth_url, dest],
-                       capture_output=True, text=True, timeout=60,
-                       env={**os.environ,"GIT_TERMINAL_PROMPT":"0"})
-    if r.returncode != 0:
-        return f"Clone failed: {(r.stdout+r.stderr).strip()}"
-    # List top-level files
-    top = [f for f in os.listdir(dest) if not f.startswith('.')][:20]
-    return f"Cloned to {dest}\nTop files: {', '.join(top)}"
+        headers["Authorization"] = f"Bearer {token}"
+
+    def _fetch_tree(owner, repo, path="", depth=0):
+        """Recursively fetch directory contents via API."""
+        if depth > 4:
+            return 0   # safety limit
+        api_url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
+        try:
+            resp = _req.get(api_url, headers=headers, timeout=20)
+            if resp.status_code == 404:
+                return 0
+            resp.raise_for_status()
+        except Exception as e:
+            return 0
+
+        items = resp.json()
+        if isinstance(items, dict):
+            items = [items]   # single file returned
+
+        fetched = 0
+        for item in items:
+            item_path = item.get("path", "")
+            local_path = os.path.join(dest, item_path)
+
+            if item["type"] == "dir":
+                os.makedirs(local_path, exist_ok=True)
+                fetched += _fetch_tree(owner, repo, item_path, depth+1)
+            elif item["type"] == "file":
+                # Skip very large files (>500KB)
+                if item.get("size", 0) > 500_000:
+                    continue
+                try:
+                    file_resp = _req.get(item["url"], headers=headers, timeout=20)
+                    file_resp.raise_for_status()
+                    content = file_resp.json().get("content", "")
+                    decoded = _b64.b64decode(content)
+                    os.makedirs(os.path.dirname(local_path), exist_ok=True)
+                    with open(local_path, "wb") as f:
+                        f.write(decoded)
+                    fetched += 1
+                except Exception:
+                    pass
+        return fetched
+
+    # Try API fetch first
+    count = _fetch_tree(owner, repo_name)
+
+    if count == 0:
+        # API failed — fall back to git subprocess
+        auth_url = url
+        if token:
+            auth_url = url.replace("https://", f"https://{token}@")
+        r = subprocess.run(
+            ["git", "clone", "--depth=1", auth_url, dest],
+            capture_output=True, text=True, timeout=90,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+        )
+        if r.returncode != 0:
+            return (f"❌ Both API fetch and git clone failed.\n"
+                    f"API: fetched 0 files. Git: {(r.stdout+r.stderr).strip()[:300]}")
+        count = sum(len(fs) for _,_,fs in os.walk(dest))
+
+    top = sorted([f for f in os.listdir(dest) if not f.startswith('.')])[:20]
+    return (f"✅ Fetched {owner}/{repo_name} via GitHub API ({count} files)\n"
+            f"Local path: {dest}\n"
+            f"Top-level: {', '.join(top)}")
 
 def tool_create_repo(name: str, description: str, private: bool,
                      token: str, org: str = "") -> str:
@@ -445,20 +519,75 @@ def tool_commit_push(message: str, repo_url: str, token: str, workdir: str) -> s
     repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git','')
     repo_dir = os.path.join(workdir, repo_name) if repo_name and os.path.isdir(os.path.join(workdir, repo_name)) else workdir
 
-    def _git(args):
-        return subprocess.run(["git","-C",repo_dir]+args, capture_output=True, text=True,
-                              env={**os.environ,"GIT_TERMINAL_PROMPT":"0"})
-    _git(["config","user.name","Claude-Alt-Agent"])
-    _git(["config","user.email","agent@nohands.company"])
-    _git(["add","."])
-    c = _git(["commit","-m",message])
-    if c.returncode != 0 and "nothing to commit" in c.stdout: return "Nothing to commit."
-    push_url = repo_url.replace("https://",f"https://{token}@") if token else repo_url
-    r = subprocess.run(["git","-C",repo_dir,"push",push_url],
-                       capture_output=True, text=True,
-                       env={**os.environ,"GIT_TERMINAL_PROMPT":"0"})
-    if r.returncode != 0: raise Exception(f"Push failed: {(r.stdout+r.stderr).strip()}")
-    return f"✅ Committed & pushed: {message}"
+    import requests as _req, base64 as _b64, hashlib as _hl
+
+    # Parse owner/repo
+    parts = repo_url.rstrip('/').replace('.git','').split('/')
+    try:
+        owner, repo_name_api = parts[-2], parts[-1]
+    except IndexError:
+        return f"❌ Cannot parse owner/repo from URL: {repo_url}"
+
+    gh_headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+    def _get_sha(path_in_repo):
+        """Get the SHA of an existing file (needed for updates)."""
+        r = _req.get(
+            f"https://api.github.com/repos/{owner}/{repo_name_api}/contents/{path_in_repo}",
+            headers=gh_headers, timeout=15
+        )
+        if r.status_code == 200:
+            return r.json().get("sha")
+        return None
+
+    def _push_file(local_path, repo_path):
+        """Push a single file via GitHub Contents API."""
+        with open(local_path, "rb") as f:
+            raw = f.read()
+        encoded = _b64.b64encode(raw).decode()
+        sha = _get_sha(repo_path)
+        payload = {"message": message, "content": encoded}
+        if sha:
+            payload["sha"] = sha
+        r = _req.put(
+            f"https://api.github.com/repos/{owner}/{repo_name_api}/contents/{repo_path}",
+            headers=gh_headers, json=payload, timeout=20
+        )
+        return r.status_code in (200, 201)
+
+    # Walk repo_dir and push all non-.git files
+    pushed, failed = 0, 0
+    SKIP_DIRS  = {'.git', 'node_modules', '__pycache__', '.venv', 'venv', 'dist', '.next'}
+    SKIP_EXTS  = {'.pyc', '.pyo', '.class', '.o', '.so', '.dll', '.exe', '.bin'}
+    MAX_SIZE   = 900_000  # GitHub API limit is 1MB, stay under
+
+    for dirpath, dirnames, filenames in os.walk(repo_dir):
+        # Prune skip dirs in-place
+        dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
+        for fname in filenames:
+            ext = os.path.splitext(fname)[1].lower()
+            if ext in SKIP_EXTS:
+                continue
+            local_abs  = os.path.join(dirpath, fname)
+            if os.path.getsize(local_abs) > MAX_SIZE:
+                continue
+            repo_rel = os.path.relpath(local_abs, repo_dir).replace(os.sep, '/')
+            if _push_file(local_abs, repo_rel):
+                pushed += 1
+            else:
+                failed += 1
+
+    if pushed == 0 and failed == 0:
+        return "Nothing to push (no files found)."
+    if pushed == 0:
+        return f"❌ Push failed for all {failed} files. Check token permissions."
+    return (f"✅ Pushed {pushed} file(s) to {owner}/{repo_name_api}\n"
+            f"Commit message: {message}"
+            + (f"\n⚠️ {failed} file(s) failed to push." if failed else ""))
 
 # ── artifact detection ────────────────────────────────────────────────────────
 _ARTIFACT_EXTS = {'.html','htmlv','.svg','.jsx','.tsx'}
