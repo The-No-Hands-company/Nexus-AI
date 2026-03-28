@@ -7,6 +7,9 @@ from agent import (run_agent_task, stream_agent_task, get_providers_list,
                    get_config, update_config, call_llm_with_fallback,
                    get_session_dir, set_session_token, _session_state,
                    _config, PERSONAS)
+from db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats,
+               load_chat as db_load_chat, delete_chat as db_delete_chat,
+               save_share as db_save_share, load_share as db_load_share)
 from personas import list_personas, set_persona, get_active_persona_name, get_persona
 from memory import (add_memory, get_memory_context, summarize_history,
                     delete_all as delete_all_memory, get_all as get_all_memory)
@@ -15,8 +18,19 @@ app = FastAPI(title="Claude Alt")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 sessions: dict[str, list] = {}
-chats:    dict[str, dict] = {}
-shares:   dict[str, dict] = {}
+_active_streams: dict[str, threading.Event] = {}
+
+# ── init DB and seed in-memory caches ─────────────────────────────────────────
+init_db()
+
+# Seed chats from DB
+chats: dict[str, dict] = {}
+for _row in db_load_chats():
+    _row["messages"] = __import__("json").loads(_row["messages"]) if isinstance(_row["messages"], str) else _row["messages"]
+    chats[_row["id"]] = _row
+
+# Shares are kept in-memory only (read-only links, OK to lose on restart)
+shares: dict[str, dict] = {}
 _active_streams: dict[str, threading.Event] = {}
 
 
@@ -133,9 +147,12 @@ async def save_chat(request: Request):
     title   = data.get("title") or _auto_title(history)
     now     = datetime.utcnow().isoformat()
     cid     = data.get("chat_id") or str(uuid.uuid4())
+    created = chats[cid]["created_at"] if cid in chats else now
     chats[cid] = {"id":cid,"title":title[:80],
-                  "created_at":chats[cid]["created_at"] if cid in chats else now,
+                  "created_at":created,
                   "updated_at":now,"messages":history}
+    # Write through to SQLite
+    db_save_chat(cid, title, created, now, history)
     def _bg():
         summary = summarize_history(history, call_llm_with_fallback)
         if summary: add_memory(summary)
@@ -144,12 +161,16 @@ async def save_chat(request: Request):
 
 @app.get("/chats/{cid}")
 def load_chat(cid: str):
-    chat = chats.get(cid)
+    chat = chats.get(cid) or db_load_chat(cid)
+    if chat and cid not in chats:
+        chats[cid] = chat   # repopulate in-memory cache
     return chat if chat else {"error":"Not found"}
 
 @app.delete("/chats/{cid}")
 def delete_chat(cid: str):
-    chats.pop(cid, None); return {"deleted":cid}
+    chats.pop(cid, None)
+    db_delete_chat(cid)
+    return {"deleted":cid}
 
 @app.get("/chats/{cid}/export")
 def export_chat(cid: str):
@@ -170,13 +191,18 @@ def share_chat(cid: str):
     chat = chats.get(cid)
     if not chat: return {"error":"Not found"}
     share_id = str(uuid.uuid4())[:8]
-    shares[share_id] = {"title":chat["title"],"messages":chat["messages"],
-                        "created_at":datetime.utcnow().isoformat()}
+    share_data = {"title":chat["title"],"messages":chat["messages"],
+                   "created_at":datetime.utcnow().isoformat()}
+    shares[share_id] = share_data
+    db_save_share(share_id, chat["title"],
+                  share_data["created_at"], chat["messages"])
     return {"share_id":share_id,"url":f"/share/{share_id}"}
 
 @app.get("/share/{share_id}")
 def view_share(share_id: str):
-    chat = shares.get(share_id)
+    chat = shares.get(share_id) or db_load_share(share_id)
+    if chat and share_id not in shares:
+        shares[share_id] = chat
     if not chat: return HTMLResponse("<h2>Share not found.</h2>",status_code=404)
     msgs_html=""
     for m in chat["messages"]:

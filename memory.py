@@ -1,70 +1,42 @@
 """
-Agent memory — persists summaries of past conversations to disk.
+Agent memory — persists conversation summaries via SQLite (db.py).
 On each new session, recent memories are injected as context.
 """
-import os
-import json
 import time
 from typing import List, Dict
-from pathlib import Path
+from db import (add_memory_entry, load_memory_entries,
+                delete_all_memory as _db_delete_all)
 
-MEMORY_FILE = os.getenv("MEMORY_FILE", "/tmp/claude_alt_memory.json")
-MAX_MEMORIES = 20        # keep last N conversation summaries
 MEMORY_IN_CONTEXT = 5   # inject last N into each new conversation
 
 
-def _load() -> List[Dict]:
-    try:
-        return json.loads(Path(MEMORY_FILE).read_text())
-    except Exception:
-        return []
-
-
-def _save(memories: List[Dict]) -> None:
-    Path(MEMORY_FILE).write_text(json.dumps(memories, indent=2))
-
-
 def add_memory(summary: str, tags: List[str] | None = None) -> None:
-    """Store a conversation summary."""
-    memories = _load()
-    memories.append({
-        "ts":      time.time(),
-        "summary": summary,
-        "tags":    tags or [],
-    })
-    # Keep only the most recent
-    memories = memories[-MAX_MEMORIES:]
-    _save(memories)
+    add_memory_entry(summary, tags or [], time.time())
 
 
 def get_memory_context() -> str:
-    """Return a formatted memory block to inject at the start of new sessions."""
-    memories = _load()
-    if not memories:
+    entries = load_memory_entries(MEMORY_IN_CONTEXT)
+    if not entries:
         return ""
-    recent = memories[-MEMORY_IN_CONTEXT:]
+    entries = list(reversed(entries))   # oldest first
     lines = ["[MEMORY — recent conversation summaries to give you context]"]
-    for m in recent:
-        ts = time.strftime("%Y-%m-%d", time.localtime(m["ts"]))
+    for m in entries:
+        ts   = time.strftime("%Y-%m-%d", time.localtime(m["created_at"]))
         lines.append(f"• {ts}: {m['summary']}")
     lines.append("")
     return "\n".join(lines)
 
 
 def summarize_history(history: List[Dict], call_llm_fn) -> str:
-    """
-    Ask the LLM to produce a one-sentence summary of a completed conversation.
-    call_llm_fn accepts a list of messages and returns (action_dict, provider_id).
-    """
     if not history:
         return ""
-    # Build a condensed transcript (user turns only, max 2000 chars)
     transcript = []
     for m in history:
         if m.get("role") == "user" and isinstance(m.get("content"), str):
-            txt = m["content"][:200]
-            if not txt.startswith("Tool result:") and not txt.startswith("Continue"):
-                transcript.append(txt)
+            t = m["content"]
+            if not t.startswith("Tool result:") and not t.startswith("Continue") \
+               and not t.startswith("[MEMORY"):
+                transcript.append(t[:200])
     if not transcript:
         return ""
     prompt = (
@@ -80,11 +52,8 @@ def summarize_history(history: List[Dict], call_llm_fn) -> str:
 
 
 def delete_all() -> None:
-    try:
-        Path(MEMORY_FILE).unlink()
-    except Exception:
-        pass
+    _db_delete_all()
 
 
 def get_all() -> List[Dict]:
-    return _load()
+    return load_memory_entries(50)
