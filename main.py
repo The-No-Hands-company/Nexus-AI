@@ -10,7 +10,12 @@ from agent import (run_agent_task, stream_agent_task, get_providers_list,
 from gist_backup import restore_from_gist
 from db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats,
                load_chat as db_load_chat, delete_chat as db_delete_chat,
-               save_share as db_save_share, load_share as db_load_share)
+               save_share as db_save_share, load_share as db_load_share,
+               init_projects_table, save_project as db_save_project,
+               load_projects as db_load_projects, delete_project as db_delete_project,
+               assign_chat_to_project, get_project_chats,
+               save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci,
+               update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory)
 from personas import list_personas, set_persona, get_active_persona_name, get_persona
 from memory import (add_memory, get_memory_context, summarize_history,
                     delete_all as delete_all_memory, get_all as get_all_memory)
@@ -24,6 +29,7 @@ _active_streams: dict[str, threading.Event] = {}
 # ── init DB and seed in-memory caches ─────────────────────────────────────────
 restore_from_gist()   # pull from Gist before opening DB
 init_db()
+init_projects_table()
 
 # Seed chats from DB
 chats: dict[str, dict] = {}
@@ -223,6 +229,78 @@ strong{{font-size:.75rem;opacity:.7;display:block;margin-bottom:4px}}p{{margin:0
 <body><h1>{chat['title']}</h1><p class="sub">Shared from Claude Alt · {chat['created_at'][:10]}</p>
 {msgs_html}<div class="brand">Made with <a href="/" style="color:#7c6af7">Claude Alt</a></div></body></html>"""
     return HTMLResponse(html)
+
+
+# ── projects ──────────────────────────────────────────────────────────────────
+projects: dict[str, dict] = {r["id"]: r for r in db_load_projects()}
+
+@app.get("/projects")
+def list_projects():
+    return {"projects": list(sorted(projects.values(), key=lambda p: p["updated_at"], reverse=True))}
+
+@app.post("/projects")
+async def create_project(request: Request):
+    data = await request.json()
+    pid  = data.get("id") or str(uuid.uuid4())
+    now  = datetime.utcnow().isoformat()
+    proj = {
+        "id":           pid,
+        "name":         data.get("name","New Project")[:80],
+        "instructions": data.get("instructions",""),
+        "color":        data.get("color","#7c6af7"),
+        "created_at":   projects[pid]["created_at"] if pid in projects else now,
+        "updated_at":   now,
+    }
+    projects[pid] = proj
+    db_save_project(pid, proj["name"], proj["instructions"],
+                    proj["color"], proj["created_at"], proj["updated_at"])
+    return proj
+
+@app.get("/projects/{pid}")
+def get_project(pid: str):
+    return projects.get(pid) or {"error":"Not found"}
+
+@app.delete("/projects/{pid}")
+def del_project(pid: str):
+    projects.pop(pid, None)
+    db_delete_project(pid)
+    return {"deleted": pid}
+
+@app.post("/projects/{pid}/chats/{cid}")
+def link_chat_to_project(pid: str, cid: str):
+    assign_chat_to_project(pid, cid)
+    return {"linked": cid}
+
+@app.get("/projects/{pid}/chats")
+def project_chat_list(pid: str):
+    chat_ids = get_project_chats(pid)
+    result   = [chats[cid] for cid in chat_ids if cid in chats]
+    return {"chats": result}
+
+
+# ── custom instructions ────────────────────────────────────────────────────────
+@app.get("/instructions")
+def get_instructions():
+    return {"instructions": db_load_ci()}
+
+@app.post("/instructions")
+async def set_instructions(request: Request):
+    data = await request.json()
+    db_save_ci(data.get("instructions",""))
+    return {"saved": True}
+
+
+# ── memory CRUD ────────────────────────────────────────────────────────────────
+@app.patch("/memory/{entry_id}")
+async def update_memory(entry_id: int, request: Request):
+    data = await request.json()
+    db_update_memory(entry_id, data.get("summary",""))
+    return {"updated": entry_id}
+
+@app.delete("/memory/{entry_id}")
+def delete_memory_item(entry_id: int):
+    db_delete_memory(entry_id)
+    return {"deleted": entry_id}
 
 
 # ── agent ─────────────────────────────────────────────────────────────────────

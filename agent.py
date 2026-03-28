@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import Dict, Any, List, Iterator, Optional
 from tools_builtin import dispatch_builtin
 from personas import build_system_prompt, get_active_persona_name, get_persona
+from db import load_custom_instructions
 
 # ── runtime config ────────────────────────────────────────────────────────────
 _config: Dict[str, Any] = {
@@ -283,9 +284,18 @@ def tool_get_time(timezone: str = "UTC") -> str:
 def tool_web_search(query: str) -> str:
     try:
         from duckduckgo_search import DDGS
-        results = list(DDGS().text(query, max_results=5))
+        results = list(DDGS().text(query, max_results=6))
         if not results: return "No results found."
-        return "\n\n".join(f"**{r['title']}**\n{r['href']}\n{r['body']}" for r in results)
+        # Return structured JSON so the agent can cite sources
+        import json as _json
+        sources = [{"title": r["title"], "url": r["href"],
+                    "snippet": r["body"][:300], "domain": r["href"].split("/")[2] if "://" in r["href"] else ""}
+                   for r in results]
+        lines = [f"[{i+1}] **{s['title']}** ({s['domain']})\n{s['url']}\n{s['snippet']}"
+                 for i, s in enumerate(sources)]
+        structured = "\n\n".join(lines)
+        structured += f"\n\n[SOURCES_JSON]{_json.dumps(sources)}[/SOURCES_JSON]"
+        return structured
     except Exception as e: return f"Search failed: {e}"
 
 def tool_image_gen(prompt: str, width: int = 512, height: int = 512) -> str:
@@ -491,6 +501,12 @@ def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, 
             elif isinstance(e, (_r.ConnectionError, _r.Timeout)): print(f"⚠️ {pid} connection error")
             else: print(f"⚠️ {pid}: {e}")
     raise AllProvidersExhausted(f"All exhausted. Last: {last_err}")
+
+def _get_custom_instructions() -> str:
+    try:
+        return load_custom_instructions()
+    except Exception:
+        return ""
 
 # ── tool icons ────────────────────────────────────────────────────────────────
 TOOL_ICONS = {
