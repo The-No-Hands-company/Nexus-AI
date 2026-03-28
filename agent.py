@@ -52,12 +52,24 @@ _session_state: Dict[str, Dict] = {}
 def get_session_state(sid: str) -> Dict:
     if sid not in _session_state:
         _session_state[sid] = {
-            "dir":   f"/tmp/ca_session_{sid[:8]}",
-            "token": GH_TOKEN,
-            "repos": [],
+            "dir":         f"/tmp/ca_session_{sid[:8]}",
+            "token":       GH_TOKEN,
+            "repos":       [],    # list of cloned repo URLs in this session
+            "active_repo": None,  # most recently cloned/worked-on repo URL
         }
         os.makedirs(_session_state[sid]["dir"], exist_ok=True)
     return _session_state[sid]
+
+def set_session_repo(sid: str, url: str) -> None:
+    """Track which repo the agent is currently working on."""
+    s = get_session_state(sid)
+    if url and url not in s["repos"]:
+        s["repos"].append(url)
+    s["active_repo"] = url
+
+def get_session_repo(sid: str) -> str:
+    """Return the active repo URL for this session (never the Claude-alt default)."""
+    return get_session_state(sid).get("active_repo") or ""
 
 def set_session_token(sid: str, token: str):
     s = get_session_state(sid)
@@ -224,7 +236,7 @@ Available actions:
   { "action": "clarify",    "questions": [{"id":"q1","text":"?","options":["A","B"]}] }
   { "action": "plan",       "title": "What I'm building", "steps": ["1. ...", "2. ..."] }
   { "action": "think",      "thought": "brief reasoning" }
-  { "action": "respond",    "content": "<markdown>" }
+  { "action": "respond",    "content": "<markdown>", "confidence": 0.95 }
   { "action": "get_time",   "timezone": "Europe/Stockholm" }
   { "action": "web_search", "query": "search terms" }
   { "action": "image_gen",  "prompt": "a cyberpunk city at night, neon lights, rain", "width": 512, "height": 512 }
@@ -239,6 +251,7 @@ Available actions:
   { "action": "youtube_transcript","url": "https://youtube.com/watch?v=..." }
   { "action": "read_pdf",  "path": "document.pdf" }
   { "action": "diff",       "original": "old text", "modified": "new text", "filename": "app.py" }
+  { "action": "query_db",   "connection_string": "sqlite:///data.db", "query": "SELECT * FROM table LIMIT 10" }
   { "action": "read_csv",   "path": "data.csv" }
   { "action": "write_csv",  "path": "output.csv", "data": [["col1","col2"],["a","b"]] }
   { "action": "api_call",   "method": "GET", "url": "https://api.example.com/data", "headers": {}, "body": null }
@@ -249,7 +262,8 @@ Available actions:
   { "action": "list_files", "pattern": "**/*.py" }
   { "action": "delete_file","path": "old.txt" }
   { "action": "run_command","cmd": "pip install flask" }
-  { "action": "clone_repo", "url": "https://github.com/user/repo" }
+  { "action": "clone_repo",   "url": "https://github.com/user/repo" }
+  { "action": "create_repo",  "name": "my-project", "description": "...", "private": false, "org": "" }
   { "action": "commit_push","message": "feat: ...", "repo_url": "https://github.com/user/repo" }
   { "action": "youtube",      "url": "https://youtube.com/watch?v=..." }
   { "action": "read_pdf",     "path": "document.pdf" }
@@ -349,9 +363,10 @@ def tool_delete_file(path: str, workdir: str) -> str:
     os.remove(full); return f"Deleted {path}"
 
 def tool_run_command(cmd: str, workdir: str) -> str:
-    BLOCKED = ["rm -rf /","sudo","ncat","mkfs","dd if=",":(){ :|:& };:"]
+    BLOCKED = ["rm -rf /","sudo","ncat","mkfs","dd if=",":(){ :|:& };:",
+               "cd /app",">/app",">> /app","/app/main.py","/app/agent.py"]
     for b in BLOCKED:
-        if b in cmd: return f"Blocked: {cmd}"
+        if b in cmd: return f"❌ Blocked: {cmd}"
     try:
         # Resource limits: 256MB RAM, 10s CPU
         def _preexec():
@@ -384,9 +399,50 @@ def tool_clone_repo(url: str, token: str, workdir: str) -> str:
     top = [f for f in os.listdir(dest) if not f.startswith('.')][:20]
     return f"Cloned to {dest}\nTop files: {', '.join(top)}"
 
+def tool_create_repo(name: str, description: str, private: bool,
+                     token: str, org: str = "") -> str:
+    """Create a new GitHub repo via API and return its clone URL."""
+    import requests as _r
+    if not token:
+        return "❌ No GitHub token — cannot create repo."
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    payload = {
+        "name":        name,
+        "description": description,
+        "private":     private,
+        "auto_init":   True,   # creates main branch with README
+    }
+    url = f"https://api.github.com/orgs/{org}/repos" if org else "https://api.github.com/user/repos"
+    try:
+        resp = _r.post(url, json=payload, headers=headers, timeout=15)
+        resp.raise_for_status()
+        data      = resp.json()
+        clone_url = data["clone_url"]
+        html_url  = data["html_url"]
+        return f"✅ Created repo: {html_url}\nClone URL: {clone_url}"
+    except Exception as e:
+        try:
+            err = resp.json().get("message","")
+        except Exception:
+            err = str(e)
+        return f"❌ Repo creation failed: {err}"
+
+
 def tool_commit_push(message: str, repo_url: str, token: str, workdir: str) -> str:
-    # Find the repo dir
-    repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git','') if repo_url else ""
+    # Safety: never push to an empty/default repo URL — require explicit target
+    if not repo_url:
+        return ("❌ commit_push blocked: no repo_url specified. "
+                "Always include 'repo_url' pointing to the target repository.")
+    # Prevent pushing to the Claude-alt repo from an external task
+    protected = ["The-No-Hands-company/Claude-alt", "claude-alt"]
+    if any(p.lower() in repo_url.lower() for p in protected):
+        return ("❌ commit_push blocked: cannot push to the Claude-alt repo from an external task. "
+                "Use a different target repository.")
+    repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git','')
     repo_dir = os.path.join(workdir, repo_name) if repo_name and os.path.isdir(os.path.join(workdir, repo_name)) else workdir
 
     def _git(args):
@@ -557,7 +613,7 @@ TOOL_ICONS = {
     "web_search":"🔍","image_gen":"🎨","calculate":"🧮","weather":"🌤️","currency":"💱",
     "convert":"📐","regex":"🔎","base64":"🔡","json_format":"📄",
     "write_file":"📝","read_file":"📖","list_files":"📂","delete_file":"🗑️",
-    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","generate_image":"🎨","youtube":"▶️","read_pdf":"📑","diff":"📊","youtube_transcript":"▶️","read_pdf":"📑","diff":"±",
+    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","create_repo":"🆕","query_db":"🗄️","generate_image":"🎨","youtube":"▶️","read_pdf":"📑","diff":"📊","youtube_transcript":"▶️","read_pdf":"📑","diff":"±",
 }
 
 # ── long-context compression ──────────────────────────────────────────────────
@@ -632,6 +688,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             yield {"type":"tool","icon":"📦","action":"clone_repo",
                    "label":url,"result":"Cloning...","file_path":None,"file_content":None}
             result = tool_clone_repo(url, session_token, workdir)
+            # Remember this repo for the rest of the session
+            if sid and "Clone failed" not in result:
+                set_session_repo(sid, url)
             yield {"type":"tool","icon":"📦","action":"clone_repo",
                    "label":url,"result":result,"file_path":None,"file_content":None}
         # List files for context
@@ -787,11 +846,27 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 result = tool_run_command(action.get("cmd",""), workdir)
             elif kind == "read_pdf":
                 action["workdir"] = workdir
+            elif kind == "create_repo":
+                result = tool_create_repo(
+                    action.get("name","new-project"),
+                    action.get("description",""),
+                    bool(action.get("private", False)),
+                    session_token,
+                    action.get("org",""),
+                )
+                # Extract clone URL and set as session repo
+                import re as _re
+                m = _re.search(r'Clone URL: (https://\S+)', result)
+                if m and sid:
+                    set_session_repo(sid, m.group(1))
             elif kind == "clone_repo":
                 url    = action.get("url","")
                 result = tool_clone_repo(url, session_token, workdir)
+                if sid and "Clone failed" not in result and url:
+                    set_session_repo(sid, url)
             elif kind == "commit_push":
-                repo_url = action.get("repo_url") or GITHUB_REPO
+                # Use explicit repo_url, then session's active repo — NEVER fall back to GITHUB_REPO
+                repo_url = action.get("repo_url") or (get_session_repo(sid) if sid else "")
                 result   = tool_commit_push(action.get("message","Update"),
                                             repo_url, session_token, workdir)
             elif kind == "get_time":

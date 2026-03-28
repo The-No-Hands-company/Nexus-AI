@@ -1,7 +1,7 @@
-import os, uuid, json, asyncio, threading
+import os, uuid, json, asyncio, threading, time
 from datetime import datetime
 from fastapi import FastAPI, Request
-from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse
+from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from agent import (run_agent_task, stream_agent_task, get_providers_list,
                    get_config, update_config, call_llm_with_fallback,
@@ -317,11 +317,40 @@ def delete_memory_item(entry_id: int):
 
 
 # ── usage dashboard ───────────────────────────────────────────────────────────
+# Per-session rate limiting
+_session_requests: dict[str, list] = {}   # {sid: [timestamps]}
+RATE_LIMIT_WINDOW = 60   # seconds
+RATE_LIMIT_MAX    = int(os.getenv("SESSION_RATE_LIMIT", "30"))   # req/min per session
+
+def _check_rate_limit(sid: str) -> bool:
+    """Returns True if request is allowed, False if rate limited."""
+    if not sid:
+        return True
+    now    = time.time()
+    times  = _session_requests.get(sid, [])
+    recent = [t for t in times if now - t < RATE_LIMIT_WINDOW]
+    if len(recent) >= RATE_LIMIT_MAX:
+        return False
+    recent.append(now)
+    _session_requests[sid] = recent
+    return True
+
+
 @app.get("/usage")
 def usage_stats(days: int = 7):
     try:
+        from tools_builtin import estimate_cost, PROVIDER_COSTS
         stats = get_usage_stats(days)
         daily = get_usage_daily(days)
+        # Add cost estimates per provider
+        for row in stats.get("by_provider", []):
+            row["est_cost_usd"] = round(
+                estimate_cost(row["provider"], row.get("in_tok",0), row.get("out_tok",0)), 4
+            )
+        total = stats.get("total", {})
+        stats["total_est_cost_usd"] = round(sum(
+            r.get("est_cost_usd", 0) for r in stats.get("by_provider", [])
+        ), 4)
         return {"stats": stats, "daily": daily}
     except Exception as e:
         return {"error": str(e)}
@@ -418,11 +447,40 @@ def delete_custom_persona_endpoint(pid: str):
 
 
 # ── usage dashboard ───────────────────────────────────────────────────────────
+# Per-session rate limiting
+_session_requests: dict[str, list] = {}   # {sid: [timestamps]}
+RATE_LIMIT_WINDOW = 60   # seconds
+RATE_LIMIT_MAX    = int(os.getenv("SESSION_RATE_LIMIT", "30"))   # req/min per session
+
+def _check_rate_limit(sid: str) -> bool:
+    """Returns True if request is allowed, False if rate limited."""
+    if not sid:
+        return True
+    now    = time.time()
+    times  = _session_requests.get(sid, [])
+    recent = [t for t in times if now - t < RATE_LIMIT_WINDOW]
+    if len(recent) >= RATE_LIMIT_MAX:
+        return False
+    recent.append(now)
+    _session_requests[sid] = recent
+    return True
+
+
 @app.get("/usage")
 def usage_stats(days: int = 7):
     try:
+        from tools_builtin import estimate_cost, PROVIDER_COSTS
         stats = get_usage_stats(days)
         daily = get_usage_daily(days)
+        # Add cost estimates per provider
+        for row in stats.get("by_provider", []):
+            row["est_cost_usd"] = round(
+                estimate_cost(row["provider"], row.get("in_tok",0), row.get("out_tok",0)), 4
+            )
+        total = stats.get("total", {})
+        stats["total_est_cost_usd"] = round(sum(
+            r.get("est_cost_usd", 0) for r in stats.get("by_provider", [])
+        ), 4)
         return {"stats": stats, "daily": daily}
     except Exception as e:
         return {"error": str(e)}
@@ -543,6 +601,11 @@ async def agent_stream(request: Request):
     files     = data.get("files",[])
     stream_id = data.get("stream_id", str(uuid.uuid4()))
     if not task: return {"error":"task is required"}
+
+    # Rate limit check
+    import time as _time
+    if sid and not _check_rate_limit(sid):
+        return JSONResponse({"error": f"Rate limit exceeded: max {RATE_LIMIT_MAX} requests/min per session."}, status_code=429)
 
     history  = sessions.get(sid,[]) if sid else []
     loop     = asyncio.get_event_loop()

@@ -226,6 +226,24 @@
     .project-item:hover .project-actions { opacity:1; }
 
 
+
+    /* ── CONFIDENCE ── */
+    .confidence-badge {
+      display: inline-flex; align-items: center; gap: 4px;
+      font-size: .62rem; padding: 2px 7px; border-radius: 99px;
+      font-weight: 600; margin-top: 3px;
+    }
+    .conf-high   { background: color-mix(in srgb,#22c55e 12%,transparent); color:#22c55e; }
+    .conf-medium { background: color-mix(in srgb,var(--amber) 12%,transparent); color:var(--amber); }
+    .conf-low    { background: color-mix(in srgb,var(--red) 12%,transparent); color:var(--red); }
+
+    /* ── SANDBOX INDICATOR ── */
+    .sandbox-tag {
+      font-size:.63rem; color:var(--teal); opacity:.7;
+      padding: 2px 7px; background: color-mix(in srgb,var(--teal)8%,transparent);
+      border-radius:4px; margin-bottom: 4px; display:inline-block;
+    }
+
     /* ── THEMES ── */
     body.light {
       --bg:#f8fafc; --surface:#ffffff; --surface2:#f1f5f9;
@@ -1721,6 +1739,11 @@ async function send(){
 
         } else if(evt.type==='system'){
           addSysMsg(evt.message||'');
+        } else if(evt.type==='sandbox'){
+          // Sandbox indicator — show which repo is active
+          const tag=document.createElement('div');tag.className='sandbox-tag';
+          tag.textContent=`🔒 Sandbox: ${esc(evt.repo||'session workdir')}`;
+          agentBub.appendChild(tag);scrollBottom();
 
         } else if(evt.type==='tool'){haptic('light');
           if(!toolContainer){toolContainer=document.createElement('div');agentBub.appendChild(toolContainer)}
@@ -1778,6 +1801,16 @@ async function send(){
           if(evt.provider&&evt.provider!=='Built-in'){
             const m=document.createElement('div');m.className='msg-meta';
             m.textContent=`${evt.provider} · ${evt.model}`;agentWrap.appendChild(m);
+          }
+          // Confidence badge
+          if(evt.confidence!=null){
+            const conf = parseFloat(evt.confidence);
+            const cls  = conf>=0.85?'conf-high':conf>=0.6?'conf-medium':'conf-low';
+            const lbl  = conf>=0.85?'High confidence':conf>=0.6?'Uncertain':'Low confidence';
+            const badge=document.createElement('span');
+            badge.className=`confidence-badge ${cls}`;
+            badge.textContent=`${lbl} (${Math.round(conf*100)}%)`;
+            agentWrap.appendChild(badge);
           }
           // Token counter
           addTokenCount(agentWrap, val, evt.content||'');
@@ -2096,13 +2129,19 @@ async function loadUsageStats() {
   if (byProv.length) {
     html += '<div style="font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">By Provider</div>';
     byProv.forEach(p => {
-      const pct = Math.round(p.calls / maxCalls * 100);
+      const pct  = Math.round(p.calls / maxCalls * 100);
+      const cost = p.est_cost_usd > 0 ? ` · $${p.est_cost_usd.toFixed(4)}` : ' · free';
       html += `<div class="usage-bar-row">
         <div class="usage-bar-label">${esc(p.provider)}</div>
         <div class="usage-bar-track"><div class="usage-bar-fill" style="width:${pct}%"></div></div>
-        <div class="usage-bar-val">${p.calls} req</div>
+        <div class="usage-bar-val">${p.calls} req${cost}</div>
       </div>`;
     });
+    if (stats.total_est_cost_usd !== undefined) {
+      html += `<div style="font-size:.7rem;color:var(--muted);text-align:right;margin-top:6px">
+        Total estimated cost: <strong style="color:var(--text)">$${(stats.total_est_cost_usd||0).toFixed(4)}</strong>
+      </div>`;
+    }
   }
 
   // Daily chart

@@ -468,3 +468,59 @@ def tool_read_page(url: str) -> str:
         return text[:5000] + ("…*(truncated)*" if len(text) > 5000 else "")
     except Exception as e:
         return f"Page read failed: {e}"
+
+
+# ── DATABASE QUERY TOOL ───────────────────────────────────────────────────────
+def tool_query_db(connection_string: str, query: str) -> str:
+    """Run a read-only SQL query. Only SELECT statements allowed."""
+    import re as _re
+    stripped = query.strip().upper()
+    if not stripped.startswith("SELECT"):
+        return "❌ Only SELECT queries are allowed."
+    # Block dangerous keywords even inside SELECT
+    dangerous = ["DROP ", "DELETE ", "INSERT ", "UPDATE ", "ALTER ",
+                 "EXEC ", "EXECUTE ", "xp_", "--", "/*"]
+    for kw in dangerous:
+        if kw.upper() in query.upper():
+            return f"❌ Blocked keyword in query: {kw.strip()}"
+    try:
+        if connection_string.startswith("sqlite:///") or connection_string.endswith(".db"):
+            import sqlite3
+            path = connection_string.replace("sqlite:///","")
+            conn = sqlite3.connect(path)
+            conn.row_factory = sqlite3.Row
+            rows  = conn.execute(query).fetchall()[:100]
+            conn.close()
+            if not rows: return "No results."
+            cols = rows[0].keys()
+            lines = [" | ".join(str(c) for c in cols)]
+            lines += ["-+-".join("-"*max(1,len(str(c))) for c in cols)]
+            for row in rows:
+                lines.append(" | ".join(str(row[c])[:30] for c in cols))
+            return f"```\n" + "\n".join(lines) + "\n```"
+        else:
+            return "❌ Only SQLite (sqlite:///path.db) supported currently."
+    except Exception as e:
+        return f"❌ Query failed: {e}"
+
+
+# ── COST ESTIMATOR ────────────────────────────────────────────────────────────
+# Approximate costs per 1M tokens (input/output) as of early 2026
+PROVIDER_COSTS = {
+    "groq":         (0.00,  0.00),    # free tier
+    "cerebras":     (0.00,  0.00),
+    "gemini":       (0.00,  0.00),    # free tier
+    "mistral":      (0.00,  0.00),    # free tier
+    "openrouter":   (0.00,  0.00),    # free models
+    "cohere":       (0.00,  0.00),
+    "github_models":(0.00,  0.00),
+    "llm7":         (0.00,  0.00),
+    "nvidia":       (0.00,  0.00),
+    "grok":         (5.00, 15.00),    # grok-3 approx
+    "claude":       (3.00, 15.00),    # claude-sonnet-4 approx
+}
+
+def estimate_cost(provider_label: str, in_tokens: int, out_tokens: int) -> float:
+    key = provider_label.lower().split()[0]
+    costs = PROVIDER_COSTS.get(key, (0.0, 0.0))
+    return (in_tokens * costs[0] + out_tokens * costs[1]) / 1_000_000

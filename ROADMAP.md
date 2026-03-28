@@ -87,6 +87,16 @@ Track what's been built, what's in progress, and what's coming next.
 ---
 
 ## ✅ Recently completed
+- [x] Sandbox protection — agent can never push to Claude-alt repo from external tasks
+- [x] Session repo tracking — cloned repo auto-used for commit_push within session
+- [x] create_repo tool — create a new GitHub repo via API then push to it
+- [x] /app path protection — write/delete/run_command blocked from touching app source
+- [x] Rate limiting — per-session request cap (SESSION_RATE_LIMIT env var, default 30/min)
+- [x] Cost tracking — estimated USD cost per provider in usage dashboard
+- [x] Confidence scoring — model reports confidence 0–1, shown as badge on response
+- [x] Database tool — read-only SQLite SELECT queries from the agent loop
+
+## ✅ Recently completed (previous)
 - [x] Spreadsheet (CSV) read/write tool
 - [x] API caller tool — make HTTP requests from agent loop
 - [x] Page reader tool — fetch and parse webpage content
@@ -111,7 +121,7 @@ Track what's been built, what's in progress, and what's coming next.
 - [x] **Semantic memory** — vector search over memories instead of last-N injection
 - [x] **Agent-to-agent** — spawn a focused sub-agent for a subtask, return results to parent
 - [x] **Reasoning traces** — show full chain-of-thought for complex answers
-- [ ] **Confidence scoring** — flag low-confidence responses
+- [x] **Confidence scoring** — flag low-confidence responses
 - [x] **Auto-retry on bad output** — detect malformed/incomplete responses and retry with the same or next provider
 
 ---
@@ -122,7 +132,7 @@ Track what's been built, what's in progress, and what's coming next.
 - [x] **PDF reader** — extract and reason over PDF content
 - [x] **Spreadsheet tool** — read/write CSV and xlsx
 - [x] **API caller** — make arbitrary HTTP requests from within the agent loop
-- [ ] **Database tool** — read-only SQL queries against a connected DB
+- [x] **Database tool** — read-only SQL queries against a connected DB
 - [x] **Diff viewer** — before/after when the agent edits existing files
 - [x] **Screenshot tool** — capture a webpage and attach as image context
 
@@ -143,12 +153,12 @@ Track what's been built, what's in progress, and what's coming next.
 ## 🏗️ Infrastructure
 
 - [ ] **Multi-user auth** — simple password or OAuth, separate state per user
-- [ ] **Rate limiting per user** — prevent one session exhausting all provider quota
+- [x] **Rate limiting per user** — prevent one session exhausting all provider quota
 - [x] **Usage dashboard** — provider breakdown, token counts, estimated cost
 - [ ] **Webhook triggers** — run the agent from GitHub webhooks, cron jobs, etc.
 - [ ] **MCP server support** — plug in external tools via Model Context Protocol
 - [x] **Provider health monitoring** — detect degraded providers before they 429
-- [ ] **Cost tracking** — estimate spend across paid providers (Grok, Claude)
+- [x] **Cost tracking** — estimate spend across paid providers (Grok, Claude)
 
 ---
 
