@@ -244,6 +244,36 @@
       border-radius:4px; margin-bottom: 4px; display:inline-block;
     }
 
+
+    /* ── RATE LIMIT TOAST ── */
+    #rate-toast {
+      display: none;
+      position: sticky; bottom: 0; left: 0; right: 0;
+      background: color-mix(in srgb, var(--amber) 12%, var(--surface));
+      border-top: 1px solid color-mix(in srgb, var(--amber) 35%, transparent);
+      padding: 10px 16px;
+      font-size: .8rem;
+      z-index: 10;
+      animation: slideUp .2s ease;
+    }
+    #rate-toast.visible { display: flex; align-items: center; gap: 10px; }
+    @keyframes slideUp { from { transform: translateY(8px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+    .toast-icon { font-size: 1.1rem; flex-shrink: 0; }
+    .toast-text { flex: 1; color: var(--text); line-height: 1.4; }
+    .toast-text strong { color: var(--amber); }
+    .toast-retry {
+      background: var(--amber); color: #000; border: none;
+      border-radius: 7px; padding: 5px 12px; font-size: .75rem;
+      font-weight: 700; cursor: pointer; flex-shrink: 0;
+      transition: opacity .15s;
+    }
+    .toast-retry:hover { opacity: .85; }
+    .toast-dismiss {
+      background: none; border: none; color: var(--muted);
+      cursor: pointer; font-size: 16px; padding: 0 2px; flex-shrink: 0;
+    }
+    .toast-dismiss:hover { color: var(--text); }
+
     /* ── THEMES ── */
     body.light {
       --bg:#f8fafc; --surface:#ffffff; --surface2:#f1f5f9;
@@ -857,11 +887,11 @@
   <button class="btn-icon" onclick="openSettings()" title="Settings">⚙</button>
 </header>
 
-<!-- PWA install banner -->
-<div id="install-banner">
+<!-- PWA install banner (hidden until beforeinstallprompt fires) -->
+<div id="install-banner" style="display:none">
   <div class="install-text">Add <span>Claude Alt</span> to your home screen for the best experience</div>
   <button class="btn-install" id="install-btn">Install</button>
-  <button class="btn-install-dismiss" onclick="dismissInstall()">×</button>
+  <button class="btn-install-dismiss" onclick="dismissInstall()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:0 4px;line-height:1">×</button>
 </div>
 
 
@@ -1120,6 +1150,7 @@
       </div>
     </div>
 
+    <div id="rate-toast"></div>
     <div id="file-chips"></div>
     <div id="token-bar" style="display:none" class="token-bar">
       🔑 <span style="color:var(--amber);font-weight:600">Private repo?</span>
@@ -1909,7 +1940,26 @@ async function send(){
           triggerAutoSave();  // auto-save after every response
 
         } else if(evt.type==='error'){
-          agentBub.innerHTML=`<span style="color:var(--red)">❌ ${esc(evt.message)}</span>`;
+          const msg = evt.message || '';
+          const isExhausted = msg.toLowerCase().includes('exhausted') ||
+                              msg.toLowerCase().includes('rate limit') ||
+                              msg.toLowerCase().includes('429');
+
+          if (isExhausted) {
+            // Show friendly toast above input, keep conversation intact
+            showRateLimitToast(msg, val);
+            // Remove the empty agent bubble if nothing was streamed into it
+            if (!agentBub.children.length && !agentBub.textContent.trim()) {
+              agentWrap.closest('.msg-row')?.remove();
+            }
+          } else {
+            // Non-rate-limit errors: show inline in bubble (don't replace content)
+            const errEl = document.createElement('div');
+            errEl.style.cssText = 'color:var(--red);font-size:.82rem;margin-top:4px';
+            errEl.textContent = '⚠️ ' + msg;
+            agentBub.appendChild(errEl);
+          }
+          showTyping(false);
           scrollBottom();
         }
       }
@@ -1917,8 +1967,7 @@ async function send(){
   } catch(err){
     if(err.name!=='AbortError'){
       showTyping(false);
-      agentBub.innerHTML=(agentBub.innerHTML||'')+
-        `<span style="color:var(--red)">❌ ${esc(String(err))}</span>`;
+      const errEl2=document.createElement('div');errEl2.style.cssText='color:var(--red);font-size:.82rem;margin-top:4px';errEl2.textContent='⚠️ '+esc(String(err));agentBub.appendChild(        `<span style="color:var(--red)">❌ ${esc(String(err))}</span>`;
     }
   }
 
@@ -2315,6 +2364,72 @@ function addReactionButtons(wrap, msgIdx) {
   wrap.appendChild(row);
 }
 
+
+// ── RATE LIMIT TOAST ──────────────────────────────────────────────────────────
+let _retryTask = null;
+let _retryTimer = null;
+let _retryCountdown = 0;
+
+function showRateLimitToast(errorMsg, originalTask) {
+  _retryTask = originalTask;
+  const toast = document.getElementById('rate-toast');
+
+  // Parse cooldown from error or default to 60s
+  const cdMatch = errorMsg.match(/(\d+)s/);
+  _retryCountdown = cdMatch ? parseInt(cdMatch[1]) : 60;
+
+  renderToast();
+  toast.classList.add('visible');
+
+  // Countdown + auto-retry
+  clearInterval(_retryTimer);
+  _retryTimer = setInterval(() => {
+    _retryCountdown--;
+    if (_retryCountdown <= 0) {
+      clearInterval(_retryTimer);
+      hideRateLimitToast();
+      if (_retryTask) {
+        // Auto-retry the original task
+        ta.value = _retryTask;
+        send();
+      }
+    } else {
+      renderToast();
+    }
+  }, 1000);
+}
+
+function renderToast() {
+  const toast = document.getElementById('rate-toast');
+  const available = _retryCountdown;
+  toast.innerHTML = `
+    <span class="toast-icon">⏳</span>
+    <div class="toast-text">
+      <strong>All providers are cooling down.</strong>
+      Retrying automatically in <strong>${available}s</strong> —
+      or <a href="#" onclick="event.preventDefault();hideRateLimitToast();openHealthModal()" style="color:var(--amber)">check provider status</a>.
+    </div>
+    <button class="toast-retry" onclick="retryNow()">Retry now</button>
+    <button class="toast-dismiss" onclick="hideRateLimitToast()">×</button>
+  `;
+}
+
+function hideRateLimitToast() {
+  clearInterval(_retryTimer);
+  const toast = document.getElementById('rate-toast');
+  toast.classList.remove('visible');
+  _retryTask = null;
+}
+
+function retryNow() {
+  clearInterval(_retryTimer);
+  hideRateLimitToast();
+  if (_retryTask) {
+    ta.value = _retryTask;
+    send();
+  }
+}
+
 // ── ARTIFACT SIDE PANEL ───────────────────────────────────────────────────────
 const artifactItems = [];   // [{id, title, url, content}]
 let activeArtifactIdx = 0;
@@ -2651,10 +2766,5 @@ function extractSources(toolResult) {
 
 init();
 </script>
-<div id="install-prompt">
-  <span>📱 Install Claude Alt as an app</span>
-  <button class="install-btn" onclick="installPWA()">Install</button>
-  <button class="install-dismiss" onclick="dismissInstall()">×</button>
-</div>
 </body>
 </html>
