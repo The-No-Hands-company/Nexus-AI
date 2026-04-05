@@ -1,0 +1,25 @@
+# Nexus Cloud
+
+Self-hosted, federated cloud infrastructure for The No Hands Company.
+
+## Purpose
+
+This repository is the starting point for building a cloud layer that can be run by individuals or communities without relying on hyperscalers.
+
+## Architecture scaffold
+
+- `src/architecture.ts` defines the project shape
+- `src/control-plane/` holds identity, scheduling, quota, and policy boundaries
+- `src/data-plane/` holds runtime and workload boundaries
+- `src/federation/` holds trust and peer routing boundaries
+- `src/storage/` holds storage classes and volume models
+- `src/observability/` holds metrics, logs, traces, and audit boundaries
+- `src/api/` defines the initial API surface
+- `docs/architecture.md` describes the first implementation cut
+
+## Next steps
+
+- Implement node registration and trust
+- Add a scheduler stub
+- Define workload and deployment models
+- Add a runnable API server skeleton
