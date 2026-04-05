@@ -1,3 +1,10 @@
 *
-!/nexus-cloud/
-!/nexus-cloud/**
+!/.gitignore
+!/AGENTS.md
+!/README.md
+!/package.json
+!/tsconfig.json
+!/docs/
+!/docs/**
+!/src/
+!/src/**
