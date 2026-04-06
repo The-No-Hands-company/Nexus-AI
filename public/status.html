@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Nexus Cloud — Node Status</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #0e0e0f; --bg2: #161618; --bg3: #1e1e21;
+    --border: rgba(255,255,255,0.07);
+    --text: #e8e8e8; --muted: #777;
+    --green: #1D9E75; --amber: #BA7517;
+  }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system,'Segoe UI',system-ui,sans-serif; font-size: 14px; line-height: 1.6; min-height: 100vh; }
+  .wrap { max-width: 680px; margin: 0 auto; padding: 48px 20px; }
+  .logo { font-size: 13px; font-weight: 600; color: var(--green); letter-spacing: -0.2px; margin-bottom: 32px; }
+  h1 { font-size: 24px; font-weight: 600; letter-spacing: -0.4px; margin-bottom: 6px; }
+  .sub { font-size: 13px; color: var(--muted); margin-bottom: 32px; }
+  .node-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 10px; margin-bottom: 32px; }
+  .stat { background: var(--bg2); border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; }
+  .stat-label { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+  .stat-value { font-size: 20px; font-weight: 600; color: var(--text); }
+  .stat-value.green { color: var(--green); }
+  .divider { border: none; border-top: 1px solid var(--border); margin: 28px 0; }
+  .section-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin-bottom: 12px; }
+  .footer { margin-top: 40px; font-size: 11px; color: var(--muted); }
+  .footer a { color: var(--muted); text-decoration: none; }
+  .footer a:hover { color: var(--text); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo">Nexus Cloud</div>
+  <h1>Node Status</h1>
+  <p class="sub">This node is part of the Nexus federation. Storage, sync, and file sharing services.</p>
+
+  <div class="node-stats">
+    <div class="stat">
+      <div class="stat-label">Node status</div>
+      <div class="stat-value green" id="s-status">Online</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Storage used</div>
+      <div class="stat-value" id="s-storage">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Files stored</div>
+      <div class="stat-value" id="s-files">—</div>
+    </div>
+    <div class="stat">
+      <div class="stat-label">Federation peers</div>
+      <div class="stat-value" id="s-peers">—</div>
+    </div>
+  </div>
+
+  <script>
+    fetch('/api/status').then(r => r.json()).then(d => {
+      if (d.storage_used_gb !== undefined)
+        document.getElementById('s-storage').textContent =
+          d.storage_used_gb >= 1024
+            ? (d.storage_used_gb / 1024).toFixed(1) + ' TB'
+            : Math.round(d.storage_used_gb) + ' GB';
+      if (d.files_count !== undefined)
+        document.getElementById('s-files').textContent = d.files_count.toLocaleString();
+      if (d.federation_peers !== undefined)
+        document.getElementById('s-peers').textContent = d.federation_peers;
+    }).catch(() => {});
+  </script>
+
+  <hr class="divider" />
+
+  <div class="section-label">Nexus Network — Federation health</div>
+  <div id="nexus-network-widget"></div>
+
+  <div class="footer" style="margin-top: 24px;">
+    <a href="https://github.com/The-No-Hands-company/Nexus-cloud" target="_blank" rel="noopener">Nexus Cloud</a>
+    · <a href="https://github.com/The-No-Hands-company" target="_blank" rel="noopener">The No Hands Company</a>
+    · <a href="https://github.com/The-No-Hands-company/Nexus-Network" target="_blank" rel="noopener">Nexus Network</a>
+  </div>
+</div>
+
+<script>
+(function(){
+  const s = document.createElement('script');
+  s.setAttribute('data-target', 'nexus-network-widget');
+  s.setAttribute('data-api', 'https://network.nexus.computer/api/stats');
+  s.setAttribute('data-theme', 'dark');
+  s.src = 'https://network.nexus.computer/widget.js';
+  document.head.appendChild(s);
+})();
+</script>
+</body>
+</html>
