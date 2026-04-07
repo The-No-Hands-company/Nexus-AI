@@ -10,3 +10,5 @@ export type ObservabilityEvent = {
 export const observability = {
   signals: ["metrics", "logs", "traces", "audit"] as SignalKind[],
 };
+
+export * from "./service";

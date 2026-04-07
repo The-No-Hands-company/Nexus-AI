@@ -1,11 +1,10 @@
 import { architecture } from "./architecture";
 import { apiRoutes, apiSurface } from "./api";
-import { controlPlane } from "./control-plane";
+import { controlPlane, controlPlaneService } from "./control-plane";
 import { dataPlane } from "./data-plane";
 import { federation } from "./federation";
 import { observability } from "./observability";
 import { server, port } from "./server";
-import { snapshot } from "./state";
 import { storage } from "./storage";
 
 console.log(`${architecture.project} listening on ${port}`);
@@ -22,7 +21,7 @@ for (const route of apiRoutes) {
 
 console.log("Surface modules:");
 console.log(Object.keys(apiSurface).join(", "));
-console.log("State snapshot:", JSON.stringify(snapshot()));
+console.log("State snapshot:", JSON.stringify(controlPlaneService.snapshot()));
 console.log("Modules:", {
   controlPlane: controlPlane.services,
   dataPlane: dataPlane.runtimes,

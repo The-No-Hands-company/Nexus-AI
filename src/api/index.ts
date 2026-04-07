@@ -1,10 +1,9 @@
 import { architecture } from "../architecture";
-import { controlPlane } from "../control-plane";
+import { controlPlane, controlPlaneService } from "../control-plane";
 import { dataPlane } from "../data-plane";
-import { federation } from "../federation";
-import { observability } from "../observability";
+import { federationService } from "../federation";
+import { observabilityService } from "../observability";
 import { storage } from "../storage";
-import { snapshot, state } from "../state";
 
 export type ApiRoute = {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -26,9 +25,8 @@ export const apiSurface = {
   architecture,
   controlPlane,
   dataPlane,
-  federation,
-  observability,
+  federation: federationService.describeFederation(),
+  observability: observabilityService.describeObservability(),
   storage,
-  state,
-  snapshot,
+  snapshot: controlPlaneService.snapshot,
 };

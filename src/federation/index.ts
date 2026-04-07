@@ -25,3 +25,6 @@ export const federation = {
   signedRequests: true,
   identityFormat: "node@cluster",
 };
+
+export * from "./peers";
+export * from "./service";
