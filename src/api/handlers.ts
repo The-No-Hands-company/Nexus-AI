@@ -49,6 +49,7 @@ import {
   toSystemsApiDomainResourcesResponseDTO,
   toSystemsApiExposureResourceDTO,
   toSystemsApiExposureResourcesResponseDTO,
+  toSystemsApiExposureStatusResponseDTO,
   type SystemsApiExposureStatusResponseDTO,
 } from "./exposure-dto";
 
@@ -284,13 +285,13 @@ function handleSystemsToolDisable(toolId: string): Response {
 }
 
 function handleSystemsStatus(): Response {
-  const body: SystemsApiExposureStatusResponseDTO = {
-    status: systemsApiService.describeSystemsApiStatus(),
-    tools: systemsApiService.listSystemsApiTools(),
-    publicUrls: systemsApiService.listSystemsApiPublicUrls(),
-    exposures: toSystemsApiExposureResourcesResponseDTO(systemsApiService.listSystemsApiExposures()).exposures,
-    domains: toSystemsApiDomainResourcesResponseDTO(systemsApiService.listSystemsApiDomainBindings()).domains,
-  };
+  const body: SystemsApiExposureStatusResponseDTO = toSystemsApiExposureStatusResponseDTO(
+    systemsApiService.describeSystemsApiStatus(),
+    systemsApiService.listSystemsApiTools(),
+    systemsApiService.listSystemsApiPublicUrls(),
+    systemsApiService.listSystemsApiExposures(),
+    systemsApiService.listSystemsApiDomainBindings(),
+  );
   return json(body);
 }
 

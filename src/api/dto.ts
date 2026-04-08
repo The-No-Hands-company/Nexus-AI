@@ -22,7 +22,13 @@ import type {
   SystemsApiToolHealth,
   SystemsApiToolHistoryEntry,
 } from "../systems-api";
-import type { SystemsApiExposureResourceDTO } from "./exposure-dto";
+import type {
+  SystemsApiDomainResponseDTO as CanonicalSystemsApiDomainResponseDTO,
+  SystemsApiDomainsResponseDTO as CanonicalSystemsApiDomainsResponseDTO,
+  SystemsApiExposureResourceDTO,
+  SystemsApiExposureStatusResponseDTO as CanonicalSystemsApiExposureStatusResponseDTO,
+  SystemsApiExposureTargetDTO,
+} from "./exposure-dto";
 
 export type ApiRoute = {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";

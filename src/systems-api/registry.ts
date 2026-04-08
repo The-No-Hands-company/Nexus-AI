@@ -1,4 +1,4 @@
-import { buildPublicUrl, createExposureRecord, transitionExposureRecord } from "./exposure";
+import { buildPublicUrl, createExposureRecord, revokeExposureRecord, transitionExposureRecord } from "./exposure";
 import { createDomainBinding, issueDomainVerificationChallenge as buildDomainVerificationChallenge, revokeDomainBinding as revokeDomainRecord, verifyDomainBinding as verifyDomainRecord } from "./domains";
 import { getSystemsApiRegistryMetadata, loadSystemsApiRegistry, saveSystemsApiRegistry, type SystemsApiRegistryData } from "./store";
 import type { SystemsApiDomainBinding, SystemsApiDomainVerificationChallenge, SystemsApiExposureRecord, SystemsApiExposureStatus, SystemsApiMode, SystemsApiPublicUrl, SystemsApiPublicUrlStatus, SystemsApiStatus, SystemsApiTool, SystemsApiToolExposure, SystemsApiToolHealth, SystemsApiToolHistoryAction, SystemsApiToolHistoryEntry } from "./types";
@@ -221,6 +221,36 @@ export function requestExposure(input: SystemsApiExposureRequest): SystemsApiExp
   pushHistory(tool.id, "exposure-activated", `Activated exposure for ${tool.name}`, record.activatedAt ?? record.updatedAt);
   persist();
   return record;
+}
+
+export function revokeSystemsApiExposure(toolId: string): SystemsApiExposureRecord | null {
+  const exposure = getExposure(toolId);
+  const tool = getTool(toolId);
+  if (!exposure) return null;
+
+  const revoked = revokeExposureRecord(exposure);
+  upsertExposureRecord(revoked);
+
+  const publicUrlIndex = registry.publicUrls.findIndex((item) => item.toolId === toolId);
+  if (publicUrlIndex >= 0) {
+    registry.publicUrls[publicUrlIndex] = {
+      ...registry.publicUrls[publicUrlIndex],
+      status: "revoked",
+      issuedAt: registry.publicUrls[publicUrlIndex].issuedAt,
+      expiresAt: registry.publicUrls[publicUrlIndex].expiresAt,
+    };
+  }
+
+  updateToolRecord(toolId, (current) => ({
+    ...current,
+    exposed: false,
+    exposure: "private",
+    updatedAt: now(),
+  }));
+
+  pushHistory(toolId, "exposure-revoked", `Revoked exposure for ${tool?.name ?? toolId}`, revoked.revokedAt ?? revoked.updatedAt);
+  persist();
+  return revoked;
 }
 
 export function requestPublicUrl(input: SystemsApiPublicUrlRequest): SystemsApiPublicUrl | null {

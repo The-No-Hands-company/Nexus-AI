@@ -8,17 +8,21 @@ import type {
   SystemsApiTool,
 } from "../systems-api";
 
-export type SystemsApiExposureResourceStatus = SystemsApiExposureStatus | SystemsApiDomainBindingStatus;
+export type SystemsApiExposureTargetStatus = SystemsApiExposureStatus | SystemsApiDomainBindingStatus;
 
-export type SystemsApiExposureResourceDTO = {
+export type SystemsApiExposureTargetDTO = {
   toolId: string;
   publicUrl: string;
   domain: string | null;
   verificationToken: string | null;
-  status: SystemsApiExposureResourceStatus;
+  status: SystemsApiExposureTargetStatus;
   target: string;
   expiresAt: string | null;
   revokedAt: string | null;
+};
+
+export type SystemsApiExposureResourceDTO = {
+  target: SystemsApiExposureTargetDTO;
 };
 
 export type SystemsApiExposureResourcesResponseDTO = {
@@ -29,12 +33,20 @@ export type SystemsApiExposureResourceResponseDTO = {
   exposure: SystemsApiExposureResourceDTO;
 };
 
-export type SystemsApiDomainResourcesResponseDTO = {
+export type SystemsApiDomainsResponseDTO = {
   domains: readonly SystemsApiExposureResourceDTO[];
 };
 
-export type SystemsApiDomainResourceResponseDTO = {
+export type SystemsApiDomainResponseDTO = {
   domain: SystemsApiExposureResourceDTO;
+};
+
+export type SystemsApiExposureStatusSummaryDTO = {
+  total: number;
+  active: number;
+  verified: number;
+  pending: number;
+  revoked: number;
 };
 
 export type SystemsApiExposureStatusResponseDTO = {
@@ -43,6 +55,7 @@ export type SystemsApiExposureStatusResponseDTO = {
   publicUrls: readonly SystemsApiPublicUrl[];
   exposures: readonly SystemsApiExposureResourceDTO[];
   domains: readonly SystemsApiExposureResourceDTO[];
+  summary: SystemsApiExposureStatusSummaryDTO;
 };
 
 function exposureExpiresAt(requestedAt: string): string {
@@ -53,7 +66,7 @@ function exposureExpiresAt(requestedAt: string): string {
   return new Date(timestamp + 1000 * 60 * 60 * 24 * 30).toISOString();
 }
 
-export function toSystemsApiExposureResourceDTO(record: SystemsApiExposureRecord): SystemsApiExposureResourceDTO {
+export function toSystemsApiExposureTargetDTO(record: SystemsApiExposureRecord): SystemsApiExposureTargetDTO {
   return {
     toolId: record.toolId,
     publicUrl: record.publicUrl,
@@ -66,7 +79,7 @@ export function toSystemsApiExposureResourceDTO(record: SystemsApiExposureRecord
   };
 }
 
-export function toSystemsApiDomainResourceDTO(binding: SystemsApiDomainBinding): SystemsApiExposureResourceDTO {
+export function toSystemsApiDomainTargetDTO(binding: SystemsApiDomainBinding): SystemsApiExposureTargetDTO {
   return {
     toolId: binding.toolId,
     publicUrl: binding.publicUrl,
@@ -79,10 +92,45 @@ export function toSystemsApiDomainResourceDTO(binding: SystemsApiDomainBinding):
   };
 }
 
+export function toSystemsApiExposureResourceDTO(record: SystemsApiExposureRecord): SystemsApiExposureResourceDTO {
+  return { target: toSystemsApiExposureTargetDTO(record) };
+}
+
+export function toSystemsApiDomainResourceDTO(binding: SystemsApiDomainBinding): SystemsApiExposureResourceDTO {
+  return { target: toSystemsApiDomainTargetDTO(binding) };
+}
+
 export function toSystemsApiExposureResourcesResponseDTO(exposures: readonly SystemsApiExposureRecord[]): SystemsApiExposureResourcesResponseDTO {
   return { exposures: exposures.map(toSystemsApiExposureResourceDTO) };
 }
 
-export function toSystemsApiDomainResourcesResponseDTO(domains: readonly SystemsApiDomainBinding[]): SystemsApiDomainResourcesResponseDTO {
+export function toSystemsApiDomainResourcesResponseDTO(domains: readonly SystemsApiDomainBinding[]): SystemsApiDomainsResponseDTO {
   return { domains: domains.map(toSystemsApiDomainResourceDTO) };
+}
+
+export function toSystemsApiExposureStatusResponseDTO(
+  status: SystemsApiStatus,
+  tools: readonly SystemsApiTool[],
+  publicUrls: readonly SystemsApiPublicUrl[],
+  exposures: readonly SystemsApiExposureRecord[],
+  domains: readonly SystemsApiDomainBinding[],
+): SystemsApiExposureStatusResponseDTO {
+  const exposureResources = exposures.map(toSystemsApiExposureResourceDTO);
+  const domainResources = domains.map(toSystemsApiDomainResourceDTO);
+  const summary: SystemsApiExposureStatusSummaryDTO = {
+    total: exposureResources.length + domainResources.length,
+    active: exposureResources.filter((item) => item.target.status === "active").length,
+    verified: domainResources.filter((item) => item.target.status === "verified").length,
+    pending: exposureResources.filter((item) => item.target.status === "requested" || item.target.status === "suspended" || item.target.status === "pending").length + domainResources.filter((item) => item.target.status === "pending").length,
+    revoked: exposureResources.filter((item) => item.target.status === "revoked").length + domainResources.filter((item) => item.target.status === "revoked").length,
+  };
+
+  return {
+    status,
+    tools,
+    publicUrls,
+    exposures: exposureResources,
+    domains: domainResources,
+    summary,
+  };
 }
