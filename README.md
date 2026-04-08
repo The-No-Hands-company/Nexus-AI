@@ -17,6 +17,7 @@ This repository is the starting point for building a cloud layer that can be run
 - `src/api/` defines the initial API surface
 - `src/systems-api/` defines the shared platform contract for tools and services
 - `docs/architecture.md` describes the first implementation cut
+- `docs/implementation-plan.md` is the living roadmap for current and future work
 
 ## Next steps
 

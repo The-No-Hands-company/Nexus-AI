@@ -8,7 +8,7 @@ import type { FederationSummary } from "../federation/service";
 import type { ObservabilityEvent } from "../observability";
 import type { ObservabilitySummary } from "../observability/service";
 import type { StorageVolume } from "../storage";
-import type { SystemsApiPublicUrl, SystemsApiStatus, SystemsApiTool } from "../systems-api";
+import type { SystemsApiCapability, SystemsApiEndpoint, SystemsApiMode, SystemsApiPublicUrl, SystemsApiStatus, SystemsApiSummary, SystemsApiTool, SystemsApiToolHealth, SystemsApiToolHistoryEntry } from "../systems-api";
 
 export type ApiRoute = {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -34,6 +34,19 @@ export type ArchitectureResponse = {
   principles: readonly string[];
   layers: readonly ArchitectureLayer[];
   routes: readonly ApiRoute[];
+};
+
+export type LegacyStatusResponse = {
+  status: "online";
+  project: string;
+  storage_used_gb: number;
+  files_count: number;
+  federation_peers: number;
+  nodes: number;
+  workloads: number;
+  tools: number;
+  public_urls: number;
+  updated_at: string;
 };
 
 export type StateResponse = {
@@ -98,6 +111,18 @@ export type SystemsApiStatusResponseDTO = {
   publicUrls: readonly SystemsApiPublicUrl[];
 };
 
+export type SystemsApiEndpointsResponseDTO = {
+  endpoints: readonly SystemsApiEndpoint[];
+};
+
+export type SystemsApiCapabilitiesResponseDTO = {
+  capabilities: readonly SystemsApiCapability[];
+};
+
+export type SystemsApiSummaryResponseDTO = {
+  summary: SystemsApiSummary;
+};
+
 export type SystemsApiPublicUrlRequestDTO = {
   toolId: string;
   desiredHost?: string;
@@ -107,6 +132,19 @@ export type SystemsApiPublicUrlRequestDTO = {
 export type SystemsApiPublicUrlResponseDTO = {
   publicUrl: SystemsApiPublicUrl;
   tool: SystemsApiTool;
+};
+
+export type SystemsApiToolPatchRequestDTO = {
+  name?: string;
+  description?: string;
+  mode?: SystemsApiMode;
+  exposed?: boolean;
+  health?: SystemsApiToolHealth;
+  capabilities?: readonly string[];
+};
+
+export type SystemsApiToolHistoryResponseDTO = {
+  history: readonly SystemsApiToolHistoryEntry[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -127,6 +165,14 @@ function isStringRecord(value: unknown): value is Record<string, string> {
 
 function isNodeCapacity(value: unknown): value is NodeCapacity {
   return isRecord(value) && isNumber(value.cpu) && isNumber(value.memoryMb) && isNumber(value.storageGb) && (value.publicIpv4 === undefined || isString(value.publicIpv4));
+}
+
+function isMode(value: unknown): value is SystemsApiMode {
+  return value === "standalone" || value === "orchestrated";
+}
+
+function isToolHealth(value: unknown): value is SystemsApiToolHealth {
+  return value === "healthy" || value === "degraded" || value === "offline";
 }
 
 export function isRegisterNodeRequest(value: unknown): value is RegisterNodeRequestDTO {
@@ -163,4 +209,18 @@ export function isSystemsApiPublicUrlRequest(value: unknown): value is SystemsAp
     && isString(value.toolId)
     && (value.desiredHost === undefined || isString(value.desiredHost))
     && (value.refresh === undefined || typeof value.refresh === "boolean");
+}
+
+export function isSystemsApiToolPatchRequest(value: unknown): value is SystemsApiToolPatchRequestDTO {
+  return isRecord(value)
+    && (value.name === undefined || isString(value.name))
+    && (value.description === undefined || isString(value.description))
+    && (value.mode === undefined || isMode(value.mode))
+    && (value.exposed === undefined || typeof value.exposed === "boolean")
+    && (value.health === undefined || isToolHealth(value.health))
+    && (value.capabilities === undefined || Array.isArray(value.capabilities) && value.capabilities.every(isString));
+}
+
+export function isSystemsApiToolHistoryResponse(value: unknown): value is SystemsApiToolHistoryResponseDTO {
+  return isRecord(value) && Array.isArray(value.history) && value.history.every((entry) => isRecord(entry) && isString(entry.toolId) && isString(entry.action) && isString(entry.actor) && isString(entry.timestamp));
 }

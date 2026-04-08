@@ -31,6 +31,15 @@ export type SystemsApiTool = {
   updatedAt: string;
 };
 
+export type SystemsApiToolHistoryAction = "registered" | "updated" | "enabled" | "disabled" | "public-url-issued";
+
+export type SystemsApiToolHistoryEntry = {
+  toolId: string;
+  action: SystemsApiToolHistoryAction;
+  summary: string;
+  at: string;
+};
+
 export type SystemsApiPublicUrlStatus = "active" | "pending" | "revoked";
 
 export type SystemsApiPublicUrl = {
@@ -41,6 +50,14 @@ export type SystemsApiPublicUrl = {
   expiresAt: string;
 };
 
+export type SystemsApiRegistryMetadata = {
+  path: string;
+  exists: boolean;
+  sizeBytes: number;
+  lastWriteAt: string | null;
+  ageSeconds: number | null;
+};
+
 export type SystemsApiStatus = {
   version: SystemsApiVersion;
   mode: SystemsApiMode;
@@ -48,6 +65,7 @@ export type SystemsApiStatus = {
   exposedToolCount: number;
   healthyToolCount: number;
   publicUrlCount: number;
+  registry: SystemsApiRegistryMetadata;
   updatedAt: string;
 };
 

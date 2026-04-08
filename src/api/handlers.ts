@@ -9,20 +9,27 @@ import { apiRoutes } from "./index";
 import {
   type ArchitectureResponse,
   type HealthResponse,
+  type LegacyStatusResponse,
   type NodeListResponse,
   type PeerListResponse,
   type PlanWorkloadErrorResponse,
   type PlanWorkloadSuccessResponse,
   type RegisterNodeResponse,
   type StateResponse,
+  type SystemsApiCapabilitiesResponseDTO,
+  type SystemsApiEndpointsResponseDTO,
   type SystemsApiPublicUrlResponseDTO,
   type SystemsApiStatusResponseDTO,
+  type SystemsApiSummaryResponseDTO,
+  type SystemsApiToolHistoryResponseDTO,
+  type SystemsApiToolPatchRequestDTO,
   type SystemsApiToolResponseDTO,
   type SystemsApiToolsResponseDTO,
   type TrustPeerResponse,
   type WorkloadListResponse,
   isRegisterNodeRequest,
   isSystemsApiPublicUrlRequest,
+  isSystemsApiToolPatchRequest,
   isTrustPeerRequest,
   isWorkloadPlanRequest,
 } from "./dto";
@@ -58,6 +65,24 @@ function handleHealth(): Response {
       observability: observabilityService.describeObservability(),
       storage: storage.classes.map((item) => item.name),
     },
+  };
+
+  return json(body);
+}
+
+function handleLegacyStatus(): Response {
+  const snapshot = controlPlaneService.snapshot();
+  const body: LegacyStatusResponse = {
+    status: "online",
+    project: architecture.project,
+    storage_used_gb: snapshot.volumes.reduce((total, volume) => total + volume.sizeGb, 0),
+    files_count: snapshot.volumes.length,
+    federation_peers: snapshot.peers.length,
+    nodes: snapshot.nodes.length,
+    workloads: snapshot.workloads.length,
+    tools: systemsApiService.listSystemsApiTools().length,
+    public_urls: systemsApiService.listSystemsApiPublicUrls().length,
+    updated_at: new Date().toISOString(),
   };
 
   return json(body);
@@ -151,6 +176,27 @@ function handleSystemsTools(): Response {
   return json(body);
 }
 
+function handleSystemsEndpoints(): Response {
+  const body: SystemsApiEndpointsResponseDTO = {
+    endpoints: systemsApiService.listSystemsApiEndpoints(),
+  };
+  return json(body);
+}
+
+function handleSystemsCapabilities(): Response {
+  const body: SystemsApiCapabilitiesResponseDTO = {
+    capabilities: systemsApiService.listSystemsApiCapabilities(),
+  };
+  return json(body);
+}
+
+function handleSystemsSummary(): Response {
+  const body: SystemsApiSummaryResponseDTO = {
+    summary: systemsApiService.describeSystemsApi(),
+  };
+  return json(body);
+}
+
 function handleSystemsTool(toolId: string): Response {
   const tool = systemsApiService.getSystemsApiTool(toolId);
   if (!tool) {
@@ -159,6 +205,44 @@ function handleSystemsTool(toolId: string): Response {
 
   const body: SystemsApiToolResponseDTO = { tool };
   return json(body);
+}
+
+function handleSystemsToolHistory(toolId: string): Response {
+  const tool = systemsApiService.getSystemsApiTool(toolId);
+  if (!tool) {
+    return notFound();
+  }
+
+  const body: SystemsApiToolHistoryResponseDTO = {
+    history: systemsApiService.listSystemsApiToolHistory(toolId),
+  };
+  return json(body);
+}
+
+async function handleSystemsToolPatch(request: Request, toolId: string): Promise<Response> {
+  const body = await readJson(request);
+  if (!isSystemsApiToolPatchRequest(body)) {
+    return badRequest("Missing tool metadata fields");
+  }
+
+  if (
+    body.name === undefined &&
+    body.description === undefined &&
+    body.mode === undefined &&
+    body.exposed === undefined &&
+    body.health === undefined &&
+    body.capabilities === undefined
+  ) {
+    return badRequest("Empty tool metadata patch");
+  }
+
+  const tool = systemsApiService.updateSystemsApiTool(toolId, body as SystemsApiToolPatchRequestDTO);
+  if (!tool) {
+    return notFound();
+  }
+
+  const response: SystemsApiToolResponseDTO = { tool };
+  return json(response);
 }
 
 function handleSystemsToolEnable(toolId: string): Response {
@@ -210,15 +294,24 @@ async function handleSystemsPublicUrl(request: Request): Promise<Response> {
   return json(response, 201);
 }
 
-function handleSystemsToolRoute(request: Request, pathname: string): Response {
+async function handleSystemsToolRoute(request: Request, pathname: string): Promise<Response> {
   const prefix = "/api/v1/tools/";
   const suffix = pathname.slice(prefix.length);
   if (!suffix) {
     return notFound();
   }
 
+  if (request.method === "GET" && suffix.endsWith("/history")) {
+    const toolId = decodeURIComponent(suffix.slice(0, -"/history".length));
+    return toolId ? handleSystemsToolHistory(toolId) : badRequest("Missing tool id");
+  }
+
   if (request.method === "GET" && !suffix.includes("/")) {
     return handleSystemsTool(decodeURIComponent(suffix));
+  }
+
+  if (request.method === "PATCH" && !suffix.includes("/")) {
+    return handleSystemsToolPatch(request, decodeURIComponent(suffix));
   }
 
   if (request.method === "POST" && suffix.endsWith("/enable")) {
@@ -239,6 +332,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
   const { pathname } = url;
 
   if (request.method === "GET" && pathname === "/health") return handleHealth();
+  if (request.method === "GET" && pathname === "/api/status") return handleLegacyStatus();
   if (request.method === "GET" && pathname === "/v1/architecture") return handleArchitecture();
   if (request.method === "GET" && pathname === "/v1/state") return handleState();
   if (request.method === "GET" && pathname === "/v1/nodes") return handleNodesList();
@@ -250,10 +344,13 @@ export async function handleApiRequest(request: Request): Promise<Response> {
     return handlePeerTrust(request, pathname);
   }
   if (request.method === "GET" && pathname === "/api/v1/tools") return handleSystemsTools();
+  if (request.method === "GET" && pathname === "/api/v1/endpoints") return handleSystemsEndpoints();
+  if (request.method === "GET" && pathname === "/api/v1/capabilities") return handleSystemsCapabilities();
+  if (request.method === "GET" && pathname === "/api/v1/summary") return handleSystemsSummary();
   if (request.method === "GET" && pathname === "/api/v1/status") return handleSystemsStatus();
   if (request.method === "POST" && pathname === "/api/v1/public-url") return handleSystemsPublicUrl(request);
   if (pathname.startsWith("/api/v1/tools/")) {
-    return handleSystemsToolRoute(request, pathname);
+    return await handleSystemsToolRoute(request, pathname);
   }
 
   return notFound();
