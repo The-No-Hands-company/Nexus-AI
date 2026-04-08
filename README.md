@@ -19,6 +19,14 @@ This repository is the starting point for building a cloud layer that can be run
 - `docs/architecture.md` describes the first implementation cut
 - `docs/implementation-plan.md` is the living roadmap for current and future work
 
+## Testing
+
+- Run the suite with `bun test src`
+- Keep shared test helpers in `src/test/`
+- Prefer `*.test.ts` next to the module for DTO and unit coverage
+- Use `src/test/` for shared harnesses and cross-module route/service behavior
+- Keep the route manifest, router handlers, DTOs, and service behavior covered together when changing the Systems API
+
 ## Next steps
 
 - Implement node registration and trust

@@ -1,4 +1,4 @@
-import { describeStatus, disableSystemsApiTool as disableTool, enableSystemsApiTool as enableTool, getDomainBinding, getDomainVerificationChallenge, getExposure, getTool, listDomainBindings, listExposures, listPublicUrls, listToolHistory, listTools, registerSystemsApiTool as registerTool, requestDomainBinding, requestExposure, requestPublicUrl, revokeDomainBinding, updateTool as patchTool, verifyDomainBinding, type SystemsApiDomainBindingRequest, type SystemsApiDomainVerificationRequest, type SystemsApiExposureRequest, type SystemsApiPublicUrlRequest, type SystemsApiToolPatchInput, type SystemsApiToolRegistrationInput } from "./registry";
+import { describeStatus, disableSystemsApiTool as disableTool, enableSystemsApiTool as enableTool, getDomainBinding, getDomainVerificationChallenge, getExposure, getTool, listDomainBindings, listExposures, listPublicUrls, listToolHistory, listTools, registerSystemsApiTool as registerTool, requestDomainBinding, requestExposure, requestPublicUrl, revokeDomainBinding, revokeSystemsApiExposure as revokeExposure, updateTool as patchTool, verifyDomainBinding, type SystemsApiDomainBindingRequest, type SystemsApiDomainVerificationRequest, type SystemsApiExposureRequest, type SystemsApiPublicUrlRequest, type SystemsApiToolPatchInput, type SystemsApiToolRegistrationInput } from "./registry";
 import type { SystemsApiCapability, SystemsApiDomainBinding, SystemsApiDomainVerificationChallenge, SystemsApiEndpoint, SystemsApiExposureRecord, SystemsApiMode, SystemsApiPublicUrl, SystemsApiStatus, SystemsApiSummary, SystemsApiTool, SystemsApiToolHistoryEntry } from "./types";
 
 const endpoints = [
@@ -11,7 +11,9 @@ const endpoints = [
   { method: "GET", path: "/api/v1/status", description: "Return normalized platform status" },
   { method: "POST", path: "/api/v1/public-url", description: "Request or refresh a public URL" },
   { method: "GET", path: "/api/v1/exposures", description: "List exposure records" },
+  { method: "GET", path: "/api/v1/exposures/:toolId", description: "Inspect an exposure record" },
   { method: "POST", path: "/api/v1/exposures", description: "Request a new exposure" },
+  { method: "POST", path: "/api/v1/exposures/:toolId/revoke", description: "Revoke an exposure record" },
   { method: "GET", path: "/api/v1/domains", description: "List domain bindings" },
   { method: "POST", path: "/api/v1/domains", description: "Bind a custom domain" },
   { method: "GET", path: "/api/v1/domains/:domain", description: "Inspect a domain binding" },
@@ -65,6 +67,10 @@ export function getSystemsApiExposure(toolId: string): SystemsApiExposureRecord 
 
 export function requestSystemsApiExposure(input: SystemsApiExposureRequest): SystemsApiExposureRecord | null {
   return requestExposure(input);
+}
+
+export function revokeSystemsApiExposure(toolId: string): SystemsApiExposureRecord | null {
+  return revokeExposure(toolId);
 }
 
 export function listSystemsApiDomainBindings(): readonly SystemsApiDomainBinding[] {
@@ -145,6 +151,7 @@ export const systemsApiService = {
   requestSystemsApiDomainBinding,
   requestSystemsApiExposure,
   revokeSystemsApiDomain,
+  revokeSystemsApiExposure,
   updateSystemsApiTool,
   verifySystemsApiDomain,
 };

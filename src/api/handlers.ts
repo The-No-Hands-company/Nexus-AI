@@ -320,6 +320,13 @@ function handleSystemsExposures(): Response {
   return json(body);
 }
 
+function handleSystemsExposureGet(toolId: string): Response {
+  const exposure = systemsApiService.getSystemsApiExposure(toolId);
+  if (!exposure) return notFound();
+  const response: SystemsApiExposureResponseDTO = { exposure: toSystemsApiExposureResourceDTO(exposure) };
+  return json(response);
+}
+
 async function handleSystemsExposurePost(request: Request): Promise<Response> {
   const body = await readJson(request);
   if (!isSystemsApiExposureRequest(body)) return badRequest("Missing exposure fields");
@@ -327,6 +334,13 @@ async function handleSystemsExposurePost(request: Request): Promise<Response> {
   if (!exposure) return notFound();
   const response: SystemsApiExposureResponseDTO = { exposure: toSystemsApiExposureResourceDTO(exposure) };
   return json(response, 201);
+}
+
+function handleSystemsExposureRevoke(toolId: string): Response {
+  const exposure = systemsApiService.revokeSystemsApiExposure(toolId);
+  if (!exposure) return notFound();
+  const response: SystemsApiExposureResponseDTO = { exposure: toSystemsApiExposureResourceDTO(exposure) };
+  return json(response);
 }
 
 function handleSystemsDomains(): Response {
@@ -401,9 +415,29 @@ async function handleSystemsToolRoute(request: Request, pathname: string): Promi
   return notFound();
 }
 
+async function handleSystemsExposureRoute(request: Request, pathname: string): Promise<Response> {
+  const prefix = "/api/v1/exposures/";
+  const suffix = pathname.slice(prefix.length);
+  if (!suffix) {
+    return notFound();
+  }
+
+  if (request.method === "GET" && !suffix.includes("/")) {
+    return handleSystemsExposureGet(decodeURIComponent(suffix));
+  }
+
+  if (request.method === "POST" && suffix.endsWith("/revoke")) {
+    const toolId = decodeURIComponent(suffix.slice(0, -"/revoke".length));
+    return toolId ? handleSystemsExposureRevoke(toolId) : badRequest("Missing tool id");
+  }
+
+  return notFound();
+}
+
 async function handleSystemsRoute(request: Request, pathname: string): Promise<Response> {
   if (request.method === "GET" && pathname === "/api/v1/exposures") return handleSystemsExposures();
   if (request.method === "POST" && pathname === "/api/v1/exposures") return handleSystemsExposurePost(request);
+  if (pathname.startsWith("/api/v1/exposures/")) return await handleSystemsExposureRoute(request, pathname);
   if (request.method === "GET" && pathname === "/api/v1/domains") return handleSystemsDomains();
   if (request.method === "POST" && pathname === "/api/v1/domains") return handleSystemsDomainPost(request);
 
@@ -445,7 +479,7 @@ export async function handleApiRequest(request: Request): Promise<Response> {
   if (pathname.startsWith("/api/v1/tools/")) {
     return await handleSystemsToolRoute(request, pathname);
   }
-  if (pathname === "/api/v1/exposures" || pathname === "/api/v1/domains" || pathname.startsWith("/api/v1/domains/")) {
+  if (pathname === "/api/v1/exposures" || pathname.startsWith("/api/v1/exposures/") || pathname === "/api/v1/domains" || pathname.startsWith("/api/v1/domains/")) {
     return await handleSystemsRoute(request, pathname);
   }
 
