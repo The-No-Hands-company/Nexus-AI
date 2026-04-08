@@ -22,6 +22,7 @@ import type {
   SystemsApiToolHealth,
   SystemsApiToolHistoryEntry,
 } from "../systems-api";
+import type { SystemsApiExposureResourceDTO } from "./exposure-dto";
 
 export type ApiRoute = {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -123,11 +124,11 @@ export type SystemsApiToolHistoryResponseDTO = {
 };
 
 export type SystemsApiExposuresResponseDTO = {
-  exposures: readonly SystemsApiExposureRecord[];
+  exposures: readonly SystemsApiExposureResourceDTO[];
 };
 
 export type SystemsApiExposureResponseDTO = {
-  exposure: SystemsApiExposureRecord;
+  exposure: SystemsApiExposureResourceDTO;
 };
 
 export type SystemsApiExposureRequestDTO = {
@@ -136,11 +137,11 @@ export type SystemsApiExposureRequestDTO = {
 };
 
 export type SystemsApiDomainsResponseDTO = {
-  domains: readonly SystemsApiDomainBinding[];
+  domains: readonly SystemsApiExposureResourceDTO[];
 };
 
 export type SystemsApiDomainResponseDTO = {
-  domain: SystemsApiDomainBinding;
+  domain: SystemsApiExposureResourceDTO;
 };
 
 export type SystemsApiDomainBindingRequestDTO = {
@@ -161,6 +162,8 @@ export type SystemsApiStatusResponseDTO = {
   status: SystemsApiStatus;
   tools: readonly SystemsApiTool[];
   publicUrls: readonly SystemsApiPublicUrl[];
+  exposures: readonly SystemsApiExposureResourceDTO[];
+  domains: readonly SystemsApiExposureResourceDTO[];
 };
 
 export type SystemsApiEndpointsResponseDTO = {

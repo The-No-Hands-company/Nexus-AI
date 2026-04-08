@@ -281,6 +281,26 @@ function handleSystemsStatus(): Response {
     status: systemsApiService.describeSystemsApiStatus(),
     tools: systemsApiService.listSystemsApiTools(),
     publicUrls: systemsApiService.listSystemsApiPublicUrls(),
+    exposures: systemsApiService.listSystemsApiExposures().map((item) => ({
+      toolId: item.toolId,
+      publicUrl: item.publicUrl,
+      domain: null,
+      verificationToken: null,
+      status: item.status,
+      target: item.canonicalUrl,
+      expiresAt: item.activatedAt ?? item.requestedAt,
+      revokedAt: item.revokedAt ?? null,
+    })),
+    domains: systemsApiService.listSystemsApiDomainBindings().map((item) => ({
+      toolId: item.toolId,
+      publicUrl: item.publicUrl,
+      domain: item.domain,
+      verificationToken: item.verificationToken,
+      status: item.status,
+      target: item.canonicalUrl,
+      expiresAt: item.verificationExpiresAt,
+      revokedAt: item.revokedAt ?? null,
+    })),
   };
   return json(body);
 }
@@ -306,7 +326,18 @@ async function handleSystemsPublicUrl(request: Request): Promise<Response> {
 }
 
 function handleSystemsExposures(): Response {
-  const body: SystemsApiExposuresResponseDTO = { exposures: systemsApiService.listSystemsApiExposures() };
+  const body: SystemsApiExposuresResponseDTO = {
+    exposures: systemsApiService.listSystemsApiExposures().map((item) => ({
+      toolId: item.toolId,
+      publicUrl: item.publicUrl,
+      domain: null,
+      verificationToken: null,
+      status: item.status,
+      target: item.canonicalUrl,
+      expiresAt: item.activatedAt ?? item.requestedAt,
+      revokedAt: item.revokedAt ?? null,
+    })),
+  };
   return json(body);
 }
 
@@ -315,12 +346,34 @@ async function handleSystemsExposurePost(request: Request): Promise<Response> {
   if (!isSystemsApiExposureRequest(body)) return badRequest("Missing exposure fields");
   const exposure = systemsApiService.requestSystemsApiExposure(body);
   if (!exposure) return notFound();
-  const response: SystemsApiExposureResponseDTO = { exposure };
+  const response: SystemsApiExposureResponseDTO = {
+    exposure: {
+      toolId: exposure.toolId,
+      publicUrl: exposure.publicUrl,
+      domain: null,
+      verificationToken: null,
+      status: exposure.status,
+      target: exposure.canonicalUrl,
+      expiresAt: exposure.activatedAt ?? exposure.requestedAt,
+      revokedAt: exposure.revokedAt ?? null,
+    },
+  };
   return json(response, 201);
 }
 
 function handleSystemsDomains(): Response {
-  const body: SystemsApiDomainsResponseDTO = { domains: systemsApiService.listSystemsApiDomainBindings() };
+  const body: SystemsApiDomainsResponseDTO = {
+    domains: systemsApiService.listSystemsApiDomainBindings().map((item) => ({
+      toolId: item.toolId,
+      publicUrl: item.publicUrl,
+      domain: item.domain,
+      verificationToken: item.verificationToken,
+      status: item.status,
+      target: item.canonicalUrl,
+      expiresAt: item.verificationExpiresAt,
+      revokedAt: item.revokedAt ?? null,
+    })),
+  };
   return json(body);
 }
 
@@ -329,14 +382,36 @@ async function handleSystemsDomainPost(request: Request): Promise<Response> {
   if (!isSystemsApiDomainBindingRequest(body)) return badRequest("Missing domain binding fields");
   const domain = systemsApiService.requestSystemsApiDomainBinding(body);
   if (!domain) return notFound();
-  const response: SystemsApiDomainResponseDTO = { domain };
+  const response: SystemsApiDomainResponseDTO = {
+    domain: {
+      toolId: domain.toolId,
+      publicUrl: domain.publicUrl,
+      domain: domain.domain,
+      verificationToken: domain.verificationToken,
+      status: domain.status,
+      target: domain.canonicalUrl,
+      expiresAt: domain.verificationExpiresAt,
+      revokedAt: domain.revokedAt ?? null,
+    },
+  };
   return json(response, 201);
 }
 
 function handleSystemsDomainGet(domain: string): Response {
   const binding = systemsApiService.getSystemsApiDomainBinding(domain);
   if (!binding) return notFound();
-  const response: SystemsApiDomainResponseDTO = { domain: binding };
+  const response: SystemsApiDomainResponseDTO = {
+    domain: {
+      toolId: binding.toolId,
+      publicUrl: binding.publicUrl,
+      domain: binding.domain,
+      verificationToken: binding.verificationToken,
+      status: binding.status,
+      target: binding.canonicalUrl,
+      expiresAt: binding.verificationExpiresAt,
+      revokedAt: binding.revokedAt ?? null,
+    },
+  };
   return json(response);
 }
 
@@ -354,7 +429,18 @@ async function handleSystemsDomainVerify(request: Request, domain: string): Prom
 function handleSystemsDomainDelete(domain: string): Response {
   const revoked = systemsApiService.revokeSystemsApiDomain(domain);
   if (!revoked) return notFound();
-  const response: SystemsApiDomainResponseDTO = { domain: revoked };
+  const response: SystemsApiDomainResponseDTO = {
+    domain: {
+      toolId: revoked.toolId,
+      publicUrl: revoked.publicUrl,
+      domain: revoked.domain,
+      verificationToken: revoked.verificationToken,
+      status: revoked.status,
+      target: revoked.canonicalUrl,
+      expiresAt: revoked.verificationExpiresAt,
+      revokedAt: revoked.revokedAt ?? null,
+    },
+  };
   return json(response);
 }
 
