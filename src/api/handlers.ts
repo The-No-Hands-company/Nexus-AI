@@ -17,9 +17,17 @@ import {
   type RegisterNodeResponse,
   type StateResponse,
   type SystemsApiCapabilitiesResponseDTO,
+  type SystemsApiDomainBindingRequestDTO,
+  type SystemsApiDomainResponseDTO,
+  type SystemsApiDomainVerificationRequestDTO,
+  type SystemsApiDomainVerificationResponseDTO,
   type SystemsApiEndpointsResponseDTO,
+  type SystemsApiExposureRequestDTO,
+  type SystemsApiExposureResponseDTO,
+  type SystemsApiExposuresResponseDTO,
   type SystemsApiPublicUrlResponseDTO,
   type SystemsApiStatusResponseDTO,
+  type SystemsApiDomainsResponseDTO,
   type SystemsApiSummaryResponseDTO,
   type SystemsApiToolHistoryResponseDTO,
   type SystemsApiToolPatchRequestDTO,
@@ -28,6 +36,9 @@ import {
   type TrustPeerResponse,
   type WorkloadListResponse,
   isRegisterNodeRequest,
+  isSystemsApiDomainBindingRequest,
+  isSystemsApiDomainVerificationRequest,
+  isSystemsApiExposureRequest,
   isSystemsApiPublicUrlRequest,
   isSystemsApiToolPatchRequest,
   isTrustPeerRequest,
@@ -294,6 +305,59 @@ async function handleSystemsPublicUrl(request: Request): Promise<Response> {
   return json(response, 201);
 }
 
+function handleSystemsExposures(): Response {
+  const body: SystemsApiExposuresResponseDTO = { exposures: systemsApiService.listSystemsApiExposures() };
+  return json(body);
+}
+
+async function handleSystemsExposurePost(request: Request): Promise<Response> {
+  const body = await readJson(request);
+  if (!isSystemsApiExposureRequest(body)) return badRequest("Missing exposure fields");
+  const exposure = systemsApiService.requestSystemsApiExposure(body);
+  if (!exposure) return notFound();
+  const response: SystemsApiExposureResponseDTO = { exposure };
+  return json(response, 201);
+}
+
+function handleSystemsDomains(): Response {
+  const body: SystemsApiDomainsResponseDTO = { domains: systemsApiService.listSystemsApiDomainBindings() };
+  return json(body);
+}
+
+async function handleSystemsDomainPost(request: Request): Promise<Response> {
+  const body = await readJson(request);
+  if (!isSystemsApiDomainBindingRequest(body)) return badRequest("Missing domain binding fields");
+  const domain = systemsApiService.requestSystemsApiDomainBinding(body);
+  if (!domain) return notFound();
+  const response: SystemsApiDomainResponseDTO = { domain };
+  return json(response, 201);
+}
+
+function handleSystemsDomainGet(domain: string): Response {
+  const binding = systemsApiService.getSystemsApiDomainBinding(domain);
+  if (!binding) return notFound();
+  const response: SystemsApiDomainResponseDTO = { domain: binding };
+  return json(response);
+}
+
+async function handleSystemsDomainVerify(request: Request, domain: string): Promise<Response> {
+  const body = await readJson(request);
+  if (!isSystemsApiDomainVerificationRequest(body)) return badRequest("Missing verification token");
+  const verified = systemsApiService.verifySystemsApiDomain(domain, body.token);
+  if (!verified) return notFound();
+  const challenge = systemsApiService.getSystemsApiDomainVerification(domain);
+  if (!challenge) return notFound();
+  const response: SystemsApiDomainVerificationResponseDTO = { challenge };
+  return json(response);
+}
+
+function handleSystemsDomainDelete(domain: string): Response {
+  const revoked = systemsApiService.revokeSystemsApiDomain(domain);
+  if (!revoked) return notFound();
+  const response: SystemsApiDomainResponseDTO = { domain: revoked };
+  return json(response);
+}
+
 async function handleSystemsToolRoute(request: Request, pathname: string): Promise<Response> {
   const prefix = "/api/v1/tools/";
   const suffix = pathname.slice(prefix.length);
@@ -327,6 +391,25 @@ async function handleSystemsToolRoute(request: Request, pathname: string): Promi
   return notFound();
 }
 
+async function handleSystemsRoute(request: Request, pathname: string): Promise<Response> {
+  if (request.method === "GET" && pathname === "/api/v1/exposures") return handleSystemsExposures();
+  if (request.method === "POST" && pathname === "/api/v1/exposures") return handleSystemsExposurePost(request);
+  if (request.method === "GET" && pathname === "/api/v1/domains") return handleSystemsDomains();
+  if (request.method === "POST" && pathname === "/api/v1/domains") return handleSystemsDomainPost(request);
+
+  if (pathname.startsWith("/api/v1/domains/")) {
+    const suffix = pathname.slice("/api/v1/domains/".length);
+    if (request.method === "GET" && !suffix.includes("/")) return handleSystemsDomainGet(decodeURIComponent(suffix));
+    if (request.method === "POST" && suffix.endsWith("/verify")) {
+      const domain = decodeURIComponent(suffix.slice(0, -"/verify".length));
+      return handleSystemsDomainVerify(request, domain);
+    }
+    if (request.method === "DELETE" && !suffix.includes("/")) return handleSystemsDomainDelete(decodeURIComponent(suffix));
+  }
+
+  return notFound();
+}
+
 export async function handleApiRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
   const { pathname } = url;
@@ -351,6 +434,9 @@ export async function handleApiRequest(request: Request): Promise<Response> {
   if (request.method === "POST" && pathname === "/api/v1/public-url") return handleSystemsPublicUrl(request);
   if (pathname.startsWith("/api/v1/tools/")) {
     return await handleSystemsToolRoute(request, pathname);
+  }
+  if (pathname === "/api/v1/exposures" || pathname === "/api/v1/domains" || pathname.startsWith("/api/v1/domains/")) {
+    return await handleSystemsRoute(request, pathname);
   }
 
   return notFound();

@@ -8,7 +8,20 @@ import type { FederationSummary } from "../federation/service";
 import type { ObservabilityEvent } from "../observability";
 import type { ObservabilitySummary } from "../observability/service";
 import type { StorageVolume } from "../storage";
-import type { SystemsApiCapability, SystemsApiEndpoint, SystemsApiMode, SystemsApiPublicUrl, SystemsApiStatus, SystemsApiSummary, SystemsApiTool, SystemsApiToolHealth, SystemsApiToolHistoryEntry } from "../systems-api";
+import type {
+  SystemsApiCapability,
+  SystemsApiDomainBinding,
+  SystemsApiDomainVerificationChallenge,
+  SystemsApiEndpoint,
+  SystemsApiExposureRecord,
+  SystemsApiMode,
+  SystemsApiPublicUrl,
+  SystemsApiStatus,
+  SystemsApiSummary,
+  SystemsApiTool,
+  SystemsApiToolHealth,
+  SystemsApiToolHistoryEntry,
+} from "../systems-api";
 
 export type ApiRoute = {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -105,6 +118,45 @@ export type SystemsApiToolResponseDTO = {
   tool: SystemsApiTool;
 };
 
+export type SystemsApiToolHistoryResponseDTO = {
+  history: readonly SystemsApiToolHistoryEntry[];
+};
+
+export type SystemsApiExposuresResponseDTO = {
+  exposures: readonly SystemsApiExposureRecord[];
+};
+
+export type SystemsApiExposureResponseDTO = {
+  exposure: SystemsApiExposureRecord;
+};
+
+export type SystemsApiExposureRequestDTO = {
+  toolId: string;
+  desiredHost?: string;
+};
+
+export type SystemsApiDomainsResponseDTO = {
+  domains: readonly SystemsApiDomainBinding[];
+};
+
+export type SystemsApiDomainResponseDTO = {
+  domain: SystemsApiDomainBinding;
+};
+
+export type SystemsApiDomainBindingRequestDTO = {
+  toolId: string;
+  domain: string;
+  desiredHost?: string;
+};
+
+export type SystemsApiDomainVerificationRequestDTO = {
+  token: string;
+};
+
+export type SystemsApiDomainVerificationResponseDTO = {
+  challenge: SystemsApiDomainVerificationChallenge;
+};
+
 export type SystemsApiStatusResponseDTO = {
   status: SystemsApiStatus;
   tools: readonly SystemsApiTool[];
@@ -141,10 +193,6 @@ export type SystemsApiToolPatchRequestDTO = {
   exposed?: boolean;
   health?: SystemsApiToolHealth;
   capabilities?: readonly string[];
-};
-
-export type SystemsApiToolHistoryResponseDTO = {
-  history: readonly SystemsApiToolHistoryEntry[];
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -211,6 +259,23 @@ export function isSystemsApiPublicUrlRequest(value: unknown): value is SystemsAp
     && (value.refresh === undefined || typeof value.refresh === "boolean");
 }
 
+export function isSystemsApiExposureRequest(value: unknown): value is SystemsApiExposureRequestDTO {
+  return isRecord(value)
+    && isString(value.toolId)
+    && (value.desiredHost === undefined || isString(value.desiredHost));
+}
+
+export function isSystemsApiDomainBindingRequest(value: unknown): value is SystemsApiDomainBindingRequestDTO {
+  return isRecord(value)
+    && isString(value.toolId)
+    && isString(value.domain)
+    && (value.desiredHost === undefined || isString(value.desiredHost));
+}
+
+export function isSystemsApiDomainVerificationRequest(value: unknown): value is SystemsApiDomainVerificationRequestDTO {
+  return isRecord(value) && isString(value.token);
+}
+
 export function isSystemsApiToolPatchRequest(value: unknown): value is SystemsApiToolPatchRequestDTO {
   return isRecord(value)
     && (value.name === undefined || isString(value.name))
@@ -222,5 +287,5 @@ export function isSystemsApiToolPatchRequest(value: unknown): value is SystemsAp
 }
 
 export function isSystemsApiToolHistoryResponse(value: unknown): value is SystemsApiToolHistoryResponseDTO {
-  return isRecord(value) && Array.isArray(value.history) && value.history.every((entry) => isRecord(entry) && isString(entry.toolId) && isString(entry.action) && isString(entry.actor) && isString(entry.timestamp));
+  return isRecord(value) && Array.isArray(value.history) && value.history.every((entry) => isRecord(entry) && isString(entry.toolId) && isString(entry.action) && isString(entry.timestamp));
 }
