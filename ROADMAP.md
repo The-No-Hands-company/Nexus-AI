@@ -1,4 +1,4 @@
-# Nexus AI — Roadmap v2 (April 2026)
+# Nexus AI — Roadmap
 
 **Vision**: A sovereign, self-hosted AI platform that rivals or exceeds the intelligence, agency, and capabilities of DeepSeek, Grok, Claude, Gemini, GPT-5, and any closed-source frontier model — while remaining 100% private, unlimited, and under your control.
 
@@ -216,6 +216,13 @@
 
 ## How this keeps the user experience zero-friction
 
+- [x] **Multi-user auth** — JWT Bearer tokens, PBKDF2 password hashing, /auth/register + /auth/login + /auth/me endpoints
+- [x] **Rate limiting per user** — prevent one session exhausting all provider quota
+- [x] **Usage dashboard** — provider breakdown, token counts, estimated cost
+- [x] **Webhook triggers** — POST /webhook/trigger + GET /webhook/status/{run_id}, optional webhook secret validation
+- [x] **MCP server support** — configure external tools via MCP_TOOLS env var JSON, agent calls them with mcp_call action
+- [x] **Provider health monitoring** — detect degraded providers before they 429
+- [x] **Cost tracking** — estimate spend across paid providers (Grok, Claude)
 - User opens Nexus AI → picks persona/mode (or "Auto") → types prompt → done
 - The massive model list, swarm of agents, multi-modal tools, and reasoning engines all run invisibly under `PROVIDER=auto`
 - Advanced users can open "Agent Console" or "Swarm View" to watch the empire at work
