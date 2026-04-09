@@ -1,4 +1,4 @@
-const CACHE = 'claude-alt-v3';
+const CACHE = 'nexus-ai-v3';
 const PRECACHE = ['/', '/static/manifest.json'];
 
 self.addEventListener('install', e => {

@@ -68,7 +68,7 @@ def set_session_repo(sid: str, url: str) -> None:
     s["active_repo"] = url
 
 def get_session_repo(sid: str) -> str:
-    """Return the active repo URL for this session (never the Claude-alt default)."""
+    """Return the active repo URL for this session (never the Nexus AI default)."""
     return get_session_state(sid).get("active_repo") or ""
 
 def set_session_token(sid: str, token: str):
@@ -513,10 +513,11 @@ def tool_commit_push(message: str, repo_url: str, token: str, workdir: str) -> s
     if not repo_url:
         return ("❌ commit_push blocked: no repo_url specified. "
                 "Always include 'repo_url' pointing to the target repository.")
-    # Prevent pushing to the Claude-alt repo from an external task
-    protected = ["The-No-Hands-company/Claude-alt", "claude-alt"]
+    # Prevent pushing to the Nexus AI repo from an external task
+    protected = ["The-No-Hands-company/Claude-alt", "claude-alt",
+                 "The-No-Hands-company/Nexus-AI", "Nexus-AI"]
     if any(p.lower() in repo_url.lower() for p in protected):
-        return ("❌ commit_push blocked: cannot push to the Claude-alt repo from an external task. "
+        return ("❌ commit_push blocked: cannot push to the Nexus AI repo from an external task. "
                 "Use a different target repository.")
     repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git','')
     repo_dir = os.path.join(workdir, repo_name) if repo_name and os.path.isdir(os.path.join(workdir, repo_name)) else workdir
