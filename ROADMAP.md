@@ -16,7 +16,8 @@ Track what's been built, what's in progress, and what's coming next.
 - Multi-turn clarify — answers carry original task context so agent picks up seamlessly
 
 ### Providers & routing
-- 10-provider fallback chain (LLM7 → Groq → Cerebras → Gemini → Mistral → OpenRouter → Cohere → GitHub Models → Grok → Claude)
+- 10-provider fallback chain (LLM7 → Groq → Cerebras → Gemini → Mistral → OpenRouter → Cohere → GitHub Models → Ollama → Grok → Claude)
+- **Ollama local inference** with `glm-5.1:cloud` default model, OpenAI-compatible API, configurable base URL
 - LLM7.io keyless fallback — always available, zero config
 - Auto-fallback on 429 with configurable cooldown per provider
 - Smart complexity routing — high/medium/low scoring routes tasks to appropriate model tier
@@ -49,6 +50,7 @@ Track what's been built, what's in progress, and what's coming next.
 - 💻 Coder (expert engineer, temp 0.1, high-tier providers first)
 - 🔬 Researcher (cites sources, heavy web_search, temp 0.3)
 - 🎨 Creative (vivid writer, image prompt crafter, temp 0.8)
+- 🔷 Nexus Prime Cloud (lead architect of the full Nexus Systems Ecosystem, temp 0.05, references Tool #XX from the Nexus blueprint)
 - Persona strip in header, one tap to switch
 - Active persona updates --accent CSS variable live
 

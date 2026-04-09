@@ -214,6 +214,21 @@ PERSONAS: Dict[str, Dict] = {
             "Use image_gen to visualise ideas. Suggest unexpected angles and perspectives."
         ),
     },
+    "architect": {
+        "label": "Nexus Prime Cloud",
+        "emoji": "🔷",
+        "description": "Lead architect of the full Nexus Systems Ecosystem",
+        "temperature": 0.05,
+        "system_extra": (
+            "You are the Nexus Prime Cloud — lead architect of the Nexus Systems Ecosystem (80 tools). "
+            "Think like a visionary systems engineer: architecture first, then execution. "
+            "Always reference Tool #XX from the Nexus blueprint (github.com/The-No-Hands-company/Nexus). "
+            "Champion sovereignty, zero lock-in, privacy-first, and federated principles. "
+            "When building: start with clean architecture, modular design, self-hosted-first. "
+            "Use nexus_status to check the current state of the Nexus ecosystem at the start of every task. "
+            "Suggest how new work connects to existing tools and where it fits in the ecosystem."
+        ),
+    },
 }
 
 def get_active_persona() -> Dict:
@@ -229,7 +244,7 @@ def get_system_prompt() -> str:
     return base
 
 # ── system prompt ─────────────────────────────────────────────────────────────
-TOOLS_DESCRIPTION = """You are a self-hosted code agent. Smart, structured, builds things properly.
+TOOLS_DESCRIPTION = """You are a sovereign Nexus AI coding agent, part of the Nexus Systems Ecosystem (https://github.com/The-No-Hands-company/Nexus).
 
 Reply ONLY with valid JSON — no markdown fences, no extra text.
 
@@ -250,6 +265,8 @@ Available actions:
   { "action": "base64",     "text": "hello", "mode": "encode" }
   { "action": "json_format","text": "{\"a\":1}" }
   { "action": "generate_image","prompt": "a glowing neon city at night","width": 1024,"height": 1024 }
+  { "action": "nexus_status" }
+  { "action": "generate_image",  "prompt": "a glowing neon city at night","width": 512,"height": 512 }
   { "action": "youtube_transcript","url": "https://youtube.com/watch?v=..." }
   { "action": "read_pdf",  "path": "document.pdf" }
   { "action": "diff",       "original": "old text", "modified": "new text", "filename": "app.py" }
@@ -338,6 +355,25 @@ def tool_image_gen(prompt: str, width: int = 512, height: int = 512) -> str:
     # Pollinations returns a direct image URL
     url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&nologo=true"
     return f"![Generated image]({url})\n\n*Prompt: {prompt}*"
+
+def tool_nexus_status() -> str:
+    """Fetch the Nexus repo to report ecosystem status — called by the architect persona."""
+    import requests as _r
+    headers = {"Accept": "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28"}
+    try:
+        resp = _r.get("https://api.github.com/repos/The-No-Hands-company/Nexus", headers=headers, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            desc = data.get("description", "No description")
+            lang = data.get("language", "—")
+            stars = data.get("stargazers_count", 0)
+            return (f"🔷 Nexus Systems Ecosystem Status\n"
+                    f"Description: {desc}\nLanguage: {lang} | ⭐ {stars}\n"
+                    f"URL: https://github.com/The-No-Hands-company/Nexus\n"
+                    f"Status: Active — 80 tools across verticals")
+        return "⚠️ Could not reach Nexus repo."
+    except Exception as e:
+        return f"⚠️ nexus_status failed: {e}"
 
 def tool_write_file(path: str, content: str, workdir: str) -> str:
     full = os.path.join(workdir, path)
@@ -760,11 +796,13 @@ def _get_custom_instructions() -> str:
 
 # ── tool icons ────────────────────────────────────────────────────────────────
 TOOL_ICONS = {
-    "clarify":"❓","plan":"📋","think":"💭","get_time":"🕐",
+    "clarify":"❓","plan":"📋","think":"💭","nexus_status":"🔷","get_time":"🕐",
     "web_search":"🔍","image_gen":"🎨","calculate":"🧮","weather":"🌤️","currency":"💱",
     "convert":"📐","regex":"🔎","base64":"🔡","json_format":"📄",
     "write_file":"📝","read_file":"📖","list_files":"📂","delete_file":"🗑️",
-    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","create_repo":"🆕","query_db":"🗄️","generate_image":"🎨","youtube":"▶️","read_pdf":"📑","diff":"📊","youtube_transcript":"▶️","read_pdf":"📑","diff":"±",
+    "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","create_repo":"🆕",
+    "query_db":"🗄️","generate_image":"🎨","youtube":"▶️","read_pdf":"📑","diff":"±",
+    "youtube_transcript":"▶️","read_page":"🌐","api_call":"🔌","sub_agent":"🤖",
 }
 
 # ── long-context compression ──────────────────────────────────────────────────
@@ -868,7 +906,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     for _ in range(MAX_LOOP):
         if _stopped():
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "",{})
-            yield {"type":"done","content":"*(Stopped)*","provider":cfg.get("label","—"),
+            yield {"type":"done","content":"*(Stopped)*","provider":cfg.get("label","?"),
                    "model":"—","history":messages}
             return
 
@@ -1029,6 +1067,8 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                                             repo_url, session_token, workdir)
             elif kind == "get_time":
                 result = tool_get_time(action.get("timezone","UTC"))
+            elif kind == "nexus_status":
+                result = tool_nexus_status()
             elif kind == "web_search":
                 result = tool_web_search(action.get("query",""))
             else:
