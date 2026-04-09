@@ -1,4 +1,6 @@
 import os, uuid, json, asyncio, threading, time
+import secrets, hashlib
+import jwt as _jwt
 from datetime import datetime
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
@@ -28,6 +30,9 @@ app = FastAPI(title="Nexus AI")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 sessions: dict[str, list] = {}
+JWT_SECRET   = os.getenv("JWT_SECRET", secrets.token_hex(32))
+JWT_ALGO     = "HS256"
+JWT_EXPIRE_H = int(os.getenv("JWT_EXPIRE_HOURS", "168"))
 _active_streams: dict[str, threading.Event] = {}
 
 # ── init DB and seed in-memory caches ─────────────────────────────────────────
@@ -36,6 +41,7 @@ init_db()
 init_projects_table()
 try:
     init_usage_table()
+    init_users_table()
 except Exception:
     pass
 
@@ -61,8 +67,129 @@ def _auto_title(history):
 
 
 # ── static ────────────────────────────────────────────────────────────────────
+
+
+# ── auth helpers ──────────────────────────────────────────────────────────────
+def _hash_pw(password: str, salt: str = "") -> str:
+    s = salt or secrets.token_hex(16)
+    import binascii
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), (s + "nexus_ai_salt").encode(), 200000)
+    return s + "$" + binascii.hexlify(dk).decode()
+
+def _verify_pw(password: str, stored: str) -> bool:
+    try:
+        parts = stored.split("$")
+        if len(parts) != 2:
+            return False
+        salt, _ = parts
+        return secrets.compare_digest(stored, _hash_pw(password, salt))
+    except Exception:
+        return False
+
+def _make_token(username: str) -> str:
+    from time import time as _t
+    payload = {"sub": username, "exp": int(_t()) + JWT_EXPIRE_H * 3600}
+    return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+def _read_token(request: Request) -> str | None:
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return None
+    token = header[7:]
+    try:
+        payload = _jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        return payload.get("sub")
+    except Exception:
+        return None
+
+def require_auth(request: Request) -> str:
+    from fastapi import HTTPException
+    username = _read_token(request)
+    if not username:
+        raise HTTPException(status_code=401, detail="Unauthorized — valid Bearer token required")
+    return username
+
+# ── auth endpoints ────────────────────────────────────────────────────────────
+@app.post("/auth/register")
+def auth_register(username: str = "", password: str = ""):
+    from db import create_user, user_exists
+    if not username or not password:
+        return JSONResponse({"error": "username and password required"}, status_code=400)
+    if len(username) < 3 or len(password) < 8:
+        return JSONResponse({"error": "username min 3 chars, password min 8 chars"}, status_code=400)
+    if user_exists(username):
+        return JSONResponse({"error": "username already taken"}, status_code=409)
+    hashed = _hash_pw(password)
+    ok = create_user(username, hashed, username)
+    if ok:
+        token = _make_token(username)
+        return {"token": token, "username": username}
+    return JSONResponse({"error": "registration failed"}, status_code=500)
+
+@app.post("/auth/login")
+def auth_login(username: str = "", password: str = ""):
+    from db import get_user
+    if not username or not password:
+        return JSONResponse({"error": "username and password required"}, status_code=400)
+    user = get_user(username)
+    if not user or not _verify_pw(password, user["password"]):
+        return JSONResponse({"error": "invalid credentials"}, status_code=401)
+    token = _make_token(username)
+    return {"token": token, "username": username}
+
+@app.get("/auth/me")
+def auth_me(request: Request):
+    username = _read_token(request)
+    if not username:
+        return JSONResponse({"username": None}, status_code=401)
+    return {"username": username}
+
 @app.get("/")
 def home(): return FileResponse("static/index.html")
+
+
+# ── Webhook trigger ─────────────────────────────────────────────────────────────
+# POST /webhook/trigger  { "task": "fix the login bug", "repo": "owner/repo" }
+# Runs the agent asynchronously and streams back SSE or returns a run_id for polling.
+# Optional header: X-Webhook-Secret: <secret>  (validated against WEBHOOK_SECRET env var)
+
+WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+
+@app.post("/webhook/trigger")
+async def webhook_trigger(request: Request):
+    from fastapi import HTTPException
+    secret = request.headers.get("x-webhook-secret", "")
+    if WEBHOOK_SECRET and not hmac.compare_digest(secret, WEBHOOK_SECRET):
+        return JSONResponse({"error": "invalid webhook secret"}, status_code=403)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    task = body.get("task", "")
+    if not task:
+        return JSONResponse({"error": "task field is required"}, status_code=400)
+    repo = body.get("repo", "")
+    # Spin off agent in background thread, return a run_id
+    run_id = "run_" + secrets.token_hex(8)
+    run_results[run_id] = {"status": "running", "result": None, "error": None}
+    def _run():
+        try:
+            from agent import run_agent_task
+            result = run_agent_task(task, [], sid=run_id)
+            run_results[run_id] = {"status": "done", "result": result, "error": None}
+        except Exception as e:
+            run_results[run_id] = {"status": "error", "result": None, "error": str(e)}
+    threading.Thread(target=_run, daemon=True).start()
+    return {"run_id": run_id, "status": "https://github.com/The-No-Hands-company/Nexus-AI#webhook-triggers"}
+
+run_results: dict = {}
+
+@app.get("/webhook/status/{run_id}")
+async def webhook_status(run_id: str):
+    result = run_results.get(run_id)
+    if not result:
+        return JSONResponse({"error": "run_id not found"}, status_code=404)
+    return result
 
 @app.get("/health")
 def health(): return {"status":"healthy","provider":get_config()["provider"]}
