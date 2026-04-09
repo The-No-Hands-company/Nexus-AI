@@ -266,6 +266,7 @@ Available actions:
   { "action": "json_format","text": "{\"a\":1}" }
   { "action": "generate_image","prompt": "a glowing neon city at night","width": 1024,"height": 1024 }
   { "action": "nexus_status" }
+  { "action": "mcp_call",    "name": "github_issues", "args": {} }
   { "action": "generate_image",  "prompt": "a glowing neon city at night","width": 512,"height": 512 }
   { "action": "youtube_transcript","url": "https://youtube.com/watch?v=..." }
   { "action": "read_pdf",  "path": "document.pdf" }
@@ -355,6 +356,24 @@ def tool_image_gen(prompt: str, width: int = 512, height: int = 512) -> str:
     # Pollinations returns a direct image URL
     url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&nologo=true"
     return f"![Generated image]({url})\n\n*Prompt: {prompt}*"
+
+def tool_mcp_call(name: str, args: dict) -> str:
+    """Call an external MCP tool by name."""
+    if not _MCP_TOOLS:
+        return 'MCP tools not configured. Set MCP_TOOLS env var as a JSON array.'
+    for t in _MCP_TOOLS:
+        if t["name"] == name:
+            try:
+                import requests as _r
+                url = t["url"]
+                headers = t.get("headers", {})
+                resp = _r.get(url, headers=headers, timeout=15)
+                status_text = resp.text[:2000]
+                return f'Status: {resp.status_code}\n\n{status_text}'
+            except Exception as e:
+                return f'MCP call failed: {e}'
+    return f'MCP tool not found: {name}. Available: {[t["name"] for t in _MCP_TOOLS]}'
+
 
 def tool_nexus_status() -> str:
     """Fetch the Nexus repo to report ecosystem status — called by the architect persona."""
@@ -1069,6 +1088,8 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 result = tool_get_time(action.get("timezone","UTC"))
             elif kind == "nexus_status":
                 result = tool_nexus_status()
+            elif kind == "mcp_call":
+                result = tool_mcp_call(action.get("name", ""), action.get("args", {}))
             elif kind == "web_search":
                 result = tool_web_search(action.get("query",""))
             else:
