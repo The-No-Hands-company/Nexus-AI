@@ -23,7 +23,7 @@ from db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats,
                save_custom_persona as db_save_persona, load_custom_personas as db_load_personas,
                delete_custom_persona as db_del_persona)
 from personas import list_personas, set_persona, get_active_persona_name, get_persona
-from memory import (add_memory, get_memory_context, summarize_history,
+from memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory,
                     delete_all as delete_all_memory, get_all as get_all_memory)
 
 app = FastAPI(title="Nexus AI")
@@ -245,20 +245,51 @@ def list_memory(): return {"memories": get_all_memory()}
 @app.delete("/memory")
 def clear_memory(): delete_all_memory(); return {"cleared":True}
 
+@app.get("/memory/semantic")
+def get_semantic_mem():
+    try:
+        from memory import get_semantic_memory
+        return {"memories": get_semantic_memory("", 5)}
+    except Exception as e:
+        return {"memories": [], "note": str(e)}
+
+@app.post("/memory/semantic")
+async def add_semantic_mem(request: Request):
+    data = await request.json()
+    try:
+        from memory import add_semantic_memory
+        add_semantic_memory(data.get("summary", ""), data.get("tags", []))
+        return {"added": True}
+    except Exception as e:
+        return {"error": str(e)}
+
 
 # ── sessions ──────────────────────────────────────────────────────────────────
 @app.post("/session")
-def new_session():
+async def new_session(request: Request = None):
+    pid = ""
+    if request:
+        try:
+            body = await request.json()
+            pid = body.get("project_id", "")
+        except Exception:
+            pass
     sid = str(uuid.uuid4())
+    # Optional project context
+    extra_ctx = ""
+    if pid and pid in projects:
+        proj_ctx = project_context(pid)
+        if proj_ctx.get("summary"):
+            extra_ctx = f"[PROJECT: {projects[pid].get('name','project')}] {proj_ctx['summary']}"
     memory_ctx = get_memory_context()
-    if memory_ctx:
-        sessions[sid] = [{"role":"user","content":memory_ctx},
-                         {"role":"assistant","content":"Understood, I have context from previous sessions."}]
+    parts = [p for p in [extra_ctx, memory_ctx] if p]
+    if parts:
+        sessions[sid] = [{"role":"user","content":"\n\n".join(parts)},
+                         {"role":"assistant","content":"Understood — I have context."}]
     else:
         sessions[sid] = []
-    # ensure session workdir exists
     get_session_dir(sid)
-    return {"session_id":sid,"has_memory":bool(memory_ctx)}
+    return {"session_id":sid,"has_memory":bool(memory_ctx),"has_project":bool(extra_ctx)}
 
 @app.delete("/session/{sid}")
 def clear_session(sid: str):
@@ -374,6 +405,7 @@ strong{{font-size:.75rem;opacity:.7;display:block;margin-bottom:4px}}p{{margin:0
 
 # ── projects ──────────────────────────────────────────────────────────────────
 projects: dict[str, dict] = {r["id"]: r for r in db_load_projects()}
+_PROJECT_CONTEXT_CACHE: dict[str, dict] = {}   # pid → {"summary": str, "files": [], "last_session"}
 
 @app.get("/projects")
 def list_projects():
@@ -417,6 +449,83 @@ def project_chat_list(pid: str):
     chat_ids = get_project_chats(pid)
     result   = [chats[cid] for cid in chat_ids if cid in chats]
     return {"chats": result}
+
+@app.get("/projects/{pid}/context")
+def project_context(pid: str):
+    """Get full project context: instructions + recent chats + memory + repo info."""
+    proj = projects.get(pid)
+    if not proj: return {"error": "Not found"}
+    # Gather from cache if fresh, otherwise build
+    ctx = _PROJECT_CONTEXT_CACHE.get(pid, {})
+    if not ctx or (time.time() - ctx.get("_ts", 0)) > 300:   # 5-min cache
+        chat_ids = get_project_chats(pid)
+        recent_msgs = []
+        for cid in chat_ids[:5]:
+            if cid in chats:
+                for m in chats[cid]["messages"][-8:]:
+                    if m.get("role") == "user":
+                        text = m.get("content","")
+                        if isinstance(text, str) and len(text) > 5:
+                            recent_msgs.append(text[:120])
+        summary = " ".join(recent_msgs) if recent_msgs else "No prior conversations."
+        ctx = {
+            "summary": summary[:1000],
+            "instructions": proj.get("instructions", ""),
+            "name": proj.get("name", ""),
+            "chat_count": len(chat_ids),
+            "_ts": time.time(),
+        }
+        _PROJECT_CONTEXT_CACHE[pid] = ctx
+    return ctx
+
+@app.post("/projects/{pid}/sessions")
+def new_project_session(pid: str):
+    """Start a new session pre-loaded with project context."""
+    proj = projects.get(pid)
+    if not proj: return {"error": "Not found"}
+    ctx = project_context(pid) if pid in projects else {}
+    memory_ctx = get_memory_context()
+    project_ctx = ctx.get("summary", "")
+    session_parts = []
+    if project_ctx:
+        session_parts.append(f"[PROJECT CONTEXT — {proj.get('name','project')}] {project_ctx}")
+    if memory_ctx:
+        session_parts.append(memory_ctx)
+    if session_parts:
+        sessions[sid] = [{"role":"user","content":"\n\n".join(session_parts)},
+                         {"role":"assistant","content":"Got it — I have project context."}]
+    else:
+        sessions[sid] = []
+    new_sid = str(uuid.uuid4())
+    memory_ctx = get_memory_context()
+    project_ctx = ctx.get("summary", "")
+    session_parts = []
+    if project_ctx:
+        session_parts.append(f"[PROJECT CONTEXT — {proj.get('name','project')}] {project_ctx}")
+    if memory_ctx:
+        session_parts.append(memory_ctx)
+    if session_parts:
+        sessions[new_sid] = [{"role":"user","content":"\n\n".join(session_parts)},
+                         {"role":"assistant","content":"Got it — I have project context."}]
+    else:
+        sessions[new_sid] = []
+    get_session_dir(new_sid)
+    return {"session_id": new_sid, "project_id": pid, "has_context": bool(session_parts)}
+
+@app.post("/projects/{pid}/context")
+async def update_project_context(pid: str, request: Request):
+    """Update project context cache from agent output."""
+    data = await request.json()
+    proj = projects.get(pid)
+    if not proj: return {"error": "Not found"}
+    _PROJECT_CONTEXT_CACHE[pid] = {
+        "summary": data.get("summary", ""),
+        "instructions": data.get("instructions", proj.get("instructions", "")),
+        "files": data.get("files", []),
+        "last_session": datetime.utcnow().isoformat(),
+        "_ts": time.time(),
+    }
+    return {"updated": pid}
 
 
 # ── custom instructions ────────────────────────────────────────────────────────
