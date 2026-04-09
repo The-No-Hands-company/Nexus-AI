@@ -8,23 +8,7 @@ import type { FederationSummary } from "../federation/service";
 import type { ObservabilityEvent } from "../observability";
 import type { ObservabilitySummary } from "../observability/service";
 import type { StorageVolume } from "../storage";
-import type {
-  SystemsApiAddress,
-  SystemsApiAddressKind,
-  SystemsApiCapability,
-  SystemsApiDomainBinding,
-  SystemsApiDomainVerificationChallenge,
-  SystemsApiEndpoint,
-  SystemsApiExposureRecord,
-  SystemsApiMode,
-  SystemsApiPublicUrl,
-  SystemsApiRegistryMetadata,
-  SystemsApiStatus,
-  SystemsApiSummary,
-  SystemsApiTool,
-  SystemsApiToolHealth,
-  SystemsApiToolHistoryEntry,
-} from "../systems-api";
+import type { SystemsApiAddressKind, SystemsApiCapability, SystemsApiDomainBinding, SystemsApiDomainVerificationChallenge, SystemsApiEndpoint, SystemsApiExposureRecord, SystemsApiMode, SystemsApiPublicUrl, SystemsApiRegistryMetadata, SystemsApiStatus, SystemsApiSummary, SystemsApiTool, SystemsApiToolHealth, SystemsApiToolHistoryEntry } from "../systems-api";
 import type {
   SystemsApiExposureResourceDTO,
   SystemsApiExposureStatusResponseDTO as CanonicalSystemsApiExposureStatusResponseDTO,
@@ -188,6 +172,7 @@ export type SystemsApiStatusResponseDTO = {
   status: SystemsApiStatus;
   tools: readonly SystemsApiTool[];
   publicUrls: readonly SystemsApiPublicUrl[];
+  addressKinds: readonly SystemsApiAddressKind[];
   exposures: readonly SystemsApiExposureResourceDTO[];
   domains: readonly SystemsApiExposureResourceDTO[];
 };

@@ -161,3 +161,5 @@ export type SystemsApiSummary = {
   status: SystemsApiStatus;
   addressKinds: readonly SystemsApiAddressKind[];
 };
+
+export type SystemsApiExposureKind = SystemsApiAddressKind;
