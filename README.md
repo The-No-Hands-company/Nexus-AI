@@ -53,8 +53,9 @@ Org: [The-No-Hands-company](https://github.com/The-No-Hands-company)
 | `GH_TOKEN` | Optional | GitHub PAT for default repo push access |
 | `GITHUB_REPO` | Optional | Default repo URL for git operations |
 | `RATE_LIMIT_COOLDOWN` | Optional | Seconds to cool a rate-limited provider (default: 60) |
+| `OLLAMA_BASE_URL` | Optional | Ollama server base URL (default: http://localhost:11434/v1) |
 
-`LLM7.io` requires no key and is always available as a last-resort fallback.
+`LLM7.io` and `Ollama` require no API key and are always available as fallbacks.
 
 ---
 
@@ -74,6 +75,8 @@ When `PROVIDER=auto`, providers are tried in this order (first available wins):
 9. Grok (xAI)     — grok-3                     (paid)
 10. Claude        — claude-sonnet-4             (paid)
 ```
+
+**Ollama (Local)** — runs `glm-5.1:cloud` locally via the OpenAI-compatible API. Set `OLLAMA_BASE_URL` (default: `http://localhost:11434/v1`). No API key needed. Ollama is automatically included in the high-complexity tier for powerful local inference. To use a different model, set `PROVIDER=ollama` and `LLM_MODEL=your-model-name`.
 
 **Smart routing**: tasks scored as `high` / `medium` / `low` complexity. High-complexity tasks (new projects, architecture, full implementations) skip cheap providers and try Claude/Grok/Gemini first.
 
