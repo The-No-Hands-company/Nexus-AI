@@ -154,14 +154,14 @@ Track what's been built, what's in progress, and what's coming next.
 
 ## 🏗️ Infrastructure
 
-- [ ] **Multi-user auth** — simple password or OAuth, separate state per user
+- [x] **Multi-user auth** — JWT Bearer tokens, PBKDF2 password hashing, /auth/register + /auth/login + /auth/me endpoints
 - [x] **Rate limiting per user** — prevent one session exhausting all provider quota
 - [x] **Usage dashboard** — provider breakdown, token counts, estimated cost
-- [ ] **Webhook triggers** — run the agent from GitHub webhooks, cron jobs, etc.
-- [ ] **MCP server support** — plug in external tools via Model Context Protocol
+- [x] **Webhook triggers** — POST /webhook/trigger + GET /webhook/status/{run_id}, optional webhook secret validation
+- [x] **MCP server support** — configure external tools via MCP_TOOLS env var JSON, agent calls them with mcp_call action
 - [x] **Provider health monitoring** — detect degraded providers before they 429
 - [x] **Cost tracking** — estimate spend across paid providers (Grok, Claude)
 
 ---
 
-*Last updated: March 2026*
+*Last updated: April 2026*
