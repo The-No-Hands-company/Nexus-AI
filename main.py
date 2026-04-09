@@ -24,7 +24,7 @@ from personas import list_personas, set_persona, get_active_persona_name, get_pe
 from memory import (add_memory, get_memory_context, summarize_history,
                     delete_all as delete_all_memory, get_all as get_all_memory)
 
-app = FastAPI(title="Claude Alt")
+app = FastAPI(title="Nexus AI")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 sessions: dict[str, list] = {}
@@ -198,7 +198,7 @@ def delete_chat(cid: str):
 def export_chat(cid: str):
     chat = chats.get(cid)
     if not chat: return {"error":"Not found"}
-    lines = [f"# {chat['title']}",f"*Exported from Claude Alt — {chat['updated_at'][:10]}*",""]
+    lines = [f"# {chat['title']}",f"*Exported from Nexus AI — {chat['updated_at'][:10]}*",""]
     for m in chat["messages"]:
         role,content = m.get("role",""),m.get("content","")
         if not isinstance(content,str): continue
@@ -233,15 +233,15 @@ def view_share(share_id: str):
         if any(content.startswith(p) for p in ["Tool result:","Continue","[MEMORY","{"]):continue
         if role=="user": msgs_html+=f'<div class="u"><strong>You</strong><p>{content}</p></div>'
         elif role=="assistant" and not content.startswith("{"): msgs_html+=f'<div class="a"><strong>Assistant</strong><p>{content}</p></div>'
-    html=f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{chat['title']} — Claude Alt</title>
+    html=f"""<!DOCTYPE html><html><head><meta charset="UTF-8"><title>{chat['title']} — Nexus AI</title>
 <style>body{{font-family:system-ui;max-width:760px;margin:40px auto;padding:0 20px;background:#09090e;color:#e2e8f0}}
 h1{{font-size:1.3rem}}p.sub{{color:#64748b;font-size:.8rem;margin-bottom:30px}}
 .u,.a{{padding:12px 16px;border-radius:12px;margin:10px 0}}
 .u{{background:#7c6af7;color:#fff;margin-left:60px}}.a{{background:#111118;border:1px solid #1f1f2e;margin-right:60px}}
 strong{{font-size:.75rem;opacity:.7;display:block;margin-bottom:4px}}p{{margin:0;line-height:1.6;white-space:pre-wrap}}
 .brand{{text-align:center;margin-top:40px;font-size:.75rem;color:#64748b}}</style></head>
-<body><h1>{chat['title']}</h1><p class="sub">Shared from Claude Alt · {chat['created_at'][:10]}</p>
-{msgs_html}<div class="brand">Made with <a href="/" style="color:#7c6af7">Claude Alt</a></div></body></html>"""
+<body><h1>{chat['title']}</h1><p class="sub">Shared from Nexus AI · {chat['created_at'][:10]}</p>
+{msgs_html}<div class="brand">Made with <a href="/" style="color:#7c6af7">Nexus AI</a></div></body></html>"""
     return HTMLResponse(html)
 
 

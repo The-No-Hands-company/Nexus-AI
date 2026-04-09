@@ -11,8 +11,8 @@ from pathlib import Path
 
 GIST_TOKEN = os.getenv("GIST_TOKEN", "")
 GIST_ID    = os.getenv("GIST_ID", "")
-GIST_FILE  = "claude_alt.db.b64"
-DB_PATH    = os.getenv("DB_PATH", "/tmp/claude_alt.db")
+GIST_FILE  = "nexus_ai.db.b64"
+DB_PATH    = os.getenv("DB_PATH", "/tmp/nexus_ai.db")
 
 _push_lock  = threading.Lock()
 _push_timer = None

@@ -16,7 +16,7 @@ try:
 except ImportError:
     def _schedule_push(): pass
 
-DB_PATH = os.getenv("DB_PATH", "/tmp/claude_alt.db")
+DB_PATH = os.getenv("DB_PATH", "/tmp/nexus_ai.db")
 _local  = threading.local()
 
 

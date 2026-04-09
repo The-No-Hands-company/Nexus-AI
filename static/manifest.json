@@ -1,6 +1,6 @@
 {
-  "name": "Claude Alt",
-  "short_name": "Claude Alt",
+  "name": "Nexus AI",
+  "short_name": "Nexus AI",
   "description": "Self-hosted AI agent with auto-fallback across free LLM APIs",
   "start_url": "/",
   "display": "standalone",
