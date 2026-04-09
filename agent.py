@@ -3,6 +3,8 @@ from datetime import datetime
 from typing import Dict, Any, List, Iterator, Optional
 from tools_builtin import dispatch_builtin
 from personas import build_system_prompt, get_active_persona_name, get_persona
+from thinking import build_tot_prompt, parse_tot_response
+from thinking import build_tot_prompt, parse_tot_response
 from db import load_custom_instructions, log_usage, init_usage_table
 try:
     init_usage_table()
@@ -199,8 +201,8 @@ PERSONAS: Dict[str, Dict] = {
             "You are in RESEARCHER mode. Prioritise: web_search, respond with citations. "
             "Do multiple searches to cross-reference. Structure responses with headers, "
             "bullet points, and sources. Be thorough — search at least 3 angles before concluding. "
-            "Always note confidence level and limitations of the information found."
-        ),
+            "Always note confidence level and limitations of the information found.",
+        )
     },
     "creative": {
         "label": "Creative",
@@ -252,7 +254,10 @@ Available actions:
 
   { "action": "clarify",    "questions": [{"id":"q1","text":"?","options":["A","B"]}] }
   { "action": "plan",       "title": "What I'm building", "steps": ["1. ...", "2. ..."] }
-  { "action": "think",      "thought": "brief reasoning" }
+  { "action": "think",      "thought": "brief reasoning" },
+  { "action": "think_deep",  "query": "complex question", "mode": "tree" }  -- Tree-of-Thought,
+  { "action": "think_deep",  "query": "complex question", "mode": "tree" }  -- Tree-of-Thought
+  { "action": "think_deep",  "query": "complex question", "mode": "tree" }  ← Tree-of-Thought reasoning
   { "action": "respond",    "content": "<markdown>", "confidence": 0.95 }
   { "action": "get_time",   "timezone": "Europe/Stockholm" }
   { "action": "web_search", "query": "search terms" }
@@ -265,7 +270,8 @@ Available actions:
   { "action": "base64",     "text": "hello", "mode": "encode" }
   { "action": "json_format","text": "{\"a\":1}" }
   { "action": "generate_image","prompt": "a glowing neon city at night","width": 1024,"height": 1024 }
-  { "action": "nexus_status" }
+  { "action": "nexus_status" },
+  { "action": "ollama_list_models" }  -- list all locally available Ollama models
   { "action": "mcp_call",    "name": "github_issues", "args": {} }
   { "action": "generate_image",  "prompt": "a glowing neon city at night","width": 512,"height": 512 }
   { "action": "youtube_transcript","url": "https://youtube.com/watch?v=..." }
@@ -373,6 +379,29 @@ def tool_mcp_call(name: str, args: dict) -> str:
             except Exception as e:
                 return f'MCP call failed: {e}'
     return f'MCP tool not found: {name}. Available: {[t["name"] for t in _MCP_TOOLS]}'
+
+
+def tool_ollama_list_models() -> str:
+    import requests as _r
+    try:
+        resp = _r.get("http://localhost:11434/api/tags", timeout=5)
+        if resp.status_code == 200:
+            models = resp.json().get("models", [])
+            if not models:
+                return "No Ollama models found. Run: ollama pull glm-5.1:cloud"
+            lines = ["Available Ollama models:"]
+            for m in models:
+                name = m.get("name","?")
+                sz = m.get("size",0)
+                gb = sz/(1024**3) if sz else 0
+                lines.append("  - " + name + (" (%.1fGB)" % gb if gb else ""))
+            lines.append("")
+            lines.append("Suggested for coding: codellama, qwen2.5-coder")
+            lines.append("Suggested for reasoning: glm-5.1:cloud, deepseek-r1")
+            return "\n".join(lines)
+        return "Ollama not responding at localhost:11434"
+    except Exception as e:
+        return "Could not connect to Ollama: " + str(e) + "\nMake sure Ollama is running: ollama serve"
 
 
 def tool_nexus_status() -> str:
@@ -971,6 +1000,25 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             messages.append({"role":"user","content":"Plan looks good. Start building."})
             continue
 
+
+        if kind == "think_deep":
+            tot_prompt = build_tot_prompt(
+                action.get("query","") or action.get("thought",""),
+                action.get("mode","tree")
+            )
+            try:
+                result_action, _ = call_llm_with_fallback(
+                    [{"role":"user","content":tot_prompt}], tot_prompt
+                )
+                parsed = parse_tot_response(json.dumps(result_action))
+                reasoning = parsed.get("reasoning", str(result_action))
+            except Exception as e:
+                reasoning = "Tree-of-Thought reasoning failed: " + str(e)
+            yield {"type":"think","thought":reasoning}
+            messages.append({"role":"assistant","content":json.dumps(action)})
+            messages.append({"role":"user","content":"Continue using that reasoning."})
+            continue
+
         if kind == "think":
             yield {"type":"think","thought":action.get("thought","")}
             messages.append({"role":"assistant","content":json.dumps(action)})
@@ -1088,6 +1136,8 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 result = tool_get_time(action.get("timezone","UTC"))
             elif kind == "nexus_status":
                 result = tool_nexus_status()
+            elif kind == "ollama_list_models":
+                result = tool_ollama_list_models()
             elif kind == "mcp_call":
                 result = tool_mcp_call(action.get("name", ""), action.get("args", {}))
             elif kind == "web_search":

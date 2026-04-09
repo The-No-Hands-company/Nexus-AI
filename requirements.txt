@@ -7,3 +7,4 @@ yt-dlp==2024.11.18
 pypdf==4.3.1
 youtube-transcript-api==0.6.3
 PyJWT>=2.8.0
+chromadb>=0.4.0
