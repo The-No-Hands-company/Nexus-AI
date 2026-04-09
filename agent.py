@@ -118,11 +118,13 @@ PROVIDERS: Dict[str, Dict] = {
                 "default_model":"grok-3","openai_compat":False},
     "claude":  {"label":"Claude (Anthropic)","env_key":"CLAUDE_API_KEY",
                 "default_model":"claude-sonnet-4-20250514","openai_compat":False},
+    "ollama":  {"label":"Ollama (Local)","base_url": os.getenv("OLLAMA_BASE_URL","http://localhost:11434/v1"),
+                "env_key":"","default_model":"glm-5.1:cloud","openai_compat":True,"keyless":True,"local":True},
 }
 
 # ── complexity + provider routing ─────────────────────────────────────────────
 PROVIDER_TIERS = {
-    "high":   ["claude","grok","gemini","openrouter","mistral"],
+    "high":   ["ollama","claude","grok","gemini","openrouter","mistral"],
     "medium": ["groq","cerebras","cohere","github_models","nvidia"],
     "low":    ["llm7","groq","cerebras"],
 }
