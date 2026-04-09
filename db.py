@@ -524,3 +524,52 @@ def get_usage_daily(days: int = 14) -> list:
         (since,)
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# USERS (simple username/password auth)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def init_users_table() -> None:
+    c = _conn()
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS users (
+            username    TEXT PRIMARY KEY,
+            password    TEXT NOT NULL,    -- bcrypt hash
+            created_at  TEXT NOT NULL,
+            display_name TEXT
+        );
+    """)
+    c.commit()
+
+
+def create_user(username: str, password_hash: str, display_name: str = "") -> bool:
+    """Returns True if created, False if username already exists."""
+    try:
+        _conn().execute(
+            "INSERT INTO users(username, password, created_at, display_name) VALUES (?, ?, ?, ?)",
+            (username, password_hash, datetime.utcnow().isoformat(), display_name or username)
+        )
+        _conn().commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def get_user(username: str) -> dict | None:
+    row = _conn().execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+    if not row:
+        return None
+    return dict(row)
+
+
+def user_exists(username: str) -> bool:
+    row = _conn().execute("SELECT 1 FROM users WHERE username=?", (username,)).fetchone()
+    return row is not None
+
+
+# Seed the table on import
+try:
+    init_users_table()
+except Exception:
+    pass
