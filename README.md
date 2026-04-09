@@ -1,8 +1,8 @@
-# Claude Alt ⚡
+# Nexus AI ⚡
 
-A self-hosted, Claude.ai-inspired AI agent built on **free LLM APIs** — no subscriptions required. Runs on Railway (or any Docker host) and automatically falls back across 9+ providers when rate limits hit.
+A self-hosted, Nexus-powered AI agent built on **free LLM APIs** — no subscriptions required. Runs on Railway (or any Docker host) and automatically falls back across 9+ providers when rate limits hit.
 
-Live: **[claude-alt-production.up.railway.app](https://claude-alt-production.up.railway.app)**  
+Live: **[nexus-ai.up.railway.app](https://nexus-ai.up.railway.app)**  
 Org: [The-No-Hands-company](https://github.com/The-No-Hands-company)
 
 ---

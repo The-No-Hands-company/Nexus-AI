@@ -1,4 +1,4 @@
-# Claude Alt — Roadmap
+# Nexus AI — Roadmap
 
 Track what's been built, what's in progress, and what's coming next.
 
@@ -87,7 +87,7 @@ Track what's been built, what's in progress, and what's coming next.
 ---
 
 ## ✅ Recently completed
-- [x] Sandbox protection — agent can never push to Claude-alt repo from external tasks
+- [x] Sandbox protection — agent can never push to Nexus AI repo from external tasks
 - [x] Session repo tracking — cloned repo auto-used for commit_push within session
 - [x] create_repo tool — create a new GitHub repo via API then push to it
 - [x] /app path protection — write/delete/run_command blocked from touching app source
