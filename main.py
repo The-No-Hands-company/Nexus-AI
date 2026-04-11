@@ -25,6 +25,8 @@ from db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats,
 from personas import list_personas, set_persona, get_active_persona_name, get_persona
 from memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory,
                     delete_all as delete_all_memory, get_all as get_all_memory)
+from rag.rag_system import RAGSystem
+from autonomy import Orchestrator, PlanningSystem, classify_subtask
 
 app = FastAPI(title="Nexus AI")
 app.mount("/static", StaticFiles(directory="static"), name="static")
@@ -55,6 +57,15 @@ for _row in db_load_chats():
 # Shares are kept in-memory only (read-only links, OK to lose on restart)
 shares: dict[str, dict] = {}
 _active_streams: dict[str, threading.Event] = {}
+_rag_system: RAGSystem | None = None
+autonomy_traces: dict = {}  # trace_id → plan/execution trace
+
+
+def _get_rag_system() -> RAGSystem:
+    global _rag_system
+    if _rag_system is None:
+        _rag_system = RAGSystem()
+    return _rag_system
 
 
 def _auto_title(history):
@@ -90,6 +101,13 @@ def _make_token(username: str) -> str:
     from time import time as _t
     payload = {"sub": username, "exp": int(_t()) + JWT_EXPIRE_H * 3600}
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+def _orchestrator_llm(prompt: str, task: str = "") -> str:
+    result, _pid = call_llm_with_fallback([{"role":"user","content":prompt}], task)
+    if isinstance(result, dict):
+        return result.get("content", str(result))
+    return str(result)
+
 
 def _read_token(request: Request) -> str | None:
     header = request.headers.get("Authorization", "")
@@ -262,6 +280,121 @@ async def add_semantic_mem(request: Request):
         return {"added": True}
     except Exception as e:
         return {"error": str(e)}
+
+
+# ── RAG endpoints ─────────────────────────────────────────────────────────────
+@app.post("/rag/ingest")
+async def rag_ingest(request: Request):
+    data = await request.json()
+    text = (data.get("text") or "").strip()
+    path = (data.get("path") or "").strip()
+    metadata = data.get("metadata", {}) or {}
+    prefix = data.get("doc_id_prefix")
+
+    if not text and not path:
+        return JSONResponse({"error": "text or path is required"}, status_code=400)
+
+    if path:
+        try:
+            full_path = path if os.path.isabs(path) else os.path.join(os.getcwd(), path)
+            with open(full_path, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except Exception as e:
+            return JSONResponse({"error": f"Failed to read path {path}: {e}"}, status_code=400)
+
+    try:
+        count = _get_rag_system().ingest(text, metadata=metadata, doc_id_prefix=prefix)
+        return {"ingested_chunks": count, "status": "ok"}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/rag/query")
+async def rag_query(request: Request):
+    data = await request.json()
+    query = (data.get("query") or "").strip()
+    top_k = data.get("top_k")
+    filter_metadata = data.get("filter_metadata")
+
+    if not query:
+        return JSONResponse({"error": "query field is required"}, status_code=400)
+
+    try:
+        results = _get_rag_system().query(query, top_k=top_k, filter_metadata=filter_metadata)
+        return {"query": query, "results": results}
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/rag/status")
+def rag_status():
+    try:
+        return _get_rag_system().stats()
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/autonomy/plan")
+async def autonomy_plan(request: Request):
+    """Decompose a goal into a structured subtask plan without executing it."""
+    data = await request.json()
+    goal = (data.get("goal") or "").strip()
+    if not goal:
+        return JSONResponse({"error": "goal field is required"}, status_code=400)
+    try:
+        max_subtasks = int(data.get("max_subtasks", 6))
+    except Exception:
+        max_subtasks = 6
+    trace_id = secrets.token_hex(8)
+    try:
+        planner = PlanningSystem(_orchestrator_llm)
+        tasks   = planner.decompose(goal, max_subtasks)
+        plan = {
+            "trace_id":   trace_id,
+            "goal":       goal,
+            "steps": [
+                {"id": t.task_id, "name": t.name, "description": t.description,
+                 "priority": t.priority, "dependencies": t.dependencies,
+                 "estimated_hours": t.estimated_hours,
+                 "agent": classify_subtask(t.description)}
+                for t in tasks
+            ],
+        }
+        autonomy_traces[trace_id] = {"type": "plan", "status": "ready", **plan}
+        return plan
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/autonomy/execute")
+async def autonomy_execute(request: Request):
+    data = await request.json()
+    goal = (data.get("goal") or "").strip()
+    if not goal:
+        return JSONResponse({"error": "goal field is required"}, status_code=400)
+    strategy = data.get("strategy", "parallel")
+    try:
+        max_subtasks = int(data.get("max_subtasks", 6))
+    except Exception:
+        max_subtasks = 6
+    trace_id = secrets.token_hex(8)
+    try:
+        orchestrator = Orchestrator(_orchestrator_llm, max_parallel=2)
+        result = orchestrator.execute(goal, {"strategy": strategy, "max_subtasks": max_subtasks})
+        result["trace_id"] = trace_id
+        autonomy_traces[trace_id] = {"type": "execution", "goal": goal, "status": "done", **result}
+        return result
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/autonomy/trace/{trace_id}")
+def autonomy_trace(trace_id: str):
+    """Retrieve a stored plan or execution trace by its ID."""
+    trace = autonomy_traces.get(trace_id)
+    if trace is None:
+        return JSONResponse({"error": "trace not found"}, status_code=404)
+    return trace
 
 
 # ── sessions ──────────────────────────────────────────────────────────────────

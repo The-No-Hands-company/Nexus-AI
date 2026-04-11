@@ -2,6 +2,7 @@ import os, re, json, glob, time, subprocess, threading, resource
 from datetime import datetime
 from typing import Dict, Any, List, Iterator, Optional
 from tools_builtin import dispatch_builtin
+from autonomy import Orchestrator, classify_subtask, PlanningSystem
 from personas import build_system_prompt, get_active_persona_name, get_persona
 from thinking import build_tot_prompt, parse_tot_response
 from thinking import build_tot_prompt, parse_tot_response
@@ -283,6 +284,9 @@ Available actions:
   { "action": "api_call",   "method": "GET", "url": "https://api.example.com/data", "headers": {}, "body": null }
   { "action": "read_page",  "url": "https://example.com" }
   { "action": "sub_agent",  "task": "focused subtask description", "context": "relevant context" }
+  { "action": "orchestrate_goal", "goal": "Build a REST API with user auth", "strategy": "parallel", "max_subtasks": 6 }
+  { "action": "decompose_goal", "goal": "Build a REST API with user auth", "max_subtasks": 6 }
+  { "action": "select_model", "task": "Refactor the authentication flow", "prefer_quality": true }
   { "action": "write_file", "path": "src/app.py", "content": "..." }  ← ensure content is valid JSON string (escape quotes, newlines)
   { "action": "read_file",  "path": "README.md" }
   { "action": "list_files", "pattern": "**/*.py" }
@@ -842,6 +846,13 @@ def _get_custom_instructions() -> str:
     except Exception:
         return ""
 
+
+def _orchestrator_llm(prompt: str, task: str = "") -> str:
+    result, _pid = call_llm_with_fallback([{"role":"user","content":prompt}], task)
+    if isinstance(result, dict):
+        return result.get("content", str(result))
+    return str(result)
+
 # ── tool icons ────────────────────────────────────────────────────────────────
 TOOL_ICONS = {
     "clarify":"❓","plan":"📋","think":"💭","nexus_status":"🔷","get_time":"🕐",
@@ -851,6 +862,8 @@ TOOL_ICONS = {
     "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","create_repo":"🆕",
     "query_db":"🗄️","generate_image":"🎨","youtube":"▶️","read_pdf":"📑","diff":"±",
     "youtube_transcript":"▶️","read_page":"🌐","api_call":"🔌","sub_agent":"🤖",
+    "orchestrate_goal":"🧩","decompose_goal":"🧭","select_model":"🧠",
+    "rag_ingest":"📚","rag_query":"🔎","rag_status":"📊",
 }
 
 # ── long-context compression ──────────────────────────────────────────────────
@@ -1054,29 +1067,108 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             messages.append({"role": "user", "content": f"Sub-agent result:\n{sub_result}\n\nContinue."})
             continue
 
+        if kind == "orchestrate_goal":
+            goal        = action.get("goal", "")
+            strategy    = action.get("strategy", "parallel")
+            max_sub     = int(action.get("max_subtasks", 6))
+            _orch_id    = f"orch_{int(time.time()*1000)}"
+            output      = ""
+            try:
+                planner  = PlanningSystem(_orchestrator_llm)
+                subtasks = planner.decompose(goal, max_sub)
+                yield {
+                    "type":     "plan",
+                    "id":       _orch_id,
+                    "status":   "done",
+                    "title":    f"Plan: {goal[:80]}",
+                    "steps":    [{"id": t.task_id, "description": t.description,
+                                  "priority": t.priority, "dependencies": t.dependencies}
+                                 for t in subtasks],
+                }
+                _orch       = Orchestrator(_orchestrator_llm, max_parallel=1)
+                sub_results = []
+                for task in subtasks:
+                    _stid = f"sub_{task.task_id}_{int(time.time()*1000)}"
+                    yield {
+                        "type":     "subtask",
+                        "id":       _stid,
+                        "parent_id": _orch_id,
+                        "status":   "running",
+                        "label":    task.description,
+                        "agent":    classify_subtask(task.description),
+                        "task_id":  task.task_id,
+                    }
+                    sr = _orch._execute_direct(task.description)
+                    sub_results.append(sr)
+                    yield {
+                        "type":     "subtask",
+                        "id":       _stid,
+                        "parent_id": _orch_id,
+                        "status":   "done" if sr.success else "failed",
+                        "label":    task.description,
+                        "agent":    sr.agent_used,
+                        "result":   sr.result[:400] if sr.result else "",
+                        "error":    sr.error,
+                        "task_id":  task.task_id,
+                    }
+                output = _orch._synthesize(goal, sub_results)
+            except Exception as _oe:
+                output = f"Orchestration failed: {_oe}"
+            yield {"type": "tool", "id": f"tool_{_orch_id}", "parent_id": _orch_id,
+                   "status": "done", "icon": "🧩", "action": "orchestrate_goal", "tool_name": "orchestrate_goal",
+                   "label": goal[:120], "result": output[:600],
+                   "input": action, "metadata": {"goal": goal, "strategy": strategy, "subtask_count": max_sub},
+                   "file_path": None, "file_content": None, "artifact": False}
+            messages.append({"role": "assistant", "content": json.dumps(action)})
+            messages.append({"role": "user", "content": f"Tool result:\n{output}\n\nContinue."})
+            continue
+
+        if kind == "decompose_goal":
+            goal = action.get("goal", "")
+            max_subtasks = int(action.get("max_subtasks", 6))
+            try:
+                from autonomy import PlanningSystem
+                planner = PlanningSystem(_orchestrator_llm)
+                tasks = planner.decompose(goal, max_subtasks)
+                output = json.dumps([{
+                    "id": t.task_id,
+                    "description": t.description,
+                    "priority": t.priority,
+                    "dependencies": t.dependencies,
+                } for t in tasks], indent=2)
+            except Exception as e:
+                output = f"Decomposition failed: {e}"
+            yield {"type": "tool", "icon": "🧭", "action": "decompose_goal",
+                   "label": goal[:120], "result": output,
+                   "file_path": None, "file_content": None, "artifact": False}
+            messages.append({"role": "assistant", "content": json.dumps(action)})
+            messages.append({"role": "user", "content": f"Tool result:\n{output}\n\nContinue."})
+            continue
+
         # Built-in tools (no LLM needed)
         builtin_result = dispatch_builtin(action)
 
-        icon  = TOOL_ICONS.get(kind,"🔧")
+        icon  = TOOL_ICONS.get(kind, "🔧")
         label = (action.get("query") or action.get("path") or action.get("cmd") or
                  action.get("url") or action.get("location") or action.get("expr") or
                  action.get("timezone") or kind)
 
         if builtin_result is not None:
-            # Image generation returns a dict with url
-            if isinstance(builtin_result, dict) and "url" in builtin_result:
-                yield {"type":"image","url":builtin_result["url"],
-                       "prompt":builtin_result.get("prompt",""),
-                       "width":builtin_result.get("width",1024),
-                       "height":builtin_result.get("height",1024)}
-                img_result_str = f"Image generated: {builtin_result['url']}"
-                messages.append({"role":"assistant","content":json.dumps(action)})
-                messages.append({"role":"user","content":f"Image generated successfully. URL: {builtin_result['url']}\n\nContinue."})
-                continue
-            yield {"type":"tool","icon":icon,"action":kind,"label":str(label)[:120],
-                   "result":str(builtin_result)[:600],"file_path":None,"file_content":None}
+            # builtin_result is now a structured trace dict from dispatch_builtin
+            result_str  = builtin_result.get("result", "") if isinstance(builtin_result, dict) else str(builtin_result)
+            result_stat = builtin_result.get("status", "done") if isinstance(builtin_result, dict) else "done"
+            result_meta = builtin_result.get("metadata", {}) if isinstance(builtin_result, dict) else {}
+            _tid        = f"tool_{int(time.time()*1000)}"
+            yield {
+                "type":"tool", "id":_tid, "parent_id":None,
+                "status":result_stat, "icon":icon,
+                "action":kind, "tool_name":kind,
+                "label":str(label)[:120], "result":str(result_str)[:600],
+                "input":action, "metadata":result_meta,
+                "file_path":None, "file_content":None, "artifact":False,
+            }
             messages.append({"role":"assistant","content":json.dumps(action)})
-            messages.append({"role":"user","content":f"Tool result:\n{builtin_result}\n\nContinue."})
+            messages.append({"role":"user","content":f"Tool result:\n{result_str}\n\nContinue."})
             continue
 
         # File-system tools (need workdir)
@@ -1151,10 +1243,18 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 else: result = f"Tool failed: {e}"
             except Exception as e2: result = f"Tool failed after retry: {e2}"
 
-        yield {"type":"tool","icon":icon,"action":kind,"label":str(label)[:120],
-               "result":str(result)[:600],"file_path":file_path,
-               "file_content":file_content,"artifact":artifact,
-               "workdir":workdir if artifact else None}
+        _tid      = f"tool_{int(time.time()*1000)}"
+        _tool_meta = {}
+        if file_path:
+            _tool_meta["file_path"] = file_path
+        if kind in ("run_command", "clone_repo", "commit_push"):
+            _tool_meta["workdir"] = workdir
+        yield {"type":"tool", "id":_tid, "parent_id":None,
+               "status":"done", "icon":icon, "action":kind, "tool_name":kind,
+               "label":str(label)[:120], "result":str(result)[:600],
+               "input":action, "metadata":_tool_meta,
+               "file_path":file_path, "file_content":file_content,
+               "artifact":artifact, "workdir":workdir if artifact else None}
         messages.append({"role":"assistant","content":json.dumps(action)})
         messages.append({"role":"user","content":f"Tool result:\n{result}\n\nContinue."})
 
