@@ -31,6 +31,14 @@ from autonomy import Orchestrator, PlanningSystem, classify_subtask
 app = FastAPI(title="Nexus AI")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
+# Allow Nexus Cloud portal to embed this app in an iframe.
+@app.middleware("http")
+async def allow_iframe_embedding(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Frame-Options"] = "ALLOWALL"
+    response.headers["Content-Security-Policy"] = "frame-ancestors *"
+    return response
+
 sessions: dict[str, list] = {}
 JWT_SECRET   = os.getenv("JWT_SECRET", secrets.token_hex(32))
 JWT_ALGO     = "HS256"
