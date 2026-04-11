@@ -204,6 +204,72 @@
 
 ---
 
+## 🔄 VersaAI Component Porting Tracker
+
+> Tracks which VersaAI subsystems have been ported into Nexus AI, what's in progress, and what's queued.
+> **Note on Personas vs Profiles:** Nexus-AI `personas.py` = AI personality presets (system prompts, tone, temperature). VersaAI `profiles.py` = persistent *user* profiles (preferences, behavioral history, goals, connectors). They are different — `profiles.py` should be ported as a user data layer, not a replacement for personas.
+
+### ✅ Already Ported
+
+| Module | What was brought over |
+|---|---|
+| `versaai/rag/` | Full RAG subsystem (ChromaDB, ingest, query, status) — under `Nexus-AI/rag/` |
+| `versaai/models/model_router.py` | Smart complexity-based model routing — `Nexus-AI/model_router.py` |
+| `versaai/agents/orchestrator.py` | Core orchestrator + planning system — `Nexus-AI/autonomy.py` (`Orchestrator`, `PlanningSystem`, `classify_subtask`) |
+| `versaai/agents/` (streaming events) | Subtask event streaming — `agent.py` emits `plan`, `subtask`, `tool` structured events with `id`/`parent_id`/`status`/`metadata` |
+| `versaai/tools/` (structured traces) | `dispatch_builtin` returns structured `_tool_trace` dicts instead of raw strings |
+| `versaai/api/` (autonomy routes) | `/autonomy/execute`, `/autonomy/plan`, `/autonomy/trace/{trace_id}` endpoints in `main.py` |
+
+---
+
+### 🚨 High Priority — Port Next
+
+| Module | What it does | Status |
+|---|---|---|
+| `versaai/safety/pii.py` | PII detector (email, phone, SSN, credit cards, passport, IP, DoB) using regex + Luhn algorithm | ⬜ not started |
+| `versaai/safety/prompt_injection.py` | Prompt injection & jailbreak detection — structural analysis, entropy, control chars, base64/ROT13 evasion | ⬜ not started |
+| `versaai/safety/classifier.py` | Content classifier: toxic, hate speech, sexual, violence, self-harm, CSAM, illegal activity — with threat level scoring | ⬜ not started |
+| `versaai/safety/guardrails.py` | Central guardrail orchestrator — composes PII + injection + classifier into a single `screen_input`/`screen_output` pipeline | ⬜ not started |
+| `versaai/safety/input_filter.py` | Input screening: size limits, control-char stripping, PII redaction, injection detection | ⬜ not started |
+| `versaai/safety/output_filter.py` | Output screening: content classification, domain guards, PII scrubbing, action escalation | ⬜ not started |
+| `versaai/safety/domain_guards.py` | Domain-specific guards: `MedicalGuard`, `FinancialGuard`, `LegalGuard` with warn/block modes | ⬜ not started |
+| `versaai/safety/audit.py` | Safety audit log — ring buffer, persistence, blocked content tracking, forensic analysis | ⬜ not started |
+| `versaai/safety/middleware.py` | ASGI middleware — auto-screens every request/response; SSE streaming support; 403 blocking | ⬜ not started |
+| `versaai/memory/context_window.py` | Dynamic context window compression — token counting, priority-based truncation, importance scoring | ⬜ not started |
+| `versaai/memory/knowledge_graph.py` | Entity-relationship graph with multi-hop BFS/DFS traversal and temporal reasoning | ⬜ not started |
+| `versaai/agents/reasoning.py` + `reasoning_agent.py` | ReasoningEngine: Chain-of-Thought, ReAct, Tree-of-Thoughts, Self-Consistency with LLM step verification | ⬜ not started |
+| `versaai/agents/research_agent.py` | Research agent: adaptive retrieval (search + vector DB + KG), generator-critic pattern, citations, confidence scores | ⬜ not started |
+| `versaai/models/model_ensemble.py` | Model ensemble: parallel inference across models, consensus voting, fallback chains | ⬜ not started |
+| `versaai/multimodal.py` | Modality detection/routing abstraction for text/image/audio/video/3D/code | ⬜ not started |
+
+---
+
+### 📊 Medium Priority
+
+| Module | What it does | Status |
+|---|---|---|
+| `versaai/agents/planning_agent.py` | PlanningAgent wrapper with task tracking + progress reporting (complements `autonomy.py`) | ⬜ not started |
+| `versaai/memory/episodic.py` | Long-term episodic memory with VectorDB + KG integration, semantic search across sessions, retention policies | ⬜ not started |
+| `versaai/rag/critic.py` | RAG critic — LLM evaluation of generated answers against retrieved docs, confidence scoring | ⬜ not started |
+| `versaai/rag/query_decomposer.py` | Breaks complex RAG queries into sub-queries for multi-hop retrieval | ⬜ not started |
+| `versaai/generation/video_gen.py` | Video generation pipeline with temporal consistency checks | ⬜ not started |
+| `versaai/code_editor_bridge/` | Chat/completion services for direct code editor integration | ⬜ not started |
+| `versaai/profiles.py` | Persistent **user** profiles — preferences, behavioral history, goals, connectors. Different from Nexus-AI `personas.py` (AI personality presets) | ⬜ not started |
+| Cost tracking improvements | Per-token cost estimation across all providers, budget limits, detailed cost breakdown | ⬜ not started |
+| Rate limiting improvements | Provider-aware rate limiting with adaptive backoff and exhaustion detection | ⬜ not started |
+
+---
+
+### 💡 Deferred / Skipped
+
+| Module | Decision | Reason |
+|---|---|---|
+| `versaai/` C++ performance layer | ⏳ **Defer** — port when Nexus AI is at scale | Optimisation for high-load scenarios; not needed at current scale |
+| `versaai/generation/model_3d_gen.py` | ❌ **Skip** | Niche use case, high porting effort, low immediate value |
+| `versaai/agents/companion_agent.py` | ❌ **Skip** | Non-differentiating; Nexus personas already cover this space |
+
+---
+
 ## 🌌 Phase 6 — Frontier Research & Beyond (Ongoing)
 
 - [ ] **Emotional intelligence** — consistent character memory across sessions

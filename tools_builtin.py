@@ -2,8 +2,9 @@
 Built-in tools that don't need LLM calls — calculator, weather, currency,
 unit converter, regex tester, base64, JSON formatter, color info.
 """
-import re, json, math, base64 as b64lib
+import os, re, json, math, base64 as b64lib
 from datetime import datetime
+from model_router import ModelRouter
 
 # ── CALCULATOR ────────────────────────────────────────────────────────────────
 _SAFE_NAMES = {k: v for k, v in math.__dict__.items() if not k.startswith('_')}
@@ -168,27 +169,166 @@ def tool_json_format(text: str) -> str:
         return f"❌ Invalid JSON: {e}"
 
 
+def tool_select_model(task: str, prefer_speed: bool = False, prefer_quality: bool = False) -> str:
+    try:
+        router = ModelRouter()
+        model_id, spec = router.select_model(task, prefer_speed=prefer_speed, prefer_quality=prefer_quality)
+        languages = ", ".join(spec.languages) if spec.languages else "all"
+        return (
+            f"Selected model: {spec.name} ({model_id})\n"
+            f"Tier: {spec.tier.value}\n"
+            f"Estimated RAM: {spec.ram_required_gb}GB\n"
+            f"Strengths: {', '.join(spec.strengths)}\n"
+            f"Languages: {languages}"
+        )
+    except Exception as e:
+        return f"Model selection failed: {e}"
+
+
+_RAG_SYSTEM = None
+
+def _get_rag_system():
+    global _RAG_SYSTEM
+    if _RAG_SYSTEM is None:
+        from rag.rag_system import RAGSystem
+        _RAG_SYSTEM = RAGSystem()
+    return _RAG_SYSTEM
+
+
+def tool_rag_ingest(text: str = "", path: str = "", metadata: dict | None = None,
+                    doc_id_prefix: str | None = None, workdir: str = "/tmp") -> str:
+    if path:
+        full = path if os.path.isabs(path) else os.path.join(workdir, path)
+        if not os.path.exists(full):
+            return f"File not found: {path}"
+        try:
+            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except Exception as e:
+            return f"Failed to read file: {e}"
+
+    if not text:
+        return "No text or file path provided to ingest."
+
+    try:
+        count = _get_rag_system().ingest(text, metadata=metadata or {}, doc_id_prefix=doc_id_prefix)
+        source = f"file {path}" if path else "text"
+        return f"RAG ingested {count} chunks from {source}."
+    except Exception as e:
+        return f"RAG ingest failed: {e}"
+
+
+def tool_rag_query(query: str, top_k: int = 5, filter_metadata: dict | None = None) -> str:
+    try:
+        results = _get_rag_system().query(query, top_k=top_k, filter_metadata=filter_metadata)
+    except Exception as e:
+        return f"RAG query failed: {e}"
+    if not results:
+        return "No relevant RAG results found."
+    lines = []
+    for i, r in enumerate(results, 1):
+        doc = str(r.get("document", "")).strip().replace("\n", " ")
+        score = r.get("score", "?")
+        source = r.get("metadata", {}).get("source", "unknown") if isinstance(r.get("metadata"), dict) else "unknown"
+        lines.append(f"{i}. score={score} source={source}\n{doc[:320]}")
+    return "\n\n".join(lines)
+
+
+def tool_rag_status() -> str:
+    try:
+        stats = _get_rag_system().stats()
+        return (f"RAG status: ingested={stats.get('total_ingested', 0)}, "
+                f"queries={stats.get('total_queries', 0)}, "
+                f"store_count={stats.get('store_count', 0)}, "
+                f"backend={stats.get('embedding_backend', 'unknown')}")
+    except Exception as e:
+        return f"RAG status failed: {e}"
+
+
+# ── TRACE HELPER ─────────────────────────────────────────────────────────────
+def _tool_trace(
+    action: dict,
+    result: str,
+    metadata: dict | None = None,
+    status: str = "done",
+    error: str | None = None,
+) -> dict:
+    """
+    Return a structured trace dict for a completed tool call.
+    agent.py unpacks .result / .metadata / .status for event emission.
+    Shape: { action, tool_name, status, input, result, metadata, error }
+    """
+    return {
+        "action":    action.get("action"),
+        "tool_name": action.get("action"),
+        "status":    status,
+        "input":     action,
+        "result":    result,
+        "metadata":  metadata or {},
+        "error":     error,
+    }
+
+
 # ── DISPATCH ──────────────────────────────────────────────────────────────────
-def dispatch_builtin(action: dict) -> str | None:
-    """Returns result string or None if not a built-in tool."""
+def dispatch_builtin(action: dict) -> dict | None:
+    """
+    Returns a structured trace dict or None if action is not a built-in tool.
+    Shape: { action, tool_name, status, input, result, metadata, error }
+    """
     kind = action.get("action")
     if kind == "calculate":
-        return tool_calculate(action.get("expr", ""))
+        r = tool_calculate(action.get("expr", ""))
+        return _tool_trace(action, r, {"expr": action.get("expr", "")})
     if kind == "weather":
-        return tool_weather(action.get("location", ""))
+        r = tool_weather(action.get("location", ""))
+        return _tool_trace(action, r, {"location": action.get("location", "")})
     if kind == "currency":
-        return tool_currency(float(action.get("amount", 1)),
-                             action.get("from", "USD"), action.get("to", "EUR"))
+        r = tool_currency(float(action.get("amount", 1)),
+                          action.get("from", "USD"), action.get("to", "EUR"))
+        return _tool_trace(action, r, {
+            "amount": action.get("amount"), "from": action.get("from"), "to": action.get("to")})
     if kind == "convert":
-        return tool_convert(float(action.get("value", 0)),
-                            action.get("from_unit", ""), action.get("to_unit", ""))
+        r = tool_convert(float(action.get("value", 0)),
+                         action.get("from_unit", ""), action.get("to_unit", ""))
+        return _tool_trace(action, r, {
+            "value": action.get("value"),
+            "from_unit": action.get("from_unit"),
+            "to_unit": action.get("to_unit"),
+        })
     if kind == "regex":
-        return tool_regex(action.get("pattern", ""), action.get("text", ""),
-                          action.get("flags", ""))
+        r = tool_regex(action.get("pattern", ""), action.get("text", ""),
+                       action.get("flags", ""))
+        return _tool_trace(action, r, {
+            "pattern": action.get("pattern", ""), "flags": action.get("flags", "")})
     if kind == "base64":
-        return tool_base64(action.get("text", ""), action.get("mode", "encode"))
+        r = tool_base64(action.get("text", ""), action.get("mode", "encode"))
+        return _tool_trace(action, r, {"mode": action.get("mode", "encode")})
     if kind == "json_format":
-        return tool_json_format(action.get("text", ""))
+        r = tool_json_format(action.get("text", ""))
+        return _tool_trace(action, r)
+    if kind == "select_model":
+        r = tool_select_model(action.get("task", ""),
+                              bool(action.get("prefer_speed", False)),
+                              bool(action.get("prefer_quality", False)))
+        return _tool_trace(action, r, {
+            "task": action.get("task", ""),
+            "prefer_quality": action.get("prefer_quality", False),
+        })
+    if kind == "rag_ingest":
+        r = tool_rag_ingest(action.get("text", ""), action.get("path", ""),
+                            action.get("metadata", {}),
+                            action.get("doc_id_prefix", None),
+                            action.get("workdir", "/tmp"))
+        return _tool_trace(action, r, {
+            "path": action.get("path", ""), "doc_id_prefix": action.get("doc_id_prefix")})
+    if kind == "rag_query":
+        r = tool_rag_query(action.get("query", ""), action.get("top_k", 5),
+                           action.get("filter_metadata", None))
+        return _tool_trace(action, r, {
+            "query": action.get("query", ""), "top_k": action.get("top_k", 5)})
+    if kind == "rag_status":
+        r = tool_rag_status()
+        return _tool_trace(action, r)
     return None
 
 
