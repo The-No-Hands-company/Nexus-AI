@@ -267,6 +267,31 @@
 | `versaai/` C++ performance layer | ⏳ **Defer** — port when Nexus AI is at scale | Optimisation for high-load scenarios; not needed at current scale |
 | `versaai/generation/model_3d_gen.py` | ❌ **Skip** | Niche use case, high porting effort, low immediate value |
 | `versaai/agents/companion_agent.py` | ❌ **Skip** | Non-differentiating; Nexus personas already cover this space |
+| `versaai/plugins/blender/` | ⏳ **Defer** | VersaAI Blender add-on (REST API plugin for 3D work). Worth adapting as a "Nexus AI Integrations" ecosystem item later |
+
+---
+
+### 🔍 Additional Missed in First Audit
+
+> These files were not captured in the initial audit pass. Assessed on second review.
+
+| Module | What it does | Value | Action |
+|---|---|---|---|
+| `versaai/agents/agent_base.py` | Abstract `AgentBase` + `AgentMetadata` dataclass — base class all agents inherit from | Medium | **Port as dependency** when porting agents |
+| `versaai/agents/tools/base.py` | Formal tool plugin framework: abstract `Tool`, `ToolResult`, `SafetyLevel` enum, `ToolRegistry` with schema generation for LLM function-calling | High | **Port** — replaces ad-hoc dispatch with a proper typed tool system |
+| `versaai/agents/tools/web_search.py` | Multi-backend web search tool (SearXNG self-hosted → Brave API → DuckDuckGo scraper fallback), LRU cache, structured `ToolResult` with citations | High | **Port** — significantly better than current ad-hoc `web_search` action |
+| `versaai/agents/tools/file_ops.py` | File operations tool (read/write/list/delete) conforming to `Tool` base with `SafetyLevel` tagging | Low | **Port as dependency** alongside tool framework |
+| `versaai/agents/tools/shell.py` | Shell execution tool with sandbox constraints, conforming to `Tool` base | Low | **Port as dependency** alongside tool framework |
+| `versaai/agents/tools/rag_query.py` | RAG query as a formal `Tool` — agents can call it via the tool framework | Low | **Port as dependency** of tool framework |
+| `versaai/memory/conversation.py` | `ConversationManager` with entity extraction, topic drift detection, turn pruning, `get_context_for_generation()` — richer than current `memory.py` | High | **Port** — upgrades conversation memory with entity tracking |
+| `versaai/models/model_base.py` | Abstract `ModelBase` + `ModelMetadata` dataclass — interface for all model loaders | High | **Port** — required foundation for Sovereign Model Stage 1 |
+| `versaai/models/model_registry.py` | Central model registry: auto-detects format (GGUF/HF/ONNX), lifecycle management (load/unload), supports hot-swap | High | **Port** — critical for running and managing local models |
+| `versaai/models/gguf_model.py` | GGUF/llama.cpp model loader with CPU/CUDA/Metal backend, quantization support, streaming | High | **Port** — load any GGUF model directly, core of Sovereign Model Stage 1 |
+| `versaai/models/huggingface_model.py` | HuggingFace `transformers` model loader — load any HF Hub model for inference or fine-tuning | High | **Port** — HuggingFace pipeline needed for LoRA fine-tuning (Sovereign Model Stage 1) |
+| `versaai/models/code_llm.py` | Code-specific LLM abstractions (LlamaCpp / HuggingFace / OpenAI / Anthropic backends), `GenerationConfig` | Medium | **Port** — clean interface for code generation models |
+| `versaai/api/errors.py` | OpenAI-compatible structured error types (`VersaAPIError`, `ProviderUnavailableError`, `ContextOverflowError`, etc.) with HTTP status mapping | High | **Port** — makes error responses compatible with any OpenAI client library |
+| `versaai/api/schemas.py` | OpenAI-compatible Pydantic schemas for chat completions (`ChatMessage`, `ChatCompletionRequest`, etc.) with input size validation | High | **Port** — makes Nexus AI work as a drop-in for LiteLLM, Open WebUI, Continue.dev, Cursor |
+| `versaai/safety/types.py` | Core safety type system: `ContentCategory`, `ThreatLevel`, `SafetyAction`, `SafetyVerdict`, `PIIMatch` — required by all safety modules | High | **Port first** — prerequisite for the entire safety subsystem |
 
 ---
 
