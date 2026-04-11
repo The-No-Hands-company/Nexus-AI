@@ -1018,6 +1018,67 @@ def stop_stream(stream_id: str):
     return {"not_found":stream_id}
 
 
+# ── Nexus Cloud registration ──────────────────────────────────────────────────
+async def _register_with_nexus_cloud():
+    """Register this AI node with Nexus Cloud (non-blocking, best-effort)."""
+    import httpx
+    cloud_url = os.getenv("NEXUS_CLOUD_URL", "").rstrip("/")
+    if not cloud_url:
+        return
+    api_key   = os.getenv("NEXUS_CLOUD_API_KEY", "")
+    public_url = os.getenv("PUBLIC_URL", f"http://localhost:{os.getenv('PORT', '8000')}")
+    payload = {
+        "id": "nexus-ai",
+        "name": "Nexus AI",
+        "description": "Autonomous AI assistant with multi-provider fallback, memory, and RAG",
+        "upstreamUrl": public_url,
+        "mode": "standalone",
+        "exposed": True,
+        "health": "healthy",
+        "capabilities": ["ai", "chat", "rag", "memory", "autonomy", "multi-provider"],
+    }
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if api_key:
+        headers["X-Api-Key"] = api_key
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.post(f"{cloud_url}/api/v1/tools", json=payload, headers=headers)
+            if res.is_success:
+                print(f"[nexus-cloud] Registered with Nexus Cloud at {cloud_url}")
+            else:
+                print(f"[nexus-cloud] Registration rejected: {res.status_code}")
+    except Exception as e:
+        print(f"[nexus-cloud] Could not reach Nexus Cloud — continuing ({e})")
+
+async def _heartbeat_loop():
+    """Send a heartbeat every 30 s so Cloud knows this node is alive."""
+    import httpx
+    cloud_url = os.getenv("NEXUS_CLOUD_URL", "").rstrip("/")
+    if not cloud_url:
+        return
+    api_key    = os.getenv("NEXUS_CLOUD_API_KEY", "")
+    public_url = os.getenv("PUBLIC_URL", f"http://localhost:{os.getenv('PORT', '8000')}")
+    headers    = {"Content-Type": "application/json"}
+    if api_key:
+        headers["X-Api-Key"] = api_key
+    while True:
+        await asyncio.sleep(30)
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                await client.post(
+                    f"{cloud_url}/api/v1/tools/nexus-ai/heartbeat",
+                    json={"health": "healthy", "upstreamUrl": public_url},
+                    headers=headers,
+                )
+        except Exception:
+            pass
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(_register_with_nexus_cloud())
+    asyncio.create_task(_heartbeat_loop())
+
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT",8000))
