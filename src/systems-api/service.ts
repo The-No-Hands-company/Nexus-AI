@@ -24,10 +24,15 @@ import {
   updateTool as patchTool,
   verifyDomainBinding,
 } from "./registry";
+import { systemsApiDeployIntegration as deployIntegration } from "./deploy";
 import type {
   SystemsApiAddress,
   SystemsApiAddressKind,
+  SystemsApiApp,
+  SystemsApiAppIntegrationMode,
   SystemsApiCapability,
+  SystemsApiConnection,
+  SystemsApiConnectionKind,
   SystemsApiDomainBinding,
   SystemsApiDomainVerificationChallenge,
   SystemsApiEndpoint,
@@ -38,9 +43,242 @@ import type {
   SystemsApiSummary,
   SystemsApiTool,
   SystemsApiToolHistoryEntry,
+  SystemsApiTopology,
 } from "./types";
 
 const addressKinds: readonly SystemsApiAddressKind[] = ["website", "email", "server", "custom"];
+
+const topologyApps: readonly SystemsApiApp[] = [
+  {
+    id: "nexus-cloud",
+    name: "Nexus Cloud",
+    description: "The sovereign control plane, registry, policy, and orchestration hub.",
+    kind: "platform",
+    integrationMode: "embedded",
+    embeddedIn: null,
+    exposes: ["discovery", "status", "policy", "registry", "public-url", "deploy"],
+    consumes: ["vault", "network", "deploy", "hosting", "computer"],
+    requiredApis: ["Discovery API", "Systems Registry API", "Policy API", "Status API", "Exposure API", "Public URL API"],
+    standalone: true,
+    cloudConnected: true,
+    registeredAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "nexus",
+    name: "Nexus",
+    description: "The collaboration and federation plane for messages, channels, and presence.",
+    kind: "application",
+    integrationMode: "hybrid",
+    embeddedIn: null,
+    exposes: ["messages", "channels", "presence", "federation"],
+    consumes: ["identity", "policy", "storage", "search", "notifications", "exposure"],
+    requiredApis: ["Messaging API", "Presence API", "Federation API", "Notification API"],
+    standalone: true,
+    cloudConnected: true,
+    registeredAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "nexus-ai",
+    name: "Nexus AI",
+    description: "The agent orchestration and tool intelligence layer.",
+    kind: "application",
+    integrationMode: "hybrid",
+    embeddedIn: null,
+    exposes: ["agents", "tool-routing", "workflows", "model-routing"],
+    consumes: ["tool-registry", "vault", "identity", "status", "jobs", "deploy"],
+    requiredApis: ["Tool Invocation API", "Agent Runtime API", "Model Routing API", "Job API"],
+    standalone: true,
+    cloudConnected: true,
+    registeredAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "nexus-computer",
+    name: "Nexus Computer",
+    description: "The edge execution layer for local devices, agents, and remote tasks.",
+    kind: "edge",
+    integrationMode: "referenced",
+    embeddedIn: "nexus-cloud",
+    exposes: ["device-registry", "edge-heartbeat", "remote-task", "sync"],
+    consumes: ["jobs", "identity", "vault", "network", "control-plane"],
+    requiredApis: ["Device Registry API", "Edge Heartbeat API", "Remote Task API", "Sync API"],
+    standalone: true,
+    cloudConnected: true,
+    registeredAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "nexus-deploy",
+    name: "Nexus Deploy",
+    description: "The build, release, and rollback delivery plane.",
+    kind: "service",
+    integrationMode: "hybrid",
+    embeddedIn: null,
+    exposes: ["build", "release", "rollback", "environment"],
+    consumes: ["registry", "vault", "hosting", "network", "status"],
+    requiredApis: ["Build API", "Release API", "Environment API", "Rollback API"],
+    standalone: true,
+    cloudConnected: true,
+    registeredAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "nexus-hosting",
+    name: "Nexus Hosting",
+    description: "The site, route, and public runtime exposure plane.",
+    kind: "service",
+    integrationMode: "hybrid",
+    embeddedIn: null,
+    exposes: ["sites", "routes", "assets", "public-exposure"],
+    consumes: ["deploy", "cloud", "network", "vault", "storage"],
+    requiredApis: ["Site Registration API", "Route Manifest API", "Publish API", "Public Address API"],
+    standalone: true,
+    cloudConnected: true,
+    registeredAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "nexus-network",
+    name: "Nexus Network",
+    description: "The connectivity, peer routing, tunnel, and federation fabric.",
+    kind: "network",
+    integrationMode: "embedded",
+    embeddedIn: "nexus-cloud",
+    exposes: ["peers", "routing", "tunnel", "reachability"],
+    consumes: ["identity", "policy", "vault", "status"],
+    requiredApis: ["Peer Registry API", "Connectivity API", "Tunnel Session API", "Federation API"],
+    standalone: true,
+    cloudConnected: true,
+    registeredAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "nexus-vault",
+    name: "Nexus Vault",
+    description: "The secrets, tokens, signing, and trust anchor.",
+    kind: "trust",
+    integrationMode: "embedded",
+    embeddedIn: "nexus-cloud",
+    exposes: ["secrets", "tokens", "signing", "rotation"],
+    consumes: ["identity", "policy", "audit", "registry"],
+    requiredApis: ["Secrets API", "Token Mint API", "Signing API", "Rotation API"],
+    standalone: true,
+    cloudConnected: true,
+    registeredAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+];
+
+const topologyConnections: readonly SystemsApiConnection[] = [
+  {
+    id: "cloud-owns-registry",
+    sourceAppId: "nexus-cloud",
+    targetAppId: "nexus",
+    kind: "depends-on",
+    description: "Nexus Cloud is the registry and policy source of truth for Nexus.",
+    embedded: false,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "cloud-owns-ai",
+    sourceAppId: "nexus-cloud",
+    targetAppId: "nexus-ai",
+    kind: "depends-on",
+    description: "Nexus AI discovers tools, jobs, and trust metadata through Nexus Cloud.",
+    embedded: false,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "cloud-owns-computer",
+    sourceAppId: "nexus-cloud",
+    targetAppId: "nexus-computer",
+    kind: "routes-through",
+    description: "Nexus Computer receives edge tasks, sync, and device orchestration from Cloud.",
+    embedded: true,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "cloud-owns-deploy",
+    sourceAppId: "nexus-cloud",
+    targetAppId: "nexus-deploy",
+    kind: "depends-on",
+    description: "Nexus Deploy is the formal delivery backend for Cloud-triggered deployments.",
+    embedded: false,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "cloud-owns-hosting",
+    sourceAppId: "nexus-cloud",
+    targetAppId: "nexus-hosting",
+    kind: "depends-on",
+    description: "Nexus Hosting consumes registry, exposure, and deployment state from Cloud.",
+    embedded: false,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "cloud-owns-network",
+    sourceAppId: "nexus-cloud",
+    targetAppId: "nexus-network",
+    kind: "routes-through",
+    description: "Nexus Network provides the peer, tunnel, and federation fabric for Cloud.",
+    embedded: true,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "cloud-owns-vault",
+    sourceAppId: "nexus-cloud",
+    targetAppId: "nexus-vault",
+    kind: "depends-on",
+    description: "Nexus Vault is the trust and secrets foundation used by Cloud and tools.",
+    embedded: true,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "ai-routes-to-tools",
+    sourceAppId: "nexus-ai",
+    targetAppId: "nexus",
+    kind: "references",
+    description: "Nexus AI invokes collaboration tools via the canonical Systems API surface.",
+    embedded: false,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "hosting-uses-deploy",
+    sourceAppId: "nexus-hosting",
+    targetAppId: "nexus-deploy",
+    kind: "depends-on",
+    description: "Hosting consumes deployment outputs and release state from Deploy.",
+    embedded: false,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+  {
+    id: "network-routes-public-exposure",
+    sourceAppId: "nexus-network",
+    targetAppId: "nexus-hosting",
+    kind: "routes-through",
+    description: "Public reachability and tunnels should route through the network layer.",
+    embedded: true,
+    createdAt: new Date(0).toISOString(),
+    updatedAt: new Date(0).toISOString(),
+  },
+];
+
+function appIntegrationMode(kind: SystemsApiAppKind, embeddedIn: string | null): SystemsApiAppIntegrationMode {
+  if (embeddedIn) return "embedded";
+  if (kind === "platform" || kind === "application") return "hybrid";
+  return "standalone";
+}
 
 export type SystemsApiPublicUrlRequest = {
   toolId: string;
@@ -113,6 +351,8 @@ const endpoints = [
   { method: "GET", path: "/api/v1/domains/:domain", description: "Inspect a domain binding" },
   { method: "POST", path: "/api/v1/domains/:domain/verify", description: "Verify a domain binding" },
   { method: "DELETE", path: "/api/v1/domains/:domain", description: "Revoke a domain binding" },
+  { method: "GET", path: "/api/v1/deployments/integration", description: "Inspect the Deploy backend integration" },
+  { method: "POST", path: "/api/v1/deployments", description: "Request a managed Deploy deployment" },
 ] as const satisfies readonly SystemsApiEndpoint[];
 
 const capabilities = [
@@ -126,6 +366,7 @@ const capabilities = [
   { id: "domains.binding", description: "Bind and verify custom domains" },
   { id: "domains.verification", description: "Generate and check domain verification challenges" },
   { id: "exposures.lifecycle", description: "Track exposure records and revocation state" },
+  { id: "deploy.request", description: "Request and inspect managed deployments through Nexus Deploy" },
 ] as const satisfies readonly SystemsApiCapability[];
 
 export function listSystemsApiEndpoints(): readonly SystemsApiEndpoint[] {
@@ -246,6 +487,32 @@ export function describeSystemsApiStatus(): SystemsApiStatus {
   return describeStatus();
 }
 
+export function listSystemsApiApps(): readonly SystemsApiApp[] {
+  return topologyApps;
+}
+
+export function listSystemsApiConnections(): readonly SystemsApiConnection[] {
+  return topologyConnections;
+}
+
+export function describeSystemsApiTopology(): SystemsApiTopology {
+  const embeddedAppCount = topologyApps.filter((app) => app.integrationMode === "embedded").length;
+  const referencedAppCount = topologyApps.filter((app) => app.integrationMode === "referenced").length;
+  const hybridAppCount = topologyApps.filter((app) => app.integrationMode === "hybrid").length;
+  return {
+    apps: topologyApps,
+    connections: topologyConnections,
+    summary: {
+      appCount: topologyApps.length,
+      connectionCount: topologyConnections.length,
+      embeddedAppCount,
+      referencedAppCount,
+      hybridAppCount,
+    },
+    updatedAt: new Date().toISOString(),
+  };
+}
+
 export function describeSystemsApi(): SystemsApiSummary {
   const status = describeSystemsApiStatus();
   return {
@@ -256,12 +523,21 @@ export function describeSystemsApi(): SystemsApiSummary {
     toolCount: status.toolCount,
     status,
     addressKinds: status.addressKinds,
+    deploy: deployIntegration,
   };
 }
 
+export function describeSystemsApiDeployIntegration(): typeof deployIntegration {
+  return deployIntegration;
+}
+
+export const systemsApiDeployIntegration = deployIntegration;
+
 export const systemsApiService = {
   describeSystemsApi,
+  describeSystemsApiDeployIntegration,
   describeSystemsApiStatus,
+  describeSystemsApiTopology,
   disableSystemsApiTool: disableTool,
   enableSystemsApiTool: enableTool,
   exposeSystemsApiTool,
@@ -276,7 +552,9 @@ export const systemsApiService = {
   issueSystemsApiPublicUrl,
   listSystemsApiAddresses,
   listSystemsApiAddressesForTool,
+  listSystemsApiApps,
   listSystemsApiCapabilities,
+  listSystemsApiConnections,
   listSystemsApiDomainBindings,
   listSystemsApiEndpoints,
   listSystemsApiExposures,

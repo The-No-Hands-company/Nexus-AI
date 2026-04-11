@@ -19,6 +19,12 @@ This repository is the starting point for building a cloud layer that can be run
 - `docs/architecture.md` describes the first implementation cut
 - `docs/implementation-plan.md` is the living roadmap for current and future work
 
+## Deploy integration
+
+- Set `NEXUS_DEPLOY_URL` and `NEXUS_DEPLOY_TOKEN` in your environment to let Nexus Cloud call Nexus Deploy as a service-to-service client.
+- The formal contract is documented in `docs/systems-api-spec.md`.
+- A small deploy trigger page is available at `public/deploy.html` for quick operator use.
+
 ## Testing
 
 - Run the suite with `bun test src`

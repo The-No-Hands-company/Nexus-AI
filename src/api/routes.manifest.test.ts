@@ -1,9 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { apiRouteManifest } from "./routes";
+import type { ApiRoute } from "./dto";
 
 describe("API route manifest", () => {
   test("matches the documented router surface exactly", () => {
-    expect(apiRouteManifest).toEqual([
+    const expected: ApiRoute[] = [
       { method: "GET", path: "/health", description: "Basic service health" },
       { method: "GET", path: "/api/status", description: "Legacy node status summary" },
       { method: "GET", path: "/v1/architecture", description: "Project architecture summary" },
@@ -16,6 +17,9 @@ describe("API route manifest", () => {
       { method: "GET", path: "/api/v1/endpoints", description: "List Systems API endpoints" },
       { method: "GET", path: "/api/v1/capabilities", description: "List Systems API capabilities" },
       { method: "GET", path: "/api/v1/summary", description: "Describe the Systems API contract" },
+      { method: "GET", path: "/api/v1/apps", description: "List the canonical Nexus app catalog" },
+      { method: "GET", path: "/api/v1/connections", description: "List canonical Nexus app connections" },
+      { method: "GET", path: "/api/v1/topology", description: "Describe the full Nexus app topology" },
       { method: "GET", path: "/api/v1/tools/:toolId", description: "Inspect a registered tool" },
       { method: "GET", path: "/api/v1/tools/:toolId/history", description: "Inspect a tool lifecycle history" },
       { method: "PATCH", path: "/api/v1/tools/:toolId", description: "Update registered tool metadata" },
@@ -36,6 +40,10 @@ describe("API route manifest", () => {
       { method: "GET", path: "/api/v1/domains/:domain", description: "Inspect a domain binding" },
       { method: "POST", path: "/api/v1/domains/:domain/verify", description: "Verify a domain binding" },
       { method: "DELETE", path: "/api/v1/domains/:domain", description: "Revoke a domain binding" },
-    ]);
+      { method: "POST", path: "/api/v1/deployments", description: "Request a managed Deploy deployment" },
+      { method: "GET", path: "/api/v1/deployments/integration", description: "Inspect the Deploy backend integration" },
+    ];
+    const actual = apiRouteManifest.map((route) => ({ ...route })) as any[];
+    expect(actual).toEqual(expected as any[]);
   });
 });

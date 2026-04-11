@@ -8,7 +8,7 @@ import type { FederationSummary } from "../federation/service";
 import type { ObservabilityEvent } from "../observability";
 import type { ObservabilitySummary } from "../observability/service";
 import type { StorageVolume } from "../storage";
-import type { SystemsApiCapability, SystemsApiDomainBinding, SystemsApiDomainVerificationChallenge, SystemsApiEndpoint, SystemsApiExposureRecord, SystemsApiMode, SystemsApiPublicUrl, SystemsApiRegistryMetadata, SystemsApiStatus, SystemsApiSummary, SystemsApiTool, SystemsApiToolHealth, SystemsApiToolHistoryEntry } from "../systems-api";
+import type { SystemsApiCapability, SystemsApiDeployRequest, SystemsApiDeployResponse, SystemsApiDomainBinding, SystemsApiDomainVerificationChallenge, SystemsApiEndpoint, SystemsApiExposureRecord, SystemsApiMode, SystemsApiPublicUrl, SystemsApiRegistryMetadata, SystemsApiStatus, SystemsApiSummary, SystemsApiTool, SystemsApiToolHealth, SystemsApiToolHistoryEntry } from "../systems-api";
 
 export type ApiRoute = {
   method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -174,6 +174,9 @@ export type SystemsApiToolPatchRequestDTO = {
   capabilities?: readonly string[];
 };
 
+export type SystemsApiDeployRequestDTO = SystemsApiDeployRequest;
+export type SystemsApiDeployResponseDTO = SystemsApiDeployResponse;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -263,6 +266,24 @@ export function isSystemsApiToolPatchRequest(value: unknown): value is SystemsAp
     && (value.exposed === undefined || typeof value.exposed === "boolean")
     && (value.health === undefined || isToolHealth(value.health))
     && (value.capabilities === undefined || Array.isArray(value.capabilities) && value.capabilities.every(isString));
+}
+
+export function isSystemsApiDeployRequest(value: unknown): value is SystemsApiDeployRequestDTO {
+  return isRecord(value)
+    && isString(value.toolId)
+    && isString(value.repo)
+    && (value.name === undefined || isString(value.name))
+    && (value.branch === undefined || isString(value.branch))
+    && (value.buildCommand === undefined || isString(value.buildCommand))
+    && (value.startCommand === undefined || isString(value.startCommand))
+    && (value.volumePath === undefined || isString(value.volumePath))
+    && (value.port === undefined || isNumber(value.port))
+    && (value.env === undefined || isStringRecord(value.env))
+    && (value.customDomain === undefined || isString(value.customDomain))
+    && (value.autoDeployEnabled === undefined || typeof value.autoDeployEnabled === "boolean")
+    && (value.notifyUrl === undefined || isString(value.notifyUrl))
+    && (value.deployNow === undefined || typeof value.deployNow === "boolean")
+    && (value.commitSha === undefined || isString(value.commitSha));
 }
 
 export function isSystemsApiToolHistoryResponse(value: unknown): value is SystemsApiToolHistoryResponseDTO {

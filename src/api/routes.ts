@@ -13,6 +13,9 @@ export const apiRouteManifest = [
   { method: "GET", path: "/api/v1/endpoints", description: "List Systems API endpoints" },
   { method: "GET", path: "/api/v1/capabilities", description: "List Systems API capabilities" },
   { method: "GET", path: "/api/v1/summary", description: "Describe the Systems API contract" },
+  { method: "GET", path: "/api/v1/apps", description: "List the canonical Nexus app catalog" },
+  { method: "GET", path: "/api/v1/connections", description: "List canonical Nexus app connections" },
+  { method: "GET", path: "/api/v1/topology", description: "Describe the full Nexus app topology" },
   { method: "GET", path: "/api/v1/tools/:toolId", description: "Inspect a registered tool" },
   { method: "GET", path: "/api/v1/tools/:toolId/history", description: "Inspect a tool lifecycle history" },
   { method: "PATCH", path: "/api/v1/tools/:toolId", description: "Update registered tool metadata" },
@@ -33,6 +36,8 @@ export const apiRouteManifest = [
   { method: "GET", path: "/api/v1/domains/:domain", description: "Inspect a domain binding" },
   { method: "POST", path: "/api/v1/domains/:domain/verify", description: "Verify a domain binding" },
   { method: "DELETE", path: "/api/v1/domains/:domain", description: "Revoke a domain binding" },
+  { method: "POST", path: "/api/v1/deployments", description: "Request a managed Deploy deployment" },
+  { method: "GET", path: "/api/v1/deployments/integration", description: "Inspect the Deploy backend integration" },
 ] as const satisfies readonly ApiRoute[];
 
 export function getApiRoute(path: string): ApiRoute | null {

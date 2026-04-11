@@ -299,7 +299,16 @@ export function requestSystemsApiAddress(input: SystemsApiAddressRequest): Syste
       expiresAt: new Date(Date.now() + 1000 * 60 * 60 * 24 * 30).toISOString(),
     };
     upsertPublicUrlRecord(publicUrl);
+
+    const existingExposure = getExposure(tool.id);
+    const exposure = existingExposure
+      ? transitionExposureRecord(existingExposure, "active", publicAddress, record.requestedAt)
+      : createExposureRecord({ toolId: tool.id, desiredHost: input.desiredHost }, publicAddress, "active", record.requestedAt);
+    upsertExposureRecord(exposure);
+
     pushHistory(tool.id, "public-url-issued", `Issued public URL for ${tool.name}`, record.requestedAt);
+    pushHistory(tool.id, "exposure-requested", `Requested exposure for ${tool.name}`, exposure.requestedAt);
+    pushHistory(tool.id, "exposure-activated", `Activated exposure for ${tool.name}`, exposure.activatedAt ?? exposure.updatedAt);
   }
 
   pushHistory(tool.id, "address-issued", `Issued ${input.kind} address ${publicAddress}`, record.requestedAt);

@@ -22,6 +22,28 @@ The first version should focus on three platform primitives:
 
 These endpoints are backed by a tool registry and status model that can be shared across standalone tools and orchestrated services.
 
+## Deploy integration
+
+Nexus Cloud can also call Nexus Deploy as a formal service-to-service integration.
+
+### Required environment variables
+
+- `NEXUS_DEPLOY_URL` — base URL of the Nexus Deploy instance
+- `NEXUS_DEPLOY_TOKEN` — bearer token used for service-to-service authentication
+
+### Deploy contract
+
+- `GET /api/v1/deployments/integration` — describe the Deploy integration contract
+- `POST /api/v1/deployments` — request a managed deployment from Nexus Deploy
+
+The request shape mirrors the shared Systems API deploy DTO and includes:
+
+- `toolId`
+- `repo`
+- optional `name`, `branch`, `buildCommand`, `startCommand`, `volumePath`, `port`
+- optional `env`, `customDomain`, `autoDeployEnabled`, `notifyUrl`
+- optional `deployNow`, `commitSha`
+
 ## Tool registry model
 
 Each tool entry should capture:
@@ -93,3 +115,14 @@ The Systems API should live inside Nexus Cloud first, backed by a shared registr
 - hidden telemetry
 - implicit background mutations
 - vendor-specific auth flows
+
+## Address Kinds
+
+The status endpoint includes a `addressKinds` field that lists the supported public address types. Clients and UI docs can read this field and pull the canonical list instead of hardcoding it.
+
+The supported kinds are:
+
+- `website` – HTTPS website hostnames (also powers the compatibility `POST /api/v1/public-url`).
+- `email` – mailbox-style identifiers for messaging-facing services.
+- `server` – opaque server handles (e.g., `nexus://tools/gateway`).
+- `custom` – user-defined address formats for future protocols.

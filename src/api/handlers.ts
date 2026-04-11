@@ -5,6 +5,7 @@ import { federationService } from "../federation";
 import { observabilityService } from "../observability";
 import { storage } from "../storage";
 import { systemsApiService } from "../systems-api";
+import { describeSystemsApiDeployIntegration, systemsApiDeployIntegration } from "../systems-api/deploy";
 import { apiRoutes } from "./index";
 import {
   type ArchitectureResponse,
@@ -20,7 +21,11 @@ import {
   type SystemsApiAddressRequestDTO,
   type SystemsApiAddressRevokeRequestDTO,
   type SystemsApiAddressResponseDTO,
+  type SystemsApiAppsResponseDTO,
   type SystemsApiCapabilitiesResponseDTO,
+  type SystemsApiConnectionsResponseDTO,
+  type SystemsApiDeployRequestDTO,
+  type SystemsApiDeployResponseDTO,
   type SystemsApiDomainBindingRequestDTO,
   type SystemsApiDomainResponseDTO,
   type SystemsApiDomainVerificationRequestDTO,
@@ -33,6 +38,7 @@ import {
   type SystemsApiPublicUrlResponseDTO,
   type SystemsApiStatusResponseDTO,
   type SystemsApiSummaryResponseDTO,
+  type SystemsApiTopologyResponseDTO,
   type SystemsApiToolHistoryResponseDTO,
   type SystemsApiToolPatchRequestDTO,
   type SystemsApiToolResponseDTO,
@@ -42,6 +48,7 @@ import {
   isRegisterNodeRequest,
   isSystemsApiAddressRequest,
   isSystemsApiAddressRevokeRequest,
+  isSystemsApiDeployRequest,
   isSystemsApiDomainBindingRequest,
   isSystemsApiDomainVerificationRequest,
   isSystemsApiExposureRequest,
@@ -183,6 +190,31 @@ function handleSystemsSummary(): Response {
   return json({ summary: systemsApiService.describeSystemsApi() } satisfies SystemsApiSummaryResponseDTO);
 }
 
+function handleSystemsDeployIntegration(): Response {
+  return json({ integration: describeSystemsApiDeployIntegration() });
+}
+
+async function handleSystemsDeploy(request: Request): Promise<Response> {
+  const body = await readJson(request);
+  if (!isSystemsApiDeployRequest(body)) return badRequest("Missing deploy fields");
+  const authToken = request.headers.get("authorization")?.slice(7);
+  if (!authToken) return json({ error: "Unauthorized" }, 401);
+  const endpoint = systemsApiDeployIntegration.endpoint;
+  const deployUrl = process.env.NEXUS_DEPLOY_URL?.replace(/\/$/, "") ?? "";
+  if (!deployUrl) return json({ error: "Deploy backend not configured" }, 503);
+  const response = await fetch(`${deployUrl}${endpoint}`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${authToken}`,
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  const data = (await response.json().catch(() => null)) as SystemsApiDeployResponseDTO | null;
+  return json(data ?? { error: "Deploy backend returned an invalid response" }, response.status);
+}
+
 function handleSystemsTool(toolId: string): Response {
   const tool = systemsApiService.getSystemsApiTool(toolId);
   if (!tool) return notFound();
@@ -262,8 +294,8 @@ async function handleSystemsAddressPost(request: Request): Promise<Response> {
 
 async function handleSystemsAddressRevoke(request: Request, toolId: string): Promise<Response> {
   const body = await readJson(request);
-  if (!isSystemsApiAddressRevokeRequest({ ...(body as Record<string, unknown>), toolId })) return badRequest("Missing address revoke fields");
-  const revoked = systemsApiService.revokeSystemsApiAddress({ toolId, ...(body as Record<string, unknown>) });
+  if (!isSystemsApiAddressRevokeRequest(body)) return badRequest("Missing address revoke fields");
+  const revoked = systemsApiService.revokeSystemsApiAddress({ toolId, kind: body.kind });
   return json({ addresses: revoked } satisfies SystemsApiAddressesResponseDTO);
 }
 
@@ -370,7 +402,22 @@ async function handleSystemsExposureRoute(request: Request, pathname: string): P
   return notFound();
 }
 
+function handleSystemsApps(): Response {
+  return json({ apps: systemsApiService.listSystemsApiApps() } satisfies SystemsApiAppsResponseDTO);
+}
+
+function handleSystemsConnections(): Response {
+  return json({ connections: systemsApiService.listSystemsApiConnections() } satisfies SystemsApiConnectionsResponseDTO);
+}
+
+function handleSystemsTopology(): Response {
+  return json({ topology: systemsApiService.describeSystemsApiTopology() } satisfies SystemsApiTopologyResponseDTO);
+}
+
 async function handleSystemsRoute(request: Request, pathname: string): Promise<Response> {
+  if (request.method === "GET" && pathname === "/api/v1/apps") return handleSystemsApps();
+  if (request.method === "GET" && pathname === "/api/v1/connections") return handleSystemsConnections();
+  if (request.method === "GET" && pathname === "/api/v1/topology") return handleSystemsTopology();
   if (request.method === "GET" && pathname === "/api/v1/addresses") return handleSystemsAddresses();
   if (request.method === "POST" && pathname === "/api/v1/addresses") return handleSystemsAddressPost(request);
   if (pathname.startsWith("/api/v1/addresses/")) return await handleSystemsAddressRoute(request, pathname);
@@ -409,9 +456,11 @@ export async function handleApiRequest(request: Request): Promise<Response> {
   if (request.method === "GET" && pathname === "/api/v1/capabilities") return handleSystemsCapabilities();
   if (request.method === "GET" && pathname === "/api/v1/summary") return handleSystemsSummary();
   if (request.method === "GET" && pathname === "/api/v1/status") return handleSystemsStatus();
+  if (request.method === "GET" && pathname === "/api/v1/deployments/integration") return handleSystemsDeployIntegration();
+  if (request.method === "POST" && pathname === "/api/v1/deployments") return handleSystemsDeploy(request);
   if (request.method === "POST" && pathname === "/api/v1/public-url") return handleSystemsPublicUrl(request);
   if (pathname.startsWith("/api/v1/tools/")) return await handleSystemsToolRoute(request, pathname);
-  if (pathname === "/api/v1/addresses" || pathname.startsWith("/api/v1/addresses/") || pathname === "/api/v1/exposures" || pathname.startsWith("/api/v1/exposures/") || pathname === "/api/v1/domains" || pathname.startsWith("/api/v1/domains/")) {
+  if (pathname === "/api/v1/apps" || pathname === "/api/v1/connections" || pathname === "/api/v1/topology" || pathname === "/api/v1/addresses" || pathname.startsWith("/api/v1/addresses/") || pathname === "/api/v1/exposures" || pathname.startsWith("/api/v1/exposures/") || pathname === "/api/v1/domains" || pathname.startsWith("/api/v1/domains/")) {
     return await handleSystemsRoute(request, pathname);
   }
   return notFound();
