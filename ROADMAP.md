@@ -270,6 +270,68 @@
 
 ---
 
+## 🧬 Sovereign Model Roadmap — Nexus Prime
+
+> **End goal:** Nexus Systems trains, owns, and serves its own frontier AI model — "Nexus Prime" — with zero dependency on any external API, provider, or corporation. At planetary scale (millions → billions of users), Nexus Systems will generate enough interaction data and compute capacity to train a model that rivals or surpasses GPT-5, Gemini Ultra, and Claude — built entirely in-house.
+
+---
+
+### Stage 1 — Nexus Prime Alpha: Fine-tuned (Near Term)
+
+> **Strategy:** Start with open-weight base models (Llama 4, Qwen2.5, DeepSeek-R1) and fine-tune them on Nexus-specific data using LoRA/QLoRA. Result: a model that behaves exactly the way Nexus AI needs, costs nothing to run, and is 100% owned by The No-Hands Company.
+
+- [ ] **Data collection pipeline** — capture high-quality interaction traces from Nexus AI sessions (opt-in, anonymised, GDPR-compliant) as training signal
+- [ ] **LoRA fine-tuning harness** — one-click fine-tuning on a base model using collected traces; output: a `.gguf` / adapter file
+- [ ] **Nexus Prime Alpha persona** — fine-tuned Llama 4 or Qwen2.5-72B variant; knows the Nexus ecosystem, tools, codebase, and tone natively
+- [ ] **Automated eval suite** — benchmark Nexus Prime Alpha vs base model on Nexus-specific tasks (code gen, autonomy, RAG quality, persona consistency)
+- [ ] **Ollama integration** — serve Nexus Prime Alpha via Ollama, slot into existing provider chain as priority #0
+- [ ] **LoRA adapter versioning** — track adapter versions, roll back if quality regresses
+- [ ] **Synthetic training data generation** — use existing agent swarm to generate diverse, high-quality instruction pairs for continued improvement
+
+**Target compute:** 1× NVIDIA A100 80GB (or equivalent) — fine-tuning a 70B model with QLoRA takes ~12-24h.
+
+---
+
+### Stage 2 — Nexus Prime Beta: Continual Learning (Medium Term)
+
+> **Strategy:** Move from one-shot fine-tuning to a continuous feedback loop. Every interaction, correction, and human preference signal feeds back into model improvement. The model gets smarter as more users use Nexus AI.
+
+- [ ] **RLHF / DPO pipeline** — capture 👍👎 signals already stored per message; run Direct Preference Optimisation to align model with user preferences
+- [ ] **Continual fine-tuning scheduler** — weekly re-fine-tuning runs on accumulated data; automatic promotion if benchmarks improve
+- [ ] **Knowledge distillation** — distil responses from the best external models (Claude, GPT-5, Gemini) into Nexus Prime to bootstrap capability without direct training cost
+- [ ] **Multi-task specialisation** — separate LoRA adapters for coding, reasoning, research, creative — hot-swap based on persona/task type
+- [ ] **Multimodal extension** — fine-tune vision capabilities into Nexus Prime (Llama 4 Vision / Qwen2-VL base)
+- [ ] **Model card & transparency report** — publish training methodology, data sources, evals, bias analysis
+
+---
+
+### Stage 3 — Nexus Prime 1.0: Purpose-Built Architecture (Long Term)
+
+> **Strategy:** At sufficient scale (100M+ users, significant GPU fleet), pre-train a model from scratch using the Nexus Systems institutional dataset. This model will be designed around Nexus's unique requirements — agentic reasoning, long-context tool use, multi-modal I/O, and sovereignty-by-design.
+
+- [ ] **Institutional dataset curation** — curate a multi-trillion token corpus from Nexus interactions, the open web, code repositories, scientific literature, and synthetic data pipelines
+- [ ] **Custom transformer architecture** — purpose-built architecture optimised for agentic tool use, long context (1M+ tokens), and streaming inference
+- [ ] **Mixture-of-Experts (MoE) design** — sparse MoE with specialist expert routing for coding, reasoning, multimodal, domain knowledge; rivals dense models at fraction of inference cost
+- [ ] **Distributed pre-training infrastructure** — multi-node training across Nexus Systems compute fleet (Nexus Edge + Nexus Cloud); FSDP / DeepSpeed ZeRO-3
+- [ ] **Nexus Prime 1.0 release** — first fully sovereign, from-scratch model; deployed at nexus-ai.app, replacing all external providers as primary inference
+- [ ] **Open-weight release** — publish Nexus Prime 1.0 weights publicly; position The No-Hands Company as a frontier AI lab
+
+---
+
+### Stage 4 — Exascale Nexus Prime: Planetary Intelligence (Vision)
+
+> **Vision:** Millions to billions of Nexus Systems users generate an unprecedented stream of real-world interaction data and, collectively, enormous distributed compute. This scale enables something no single company currently achieves — a continuously learning, federated, privacy-preserving frontier model trained on the broadest possible slice of human knowledge and intent.
+
+- [ ] **Federated learning** — devices running Nexus Systems contribute to model training locally; gradients aggregated without raw data ever leaving the user's machine
+- [ ] **User-contributed compute network** — opt-in compute contribution from Nexus Systems users; idle GPU cycles pooled into a training cluster rivalling hyperscaler investments
+- [ ] **Continuous pre-training at exascale** — as the user base scales toward billions, training data volume and compute capacity scale proportionally — a self-reinforcing loop
+- [ ] **Real-time knowledge integration** — model continuously ingests new knowledge without catastrophic forgetting (via replay buffers + EWC regularisation)
+- [ ] **Nexus Prime Frontier** — a model trained on more diverse, real-world, multi-modal data than any closed-source lab can access; the most capable AI system ever built; 100% owned and governed by the Nexus Systems community
+
+> **Note on scale:** At 1B users each sending ~10 messages/day, Nexus Systems generates ~10 billion training examples per day — more than GPT-4 was trained on in total, every single day. This is the compounding advantage that only a truly planetary-scale open platform can achieve.
+
+---
+
 ## 🌌 Phase 6 — Frontier Research & Beyond (Ongoing)
 
 - [ ] **Emotional intelligence** — consistent character memory across sessions
