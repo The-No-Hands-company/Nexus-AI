@@ -9,6 +9,7 @@
 ## ✅ Phase 0 — Foundation (Already Shipped)
 
 ### Core agent
+
 - Streaming SSE responses with word-by-word typewriter
 - Stop button — cancel mid-stream
 - Tool-call loop (up to 16 steps per request)
@@ -18,6 +19,7 @@
 - Multi-turn clarify — answers carry original task context
 
 ### Providers & routing
+
 - 11-provider fallback chain (Ollama/glm-5.1:cloud #1 → LLM7.io → Groq → Cerebras → Gemini → Mistral → OpenRouter → Cohere → GitHub Models → Grok → Claude)
 - Ollama local inference with OpenAI-compatible API
 - LLM7.io keyless fallback — always available, zero config
@@ -27,6 +29,7 @@
 - Settings panel — switch provider, model override, temperature without redeployment
 
 ### Personas
+
 - ⚡ General (balanced, temp 0.2)
 - 💻 Coder (expert engineer, temp 0.1, high-tier providers first)
 - 🔬 Researcher (cites sources, heavy web_search, temp 0.3)
@@ -35,6 +38,7 @@
 - Custom persona editor — create personas with custom system prompts and colors
 
 ### Built-in tools (no API key)
+
 - `get_time` — any timezone with natural aliases
 - `calculate` — safe math eval with full math module
 - `weather` — wttr.in, no key
@@ -48,6 +52,7 @@
 - `ollama_list_models` — list all locally available Ollama models
 
 ### File & repo tools
+
 - `write_file` — writes to session workdir; HTML/SVG auto-renders as artifact
 - `read_file`, `list_files`, `delete_file`
 - `clone_repo` — clones any public or private GitHub repo
@@ -58,6 +63,7 @@
 - Token extraction + redaction — tokens stripped from messages before reaching any LLM
 
 ### Reasoning & intelligence
+
 - `think_deep` — Tree-of-Thought reasoning for complex multi-step problems
 - Auto-retry on malformed/bad output (1 automatic retry)
 - Confidence scoring — model reports confidence 0-1, shown as badge
@@ -66,11 +72,13 @@
 - Recency fallback when vector DB unavailable
 
 ### Memory
+
 - Conversation summaries saved after each chat (background thread)
 - Last 5 summaries injected as context at start of new sessions
 - Memory count in sidebar with clear button
 
 ### Chat & history
+
 - Session history (multi-turn conversation context within a session)
 - Chat history sidebar — save, reload, delete conversations
 - Auto-generated title from first message
@@ -79,11 +87,13 @@
 - Full-text search across saved chats
 
 ### Input
+
 - File upload — drag & drop or button; text inlined, images as base64
 - Voice input — Web Speech API, interim results live in textarea
 - GitHub token input via 🔑 button (never sent to LLM)
 
 ### Infrastructure
+
 - Multi-user auth (JWT) — register/login/me endpoints, bcrypt passwords
 - Webhook triggers — POST /webhook/trigger + status endpoint
 - MCP server support — configure external tools via MCP_TOOLS env var
@@ -93,6 +103,7 @@
 - Cost tracking — estimated spend across paid providers (Grok, Claude)
 
 ### UI & rendering
+
 - Syntax-highlighted code blocks (Highlight.js, atom-one-dark)
 - Inline artifact renderer — HTML/SVG in sandboxed iframe with expand/open/copy
 - Inline image bubbles with prompt caption, click to open full res
@@ -106,6 +117,7 @@
 - Message reactions — 👍👎 per response, stored server-side
 
 ### Mobile & PWA
+
 - Installable PWA (manifest.json + service worker)
 - Swipe right from left edge → opens sidebar; swipe left → closes
 - Haptic feedback on send, tool calls, completion
@@ -113,6 +125,7 @@
 - 44px touch targets throughout
 
 ### Security
+
 - Sandbox protection — agent can never push to Nexus AI repo from external tasks
 - /app path protection — write/delete/run_command blocked from touching app source
 - Sandbox execution (256MB RAM cap, 10s CPU, 60s timeout per command)
@@ -122,22 +135,26 @@
 ## 🧠 Phase 1 — Super Intelligence Layer (Next 2–4 weeks)
 
 ### Advanced reasoning
+
 - [ ] **Graph-of-Thought** — graph-based reasoning beyond tree (agentic loops)
 - [ ] **Self-critique loop** — agent reviews own answer before responding
 - [ ] **Cross-model consensus** — run same task on 3 models, reconcile results
 - [ ] **Mixture-of-Experts routing** — route subtasks to specialist model variants
 
 ### Model expansion
+
 - [ ] Add 20+ more Ollama/cloud models by default (Qwen2.5-72B, DeepSeek-R1-70B, Llama-4 variants, Gemma-3, etc.)
 - [ ] Auto-select best Ollama model based on task type (coding vs reasoning vs creative)
 - [ ] Model benchmark dashboard — auto-benchmark new Ollama pulls
 
 ### Memory & context
+
 - [ ] **Long-context summarization** — multi-step compression when window fills
 - [ ] Persistent vector store with filtering by date/tags/persona
 - [ ] Memory pruning — auto-delete low-value or outdated memories
 
 ### Streaming & feedback
+
 - [ ] **Streaming token counter** — live input/output token count per response
 - [ ] Live confidence + reasoning trace badge in UI
 - [ ] Per-message feedback — 👍👎 stored as training signal

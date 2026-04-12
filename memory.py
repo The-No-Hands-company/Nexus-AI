@@ -153,3 +153,33 @@ def delete_all() -> None:
 
 def get_all() -> List[Dict]:
     return load_memory_entries(50)
+
+
+def get_semantic_memory(query: str, limit: int = 5) -> List[Dict]:
+    """Return memory entries relevant to *query* using vector search, falling back to recency."""
+    if query:
+        emb = _get_embed(query)
+        if emb:
+            coll = _get_collection()
+            if coll:
+                try:
+                    results = coll.query(
+                        query_embeddings=[emb],
+                        n_results=limit,
+                        include=["documents", "metadatas"],
+                    )
+                    docs = results.get("documents", [[]])[0]
+                    metas = results.get("metadatas", [{}])[0]
+                    return [
+                        {"summary": doc, "tags": meta.get("tags", "").split(","),
+                         "created_at": meta.get("ts", 0)}
+                        for doc, meta in zip(docs, metas)
+                    ]
+                except Exception:
+                    pass
+    return load_memory_entries(limit)
+
+
+def add_semantic_memory(summary: str, tags: List[str] | None = None) -> None:
+    """Alias for add_memory — stores entry in both sqlite and chroma."""
+    add_memory(summary, tags)

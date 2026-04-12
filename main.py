@@ -224,6 +224,138 @@ def health(): return {"status":"healthy","provider":get_config()["provider"]}
 def providers(): return {"providers":get_providers_list()}
 
 
+# ── OpenAI-compatible API (v1) ────────────────────────────────────────────────
+# Allows Nexusclaw, Nexus Computer, and any OpenAI-compatible client to use
+# Nexus AI as a drop-in API engine.  Set base_url to http://<host>:<port>/v1.
+#
+# Endpoints:
+#   GET  /v1/models                  – list available models
+#   POST /v1/chat/completions        – synchronous or streaming chat
+
+@app.get("/v1/models")
+def v1_models():
+    return {
+        "object": "list",
+        "data": [
+            {"id": "nexus-ai", "object": "model", "created": 0, "owned_by": "nexus-systems"},
+            {"id": "nexus-ai/auto", "object": "model", "created": 0, "owned_by": "nexus-systems"},
+        ] + [
+            {"id": f"nexus-ai/{p}", "object": "model", "created": 0, "owned_by": "nexus-systems"}
+            for p in get_providers_list()
+        ],
+    }
+
+@app.post("/v1/chat/completions")
+async def v1_chat_completions(request: Request):
+    data = await request.json()
+    messages: list = data.get("messages", [])
+    stream: bool = data.get("stream", False)
+    model: str = data.get("model", "nexus-ai")
+
+    if not messages:
+        return JSONResponse({"error": "messages is required"}, status_code=400)
+
+    # Separate system messages from conversation turns
+    system_parts = [m["content"] for m in messages if m.get("role") == "system"]
+    turns = [m for m in messages if m.get("role") != "system"]
+
+    if not turns or turns[-1].get("role") != "user":
+        return JSONResponse({"error": "Last message must be role=user"}, status_code=400)
+
+    # Extract the task (last user message — may be a string or content array)
+    raw_task = turns[-1].get("content", "")
+    if isinstance(raw_task, list):
+        task = " ".join(
+            part.get("text", "") for part in raw_task if part.get("type") == "text"
+        )
+    else:
+        task = str(raw_task)
+
+    # Prepend system instructions if present
+    if system_parts:
+        task = "[System instructions: " + " ".join(system_parts) + "]\n\n" + task
+
+    # History = all turns except the last user message, in Nexus AI internal format
+    history = [{"role": m["role"], "content": m["content"] if isinstance(m["content"], str)
+                else " ".join(p.get("text", "") for p in m["content"] if p.get("type") == "text")}
+               for m in turns[:-1]]
+
+    cid = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+
+    if stream:
+        # Stream SSE in OpenAI delta format
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+        stop_evt = threading.Event()
+
+        def _run():
+            try:
+                for evt in stream_agent_task(task, history, [], stop_evt):
+                    loop.call_soon_threadsafe(queue.put_nowait, evt)
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": str(e)})
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+        async def _generate():
+            full_content = ""
+            try:
+                while True:
+                    evt = await queue.get()
+                    if evt is None:
+                        break
+                    etype = evt.get("type", "")
+                    delta_text = None
+                    finish = None
+
+                    if etype == "done":
+                        full_content = evt.get("content", "")
+                        delta_text = full_content
+                        finish = "stop"
+                    elif etype == "think":
+                        delta_text = f"<think>{evt.get('thought', '')}</think>"
+                    elif etype == "tool":
+                        delta_text = f"\n[{evt.get('icon', '🔧')} {evt.get('action', 'tool')}]\n"
+                    elif etype == "error":
+                        delta_text = f"\nError: {evt.get('message', '')}"
+                        finish = "stop"
+
+                    if delta_text is not None:
+                        chunk = {
+                            "id": cid, "object": "chat.completion.chunk",
+                            "created": created, "model": model,
+                            "choices": [{"index": 0, "delta": {"content": delta_text}, "finish_reason": finish}],
+                        }
+                        yield f"data: {json.dumps(chunk)}\n\n"
+
+            except asyncio.CancelledError:
+                stop_evt.set()
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_generate(), media_type="text/event-stream",
+                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ── Non-streaming ──
+    sid = f"v1-{uuid.uuid4().hex[:8]}"
+    result = run_agent_task(task, history, [], sid=sid)
+    return {
+        "id": cid,
+        "object": "chat.completion",
+        "created": created,
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": result.get("result", "")},
+            "finish_reason": "stop",
+        }],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "_nexus": {"provider": result.get("provider", ""), "model": result.get("model", "")},
+    }
+
+
 # ── settings ──────────────────────────────────────────────────────────────────
 @app.get("/manifest.json")
 def manifest():
