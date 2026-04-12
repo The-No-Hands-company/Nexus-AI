@@ -8,9 +8,25 @@ A **self-hosted AI coding agent** with full tool-use, automatic provider fallbac
 - 🧠 **10+ providers** — Groq, Gemini, Cerebras, Mistral, OpenRouter, Cohere, GitHub Models, Ollama (local + `glm-5.1:cloud`), Grok, Claude
 - 🔄 **Auto-fallback** — silently moves to the next provider when rate-limited
 - 🧭 **Smart routing** — high-complexity tasks hit the strongest models first
-- 🛠️ **Tool-calling loop** — web search, code, file ops, repo ops, images, PDFs, YouTube, and more
+- ⚙️ **OpenAI-compatible API compatibility** — includes `/v1/embeddings`, `/v1/models`, `/v1/models/capabilities`, and strict `response_format=json` support
+- �️ **Centralized guardrail screening** — prompt injection and destructive-command checks for API requests
+- �🛠️ **Tool-calling loop** — web search, code, file ops, repo ops, images, PDFs, YouTube, and more
 - 📱 **PWA** — installable on mobile and desktop
 - 🐳 **One-command deploy** — Docker Compose with Ollama included
+
+---
+
+## Documentation
+
+See the `docs/` folder for project governance, architecture, security, roadmap, and contribution guidance:
+
+- `docs/ARCHITECTURE.md`
+- `docs/ROADMAP_FEATURES_V2.md`
+- `docs/SECURITY.md`
+- `docs/PROJECT_REFACTOR_PLAN.md`
+- `CONTRIBUTING.md`
+- `CODE_OF_CONDUCT.md`
+- `CHANGELOG.md`
 
 ---
 

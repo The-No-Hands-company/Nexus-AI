@@ -6,6 +6,18 @@
 
 ---
 
+## Execution Guardrails (Must Follow)
+
+- Build in dependency order, never feature order:
+  - Foundation contracts first (schemas, capability metadata, typed errors, tool interfaces)
+  - Runtime second (routing, orchestration, safety middleware, memory window management)
+  - UX third (dashboards, advanced views, visual controls)
+- Any roadmap item that depends on missing contracts is automatically blocked until the contract item is complete.
+- Any checked item must map to concrete code paths/endpoints before it stays checked.
+- New capability imports from VersaAI/Nexusclaw/DeerFlow/OSS are accepted only when they preserve Nexus AI's zero-friction default UX (`PROVIDER=auto`, no mandatory provider tuning by user).
+
+---
+
 ## ✅ Phase 0 — Foundation (Already Shipped)
 
 ### Core agent
@@ -221,6 +233,66 @@
 
 ---
 
+## External Capability Synthesis (Scanned Inputs -> Nexus AI Plan)
+
+### Frontier Reference Set (explicit)
+
+We actively benchmark and borrow ideas from widely used AI systems, including:
+
+- DeepSeek (reasoning quality, cost/performance routing)
+- Claude (tool-use reliability, long-context behavior)
+- GPT-5 class systems (broad capability consistency, structured output quality)
+- Gemini (multimodal handling and latency tradeoffs)
+- Grok (real-time style interactions and provider economics)
+- Open-weight ecosystem families (Llama, Qwen, Mistral, Gemma)
+
+Rule: borrow patterns and interfaces, not lock-in. Nexus AI remains self-hosted first and provider-agnostic.
+
+### Source A: VersaAI (deep internal scan)
+
+- Port first (foundation contracts):
+  - `api/schemas.py` style OpenAI-compatible request/response schema normalization
+  - `api/errors.py` style typed error taxonomy + status mapping
+  - `models/model_base.py` + `model_registry.py` interfaces for local model lifecycle
+  - `agents/tools/base.py` typed tool registry and safety levels
+  - `safety/types.py` canonical safety verdict model
+- Port second (high-leverage runtime):
+  - `memory/context_window.py` dynamic context compression
+  - `models/model_ensemble.py` consensus routing for high-risk tasks
+  - safety pipeline (`input_filter` -> `guardrails` -> `output_filter`)
+  - structured web search tool with citations and cache
+
+### Source B: Nexusclaw compatibility scan
+
+- Highest-priority Nexus AI contract gaps to close:
+  - `/v1/embeddings` endpoint for ecosystem compatibility
+  - model capability metadata (supports vision/json/tool-use/reasoning)
+  - explicit `response_format` JSON mode handling
+  - stable provider health/capability endpoint for orchestrators
+- Rule: prioritize compatibility endpoints before adding net-new UI features.
+
+### Source C: DeerFlow scan
+
+- Practical imports for next 1-2 months:
+  - generator-critic research loop with citation validation
+  - checkpointed long-running task orchestration
+  - deterministic replay for failed multi-step runs
+  - optional HITL checkpoints for risky actions (off by default)
+
+### Source D: Broader OSS AI patterns
+
+- Adopt:
+  - strict contract tests for OpenAI-compatible endpoints
+  - model/provider capability matrices feeding auto-router decisions
+  - auditable safety decision logs with low overhead
+- Avoid:
+  - exposing provider complexity in the default UX path
+  - coupling roadmap claims to unverified prototypes
+
+Execution artifact for this section: `EXTERNAL_BORROW_MATRIX.md` (concrete borrow matrix + sprint-ready implementation tickets).
+
+---
+
 ## 🔄 VersaAI Component Porting Tracker
 
 > Tracks which VersaAI subsystems have been ported into Nexus AI, what's in progress, and what's queued.
@@ -384,15 +456,40 @@
 
 ---
 
+## Immediate Execution Sequence (Next 3 Sprints)
+
+### Sprint A — Contracts and compatibility baseline
+
+- [x] Add `/v1/embeddings` with OpenAI-compatible schema and contract tests
+- [x] Add typed API error mapping (provider unavailable, context overflow, validation)
+- [x] Add model capability registry and expose it via health/capability endpoint
+- [x] Add strict `response_format` JSON mode behavior for orchestrator clients
+
+### Sprint B — Safety and reliability runtime
+
+- [ ] Add canonical safety types + centralized guardrail pipeline
+- [ ] Add context window manager with deterministic truncation/compression policy
+- [ ] Add replayable execution traces for multi-step tool runs
+- [ ] Add ensemble/consensus mode only for high-risk tasks
+
+### Sprint C — Research-quality outputs with zero-friction UX
+
+- [ ] Add generator-critic research flow with citation confidence scoring
+- [ ] Add checkpointed long-run task execution with resumability
+- [ ] Add optional HITL approval points for sensitive actions (default off)
+- [ ] Keep default user path unchanged: prompt -> response, with complexity hidden
+
+---
+
 ## How this keeps the user experience zero-friction
 
-- [x] **Multi-user auth** — JWT Bearer tokens, PBKDF2 password hashing, /auth/register + /auth/login + /auth/me endpoints
-- [x] **Rate limiting per user** — prevent one session exhausting all provider quota
-- [x] **Usage dashboard** — provider breakdown, token counts, estimated cost
-- [x] **Webhook triggers** — POST /webhook/trigger + GET /webhook/status/{run_id}, optional webhook secret validation
-- [x] **MCP server support** — configure external tools via MCP_TOOLS env var JSON, agent calls them with mcp_call action
-- [x] **Provider health monitoring** — detect degraded providers before they 429
-- [x] **Cost tracking** — estimate spend across paid providers (Grok, Claude)
+- [x] **Multi-user auth** — JWT Bearer tokens, PBKDF2 hashing, `/auth/register` + `/auth/login` + `/auth/me`
+- [ ] **Per-user rate limits** — not fully implemented yet; current implementation is per-session via `SESSION_RATE_LIMIT` (partial)
+- [x] **Usage dashboard** — `/usage` endpoint provides provider/token/cost summary
+- [x] **Webhook triggers** — `/webhook/trigger` + `/webhook/status/{run_id}` with optional `WEBHOOK_SECRET` validation
+- [x] **MCP server support** — `MCP_TOOLS` env var + `mcp_call` action path in agent tool loop
+- [x] **Provider health monitoring** — cooldown/state exposure via provider status endpoints and in-agent cooldown tracking
+- [x] **Cost tracking** — usage logging + estimated spend fields for paid providers
 - User opens Nexus AI → picks persona/mode (or "Auto") → types prompt → done
 - The massive model list, swarm of agents, multi-modal tools, and reasoning engines all run invisibly under `PROVIDER=auto`
 - Advanced users can open "Agent Console" or "Swarm View" to watch the empire at work
@@ -400,4 +497,4 @@
 
 ---
 
-*Last updated: April 2026*
+*Last updated: April 2026 (validated against current implementation)*

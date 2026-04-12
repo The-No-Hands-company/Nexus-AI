@@ -1,11 +1,14 @@
 """Nexus AI Memory - Phase 1 Super Intelligence Layer."""
 import os, time, threading
 from typing import List, Dict
-from db import (add_memory_entry, load_memory_entries,
-                delete_all_memory as _db_delete_all)
+from .db import (add_memory_entry, load_memory_entries,
+                  delete_all_memory as _db_delete_all,
+                  prune_memory_by_age as _db_prune_by_age)
 
-MEMORY_IN_CONTEXT = 5
-COLLECTION_NAME   = "nexus_memory"
+MEMORY_IN_CONTEXT  = 5
+COLLECTION_NAME    = "nexus_memory"
+MEMORY_MAX_AGE_DAYS = int(os.getenv("MEMORY_MAX_AGE_DAYS", "30"))
+MEMORY_MIN_KEEP     = int(os.getenv("MEMORY_MIN_KEEP", "5"))
 
 
 def _get_embed(text: str) -> List[float] | None:
@@ -178,6 +181,37 @@ def get_semantic_memory(query: str, limit: int = 5) -> List[Dict]:
                 except Exception:
                     pass
     return load_memory_entries(limit)
+
+
+def prune_old_memories(max_age_days: int | None = None, min_keep: int | None = None) -> int:
+    """Delete memory entries older than *max_age_days* days.
+
+    Always preserves at least *min_keep* most-recent entries (defaults to
+    MEMORY_MIN_KEEP env var or 5).
+
+    Returns the count of deleted SQLite rows; Chroma entries are pruned
+    best-effort by re-syncing from SQLite.
+    """
+    age_days = max_age_days if max_age_days is not None else MEMORY_MAX_AGE_DAYS
+    keep     = min_keep     if min_keep     is not None else MEMORY_MIN_KEEP
+    cutoff   = time.time() - age_days * 86400
+    deleted  = _db_prune_by_age(cutoff, keep)
+
+    # Best-effort Chroma prune: drop collection in a background thread so we
+    # never block the caller if Chroma is slow or unavailable.
+    if deleted:
+        def _drop_chroma():
+            try:
+                cl = _get_chroma()
+                if cl is not None:
+                    cl.delete_collection(COLLECTION_NAME)
+            except Exception:
+                pass
+        t = threading.Thread(target=_drop_chroma, daemon=True)
+        t.start()
+        t.join(timeout=2.0)   # give Chroma at most 2 s; silently abandon otherwise
+
+    return deleted
 
 
 def add_semantic_memory(summary: str, tags: List[str] | None = None) -> None:

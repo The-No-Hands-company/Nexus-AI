@@ -4,7 +4,7 @@ unit converter, regex tester, base64, JSON formatter, color info.
 """
 import os, re, json, math, base64 as b64lib
 from datetime import datetime
-from model_router import ModelRouter
+from .model_router import ModelRouter
 
 # ── CALCULATOR ────────────────────────────────────────────────────────────────
 _SAFE_NAMES = {k: v for k, v in math.__dict__.items() if not k.startswith('_')}
@@ -190,7 +190,7 @@ _RAG_SYSTEM = None
 def _get_rag_system():
     global _RAG_SYSTEM
     if _RAG_SYSTEM is None:
-        from rag.rag_system import RAGSystem
+        from .rag.rag_system import RAGSystem
         _RAG_SYSTEM = RAGSystem()
     return _RAG_SYSTEM
 

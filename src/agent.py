@@ -1,12 +1,14 @@
 import os, re, json, glob, time, subprocess, threading, resource
+from functools import lru_cache
 from datetime import datetime
 from typing import Dict, Any, List, Iterator, Optional
-from tools_builtin import dispatch_builtin
-from autonomy import Orchestrator, classify_subtask, PlanningSystem
-from personas import build_system_prompt, get_active_persona_name, get_persona
-from thinking import build_tot_prompt, parse_tot_response
-from thinking import build_tot_prompt, parse_tot_response
-from db import load_custom_instructions, log_usage, init_usage_table
+from .tools_builtin import dispatch_builtin
+from .autonomy import Orchestrator, classify_subtask, PlanningSystem
+from .personas import build_system_prompt, get_active_persona_name, get_persona
+from .thinking import build_tot_prompt, parse_tot_response, build_critique_prompt, parse_critique_response
+from .context_window import ContextWindowManager
+from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk
+from .db import load_custom_instructions, log_usage, init_usage_table
 try:
     init_usage_table()
 except Exception:
@@ -131,6 +133,36 @@ PROVIDER_TIERS = {
     "medium": ["groq","cerebras","cohere","github_models","nvidia"],
     "low":    ["llm7","groq","cerebras"],
 }
+
+# ── Mixture-of-Experts specialization routing ─────────────────────────────────
+PROVIDER_SPECIALIZATIONS: Dict[str, List[str]] = {
+    "coding":    ["ollama", "claude", "groq", "cerebras", "github_models"],
+    "research":  ["gemini", "grok", "openrouter", "claude", "mistral"],
+    "creative":  ["claude", "gemini", "mistral", "openrouter"],
+    "reasoning": ["ollama", "claude", "grok", "gemini"],
+}
+_CODING_RE   = re.compile(
+    r'\b(code|function|class|module|implement|debug|test|refactor|type\s*hint|'
+    r'fix.*bug|unit\s*test|write.*test|write.*file|build.*app|api|cli)\b', re.IGNORECASE)
+_RESEARCH_RE = re.compile(
+    r'\b(research|explain|summarize|compare|analyze|review|source|cite|'
+    r'find|what\s+is|how\s+does|why\s+does|read\s+page|web\s+search)\b', re.IGNORECASE)
+_CREATIVE_RE = re.compile(
+    r'\b(story|poem|image|design|imagine|draw|generate\s+image|creative|'
+    r'write.*story|brainstorm|logo|art)\b', re.IGNORECASE)
+_REASONING_RE = re.compile(
+    r'\b(reason|plan|architect|decide|strategy|think|solve|complex|hard)\b', re.IGNORECASE)
+
+
+def _task_specialization(task: str) -> Optional[str]:
+    """Return the specialization bucket for a task, or None."""
+    if _CODING_RE.search(task):   return "coding"
+    if _RESEARCH_RE.search(task): return "research"
+    if _CREATIVE_RE.search(task): return "creative"
+    if _REASONING_RE.search(task): return "reasoning"
+    return None
+
+
 _HIGH_RE = re.compile(
     r'\b(develop|implement|architect|refactor|build|create|design|'
     r'clone.*repo|continue.*development|add.*feature|fix.*bug|'
@@ -139,6 +171,78 @@ _HIGH_RE = re.compile(
 _MED_RE = re.compile(
     r'\b(explain|summarize|compare|analyze|review|suggest|improve|'
     r'read.*file|list.*files|search|find|what does)\b', re.IGNORECASE)
+
+# ── self-critique config ──────────────────────────────────────────────────────
+CRITIQUE_THRESHOLD = float(os.getenv("CRITIQUE_THRESHOLD", "0.75"))
+
+
+@lru_cache(maxsize=1)
+def _cpu_count() -> int:
+    try:
+        return os.cpu_count() or 1
+    except Exception:
+        return 1
+
+
+_RESOURCE_CACHE: Dict[str, Any] = {"ts": 0.0, "data": None}
+
+
+def get_system_resources(max_age_seconds: int = 10) -> Dict[str, Any]:
+    """Best-effort local resource probe used for adaptive model/provider routing."""
+    now = time.time()
+    cached = _RESOURCE_CACHE.get("data")
+    if cached is not None and now - float(_RESOURCE_CACHE.get("ts", 0.0)) < max_age_seconds:
+        return cached
+
+    total_kb = 0
+    avail_kb = 0
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    total_kb = int(line.split()[1])
+                elif line.startswith("MemAvailable:"):
+                    avail_kb = int(line.split()[1])
+    except Exception:
+        pass
+
+    total_gb = round(total_kb / (1024 * 1024), 2) if total_kb else None
+    available_gb = round(avail_kb / (1024 * 1024), 2) if avail_kb else None
+
+    load_1m = None
+    try:
+        load_1m = os.getloadavg()[0]
+    except Exception:
+        pass
+
+    cpu_count = _cpu_count()
+    cpu_load_ratio = round(load_1m / max(cpu_count, 1), 3) if load_1m is not None else None
+
+    data = {
+        "total_ram_gb": total_gb,
+        "available_ram_gb": available_gb,
+        "cpu_count": cpu_count,
+        "load_1m": load_1m,
+        "cpu_load_ratio": cpu_load_ratio,
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+    }
+    _RESOURCE_CACHE["ts"] = now
+    _RESOURCE_CACHE["data"] = data
+    return data
+
+
+def _resource_tier(resources: Dict[str, Any]) -> str:
+    """Convert local resource snapshot to a routing tier hint."""
+    available = resources.get("available_ram_gb")
+    load_ratio = resources.get("cpu_load_ratio")
+
+    if available is not None and available < 2.0:
+        return "constrained"
+    if available is not None and available < 4.0:
+        return "low"
+    if load_ratio is not None and load_ratio > 1.5:
+        return "low"
+    return "normal"
 
 def _score_complexity(task: str) -> str:
     if len(task) > 300 or _HIGH_RE.search(task): return "high"
@@ -157,12 +261,22 @@ def _is_rl_error(exc):
     return any(p in msg for p in ["rate limit","rate_limit","too many requests","quota","throttl"])
 def _has_key(cfg): return cfg.get("keyless",False) or bool(os.getenv(cfg["env_key"],"").strip())
 
-def _smart_order(task: str) -> List[str]:
+def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[str]:
     pref = _config["provider"]
     avail = {pid for pid,cfg in PROVIDERS.items() if _has_key(cfg) and not _is_rate_limited(pid)}
     complexity = _score_complexity(task)
-    tier_order = ["high","medium","low"] if complexity=="high" else \
-                 ["medium","low","high"] if complexity=="medium" else ["low","medium","high"]
+    resource_hint = _resource_tier(resources or get_system_resources())
+
+    if resource_hint == "constrained":
+        tier_order = ["low", "medium", "high"]
+        low_medium = set(PROVIDER_TIERS["low"] + PROVIDER_TIERS["medium"])
+        avail = {pid for pid in avail if pid in low_medium}
+    elif resource_hint == "low":
+        tier_order = ["low", "medium", "high"]
+    else:
+        tier_order = ["high","medium","low"] if complexity=="high" else \
+                     ["medium","low","high"] if complexity=="medium" else ["low","medium","high"]
+
     ordered: List[str] = []
     for tier in tier_order:
         for pid in PROVIDER_TIERS[tier]:
@@ -171,6 +285,15 @@ def _smart_order(task: str) -> List[str]:
         if pid in avail and pid not in ordered: ordered.append(pid)
     if pref != "auto" and pref in ordered:
         ordered.remove(pref); ordered.insert(0, pref)
+
+    # Mixture-of-Experts: boost specialist providers to front when task type detected
+    if pref == "auto" and resource_hint != "constrained":
+        spec = _task_specialization(task)
+        if spec:
+            preferred = [pid for pid in PROVIDER_SPECIALIZATIONS[spec] if pid in avail]
+            rest = [pid for pid in ordered if pid not in preferred]
+            ordered = preferred + rest
+
     return ordered
 
 # ── personas ──────────────────────────────────────────────────────────────────
@@ -707,7 +830,7 @@ def _try_direct(task: str) -> Optional[str]:
         return tool_get_time("UTC")
     m = _CURRENCY_RE.search(task)
     if m:
-        from tools_builtin import tool_currency
+        from .tools_builtin import tool_currency
         return tool_currency(float(m.group(1).replace(',','')), m.group(2), m.group(3))
     return None
 
@@ -765,6 +888,25 @@ def _build_content(text: str, files: List[Dict]) -> Any:
     parts.append({"type":"text","text":full})
     return parts
 
+
+def _estimate_tokens(text: str) -> int:
+    """Rough BPE estimate: ~4 chars per token."""
+    return max(1, len(text) // 4)
+
+
+def _messages_token_estimate(messages: List[Dict]) -> int:
+    total = 0
+    for m in messages:
+        c = m.get("content", "")
+        if isinstance(c, str):
+            total += _estimate_tokens(c)
+        elif isinstance(c, list):
+            for part in c:
+                if isinstance(part, dict):
+                    total += _estimate_tokens(part.get("text", ""))
+    return total
+
+
 def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
     import requests
     api_key = os.getenv(cfg["env_key"],"") or ("llm7" if cfg.get("keyless") else "")
@@ -809,10 +951,14 @@ class AllProvidersExhausted(Exception): pass
 
 def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, str]:
     import requests as _r
-    order = _smart_order(task or (messages[-1].get("content","") if messages else ""))
+    resources = get_system_resources()
+    order = _smart_order(task or (messages[-1].get("content","") if messages else ""), resources)
     if not order: raise AllProvidersExhausted("No providers available.")
     complexity = _score_complexity(task or "")
-    print(f"🧠 {complexity} → {' → '.join(order[:4])}")
+    resource_hint = _resource_tier(resources)
+    avail_ram = resources.get("available_ram_gb")
+    ram_txt = f"{avail_ram}GB" if avail_ram is not None else "unknown"
+    print(f"🧠 {complexity}/{resource_hint} (ram={ram_txt}) → {' → '.join(order[:4])}")
     last_err = None
     for pid in order:
         if _is_rate_limited(pid): continue
@@ -825,6 +971,50 @@ def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, 
             elif isinstance(e, (_r.ConnectionError, _r.Timeout)): print(f"⚠️ {pid} connection error")
             else: print(f"⚠️ {pid}: {e}")
     raise AllProvidersExhausted(f"All exhausted. Last: {last_err}")
+
+
+def call_llm_smart(
+    messages: List[Dict],
+    task: str = "",
+) -> tuple[Dict, str, Dict]:
+    """Route a single LLM call through ensemble mode when the task is high-risk,
+    otherwise use the standard fallback chain.
+
+    Returns:
+        (result_dict, provider_id, metadata_dict)
+
+    Metadata always contains at minimum:
+        ``ensemble``   — bool, True when consensus mode was used
+        ``risk_score`` — float produced by score_task_risk()
+    """
+    effective_task = task or (messages[-1].get("content", "") if messages else "")
+    risk = score_task_risk(effective_task)
+    meta: Dict[str, Any] = {"ensemble": False, "risk_score": risk}
+
+    if is_high_risk(effective_task):
+        print(f"🔴 High-risk task (score={risk:.2f}) — entering ensemble mode")
+        try:
+            result, pid, ens_meta = call_llm_ensemble(
+                messages=messages,
+                task=effective_task,
+                providers_fn=lambda t: _smart_order(t, get_system_resources()),
+                call_single_fn=_call_single,
+                is_rate_limited_fn=_is_rate_limited,
+                mark_rate_limited_fn=_mark_rate_limited,
+            )
+            meta.update(ens_meta)
+            if meta.get("ensemble"):
+                return result, pid, meta
+            # Ensemble fell below MIN_ENSEMBLE_SIZE — fall through to standard path.
+            print("⚠️  Ensemble insufficient — falling back to standard routing")
+        except Exception as exc:
+            print(f"⚠️  Ensemble failed ({exc}) — falling back")
+
+    # Standard single-provider-with-fallback path.
+    result, pid = call_llm_with_fallback(messages, effective_task)
+    meta["ensemble"] = False
+    return result, pid, meta
+
 
 def _maybe_compress_history(history: List[Dict]) -> List[Dict]:
     """If history is longer than 20 turns, keep first 2 + last 14 and add a summary marker."""
@@ -867,6 +1057,9 @@ TOOL_ICONS = {
 }
 
 # ── long-context compression ──────────────────────────────────────────────────
+CONTEXT_WINDOW = ContextWindowManager()
+
+# Legacy helper preserved for compatibility.
 MAX_HISTORY_TURNS = 20   # keep last N turns before summarising older ones
 
 def _compress_history(history: List[Dict]) -> List[Dict]:
@@ -957,8 +1150,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                       f"Original task: {clean_task}\n\n"
                       f"Now read key files, make improvements, commit and push.")
 
-    messages: List[Dict] = _maybe_compress_history(list(history))
+    messages: List[Dict] = CONTEXT_WINDOW.compress_history(list(history))
     messages.append({"role":"user","content":_build_content(clean_task, files or [])})
+    input_token_estimate = _messages_token_estimate(messages)
 
     providers_used: List[str] = []
     complexity = _score_complexity(clean_task)
@@ -972,10 +1166,17 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             return
 
         try:
-            action, pid = call_llm_with_fallback(messages, clean_task)
+            action, pid, _llm_meta = call_llm_smart(messages, clean_task)
+            if _llm_meta.get("ensemble"):
+                yield {"type": "ensemble",
+                       "unanimous": _llm_meta.get("unanimous"),
+                       "polled": _llm_meta.get("polled", []),
+                       "action_votes": _llm_meta.get("action_votes", {}),
+                       "risk_score": _llm_meta.get("risk_score", 0.0)}
         except AllProvidersExhausted as e:
             time.sleep(8)
-            try: action, pid = call_llm_with_fallback(messages, clean_task)
+            try:
+                action, pid, _llm_meta = call_llm_smart(messages, clean_task)
             except AllProvidersExhausted:
                 yield {"type":"error","message":str(e)+"\n\nAdd more API keys to avoid rate limits."}
                 return
@@ -984,7 +1185,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         if _is_bad_output(action):
             print(f"⚠️ Bad output from {pid}, retrying once…")
             try:
-                action, pid = call_llm_with_fallback(messages, clean_task)
+                action, pid, _ = call_llm_smart(messages, clean_task)
             except AllProvidersExhausted:
                 pass   # give up, use original bad output
 
@@ -1015,21 +1216,41 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
 
         if kind == "think_deep":
-            tot_prompt = build_tot_prompt(
-                action.get("query","") or action.get("thought",""),
-                action.get("mode","tree")
-            )
-            try:
-                result_action, _ = call_llm_with_fallback(
-                    [{"role":"user","content":tot_prompt}], tot_prompt
+            mode = action.get("mode", "tree")
+            query = action.get("query", "") or action.get("thought", "")
+            if mode == "critique":
+                # Self-critique an existing draft in the conversation
+                last_assistant = next(
+                    (m["content"] for m in reversed(messages)
+                     if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+                     and not m["content"].startswith("{") and len(m["content"]) > 20),
+                    query
                 )
-                parsed = parse_tot_response(json.dumps(result_action))
-                reasoning = parsed.get("reasoning", str(result_action))
-            except Exception as e:
-                reasoning = "Tree-of-Thought reasoning failed: " + str(e)
-            yield {"type":"think","thought":reasoning}
-            messages.append({"role":"assistant","content":json.dumps(action)})
-            messages.append({"role":"user","content":"Continue using that reasoning."})
+                crit_prompt = build_critique_prompt(last_assistant, clean_task)
+                try:
+                    crit_action, _ = call_llm_with_fallback(
+                        [{"role": "user", "content": crit_prompt}], crit_prompt
+                    )
+                    crit_parsed = parse_critique_response(json.dumps(crit_action))
+                    reasoning = f"**Critique:** {crit_parsed.get('critique', '')}"
+                    revised = crit_parsed.get("revised", "")
+                    if revised:
+                        reasoning += f"\n\n**Revised:** {revised}"
+                except Exception as e:
+                    reasoning = f"Self-critique failed: {e}"
+            else:
+                tot_prompt = build_tot_prompt(query, mode)
+                try:
+                    result_action, _, _ = call_llm_smart(
+                        [{"role": "user", "content": tot_prompt}], tot_prompt
+                    )
+                    parsed = parse_tot_response(json.dumps(result_action))
+                    reasoning = parsed.get("reasoning", str(result_action))
+                except Exception as e:
+                    reasoning = "Tree-of-Thought reasoning failed: " + str(e)
+            yield {"type": "think", "thought": reasoning}
+            messages.append({"role": "assistant", "content": json.dumps(action)})
+            messages.append({"role": "user", "content": "Continue using that reasoning."})
             continue
 
         if kind == "think":
@@ -1039,13 +1260,44 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             continue
 
         if kind == "respond":
-            final = action.get("content","")
-            messages.append({"role":"assistant","content":final})
-            cfg = PROVIDERS.get(providers_used[-1] if providers_used else "",{})
-            yield {"type":"done","content":final,
-                   "provider":cfg.get("label","?"),
-                   "model":_config["model"] or cfg.get("default_model","?"),
-                   "history":messages}
+            final = action.get("content", "")
+            confidence = float(action.get("confidence", 1.0) or 1.0)
+
+            # Self-critique loop: if confidence below threshold, ask the model to
+            # review and improve its own answer before returning it.
+            if confidence < CRITIQUE_THRESHOLD and final and len(final) > 40:
+                crit_prompt = build_critique_prompt(final, clean_task)
+                try:
+                    crit_action, _, _ = call_llm_smart(
+                        [{"role": "user", "content": crit_prompt}], crit_prompt
+                    )
+                    crit_parsed = parse_critique_response(json.dumps(crit_action))
+                    revised = crit_parsed.get("revised", "").strip()
+                    critique_text = crit_parsed.get("critique", "")
+                    if revised and len(revised) > 20:
+                        yield {"type": "critique",
+                               "original_confidence": confidence,
+                               "critique": critique_text,
+                               "revised_confidence": crit_parsed.get("confidence", confidence)}
+                        final = revised
+                except Exception:
+                    pass  # degrade gracefully; use original answer
+
+            messages.append({"role": "assistant", "content": final})
+            cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+            output_tokens = _estimate_tokens(final)
+            yield {
+                "type": "done",
+                "content": final,
+                "provider": cfg.get("label", "?"),
+                "model": _config["model"] or cfg.get("default_model", "?"),
+                "history": messages,
+                "tokens": {
+                    "input": input_token_estimate,
+                    "output": output_tokens,
+                    "total": input_token_estimate + output_tokens,
+                },
+            }
             return
 
         # Sub-agent: spawn a focused LLM call for a subtask
@@ -1127,7 +1379,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             goal = action.get("goal", "")
             max_subtasks = int(action.get("max_subtasks", 6))
             try:
-                from autonomy import PlanningSystem
+                from .autonomy import PlanningSystem
                 planner = PlanningSystem(_orchestrator_llm)
                 tasks = planner.decompose(goal, max_subtasks)
                 output = json.dumps([{
@@ -1263,20 +1515,31 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     final = "Reached max steps."
     messages.append({"role":"assistant","content":final})
     yield {"type":"done","content":final,"provider":cfg.get("label","?"),
-           "model":_config["model"] or cfg.get("default_model","?"),"history":messages}
+           "model":_config["model"] or cfg.get("default_model","?"),"history":messages,
+           "tokens":{"input":input_token_estimate,"output":1,"total":input_token_estimate+1}}
 
 # ── non-streaming wrapper ─────────────────────────────────────────────────────
 def run_agent_task(task, history, files=None, sid=""):
     tool_log, fallback_notice, final = [], "", None
+    ensemble_meta: Optional[Dict[str, Any]] = None
     for evt in stream_agent_task(task, history, files, sid=sid):
         if evt["type"]=="tool":        tool_log.append(f"{evt['icon']} **`{evt['action']}`** `{evt['label']}` → {evt['result']}")
         elif evt["type"]=="think":     tool_log.append(f"💭 *{evt['thought']}*")
         elif evt["type"]=="fallback":  fallback_notice = f"*↩️ Auto-fallback: {evt['chain']}*\n\n"
+        elif evt["type"]=="ensemble":  ensemble_meta = evt
         elif evt["type"] in ("done","error"): final = evt
     if not final: return {"result":"No response.","history":history,"provider":"?","model":"?"}
     if final["type"]=="error": return {"result":f"❌ {final['message']}","history":history,"provider":"none","model":"none"}
     shown = (fallback_notice + ("\n\n".join(tool_log)+"\n\n---\n\n" if tool_log else "") + final["content"])
-    return {"result":shown,"history":final.get("history",history),"provider":final["provider"],"model":final["model"]}
+    out: Dict[str, Any] = {
+        "result": shown,
+        "history": final.get("history", history),
+        "provider": final["provider"],
+        "model": final["model"],
+    }
+    if ensemble_meta:
+        out["ensemble"] = ensemble_meta
+    return out
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 def get_providers_list():
