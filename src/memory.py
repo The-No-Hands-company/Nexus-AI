@@ -66,7 +66,7 @@ def _get_collection():
         return None
 
 
-def add_memory(summary: str, tags: List[str] | None = None) -> None:
+def add_memory(summary: str, tags: List[str] | None = None, persona: str = "") -> None:
     tags = tags or []
     add_memory_entry(summary, tags, time.time())
     emb = _get_embed(summary)
@@ -77,7 +77,7 @@ def add_memory(summary: str, tags: List[str] | None = None) -> None:
                 coll.add(
                     embeddings=[emb],
                     documents=[summary],
-                    metadatas=[{"tags": ",".join(tags), "ts": time.time()}],
+                    metadatas=[{"tags": ",".join(tags), "ts": time.time(), "persona": persona}],
                     ids=[f"mem_{int(time.time() * 1000)}"],
                 )
             except Exception:
@@ -160,27 +160,87 @@ def get_all() -> List[Dict]:
 
 def get_semantic_memory(query: str, limit: int = 5) -> List[Dict]:
     """Return memory entries relevant to *query* using vector search, falling back to recency."""
+    return get_semantic_memory_filtered(query, limit)
+
+
+def get_semantic_memory_filtered(
+    query: str,
+    limit: int = 5,
+    date_from: float | None = None,
+    date_to: float | None = None,
+    tags: List[str] | None = None,
+    persona: str | None = None,
+) -> List[Dict]:
+    """Filtered semantic memory search.
+
+    Supports optional date range (unix timestamps), tags (substring match),
+    and persona filter.  Falls back to recency-ordered SQLite when Chroma is
+    unavailable.
+    """
+    # Build Chroma where-clause if any filter is active
+    where: dict | None = None
+    conditions: list[dict] = []
+    if date_from is not None:
+        conditions.append({"ts": {"$gte": date_from}})
+    if date_to is not None:
+        conditions.append({"ts": {"$lte": date_to}})
+    if persona:
+        conditions.append({"persona": {"$eq": persona}})
+    if len(conditions) == 1:
+        where = conditions[0]
+    elif len(conditions) > 1:
+        where = {"$and": conditions}
+
     if query:
         emb = _get_embed(query)
         if emb:
             coll = _get_collection()
             if coll:
                 try:
-                    results = coll.query(
-                        query_embeddings=[emb],
-                        n_results=limit,
-                        include=["documents", "metadatas"],
-                    )
-                    docs = results.get("documents", [[]])[0]
+                    kwargs: dict = {
+                        "query_embeddings": [emb],
+                        "n_results": limit * 3,   # over-fetch to allow tag post-filter
+                        "include": ["documents", "metadatas"],
+                    }
+                    if where:
+                        kwargs["where"] = where
+                    results = coll.query(**kwargs)
+                    docs  = results.get("documents", [[]])[0]
                     metas = results.get("metadatas", [{}])[0]
-                    return [
-                        {"summary": doc, "tags": meta.get("tags", "").split(","),
-                         "created_at": meta.get("ts", 0)}
+                    entries = [
+                        {
+                            "summary":    doc,
+                            "tags":       meta.get("tags", "").split(","),
+                            "created_at": meta.get("ts", 0),
+                            "persona":    meta.get("persona", ""),
+                        }
                         for doc, meta in zip(docs, metas)
                     ]
+                    # Post-filter by tags (substring match against comma-joined tag string)
+                    if tags:
+                        entries = [
+                            e for e in entries
+                            if any(t.lower() in e["tags"] for t in tags)
+                        ]
+                    return entries[:limit]
                 except Exception:
                     pass
-    return load_memory_entries(limit)
+
+    # SQLite fallback with in-process filtering
+    all_entries = load_memory_entries(200)
+    filtered = all_entries
+    if date_from is not None:
+        filtered = [e for e in filtered if e.get("created_at", 0) >= date_from]
+    if date_to is not None:
+        filtered = [e for e in filtered if e.get("created_at", 0) <= date_to]
+    if tags:
+        filtered = [
+            e for e in filtered
+            if any(t.lower() in [tag.lower() for tag in e.get("tags", [])] for t in tags)
+        ]
+    if persona:
+        filtered = [e for e in filtered if e.get("persona", "") == persona]
+    return filtered[:limit]
 
 
 def prune_old_memories(max_age_days: int | None = None, min_keep: int | None = None) -> int:

@@ -148,28 +148,28 @@
 
 ### Advanced reasoning
 
-- [ ] **Graph-of-Thought** — graph-based reasoning beyond tree (agentic loops)
-- [ ] **Self-critique loop** — agent reviews own answer before responding
-- [ ] **Cross-model consensus** — run same task on 3 models, reconcile results
-- [ ] **Mixture-of-Experts routing** — route subtasks to specialist model variants
+- [x] **Graph-of-Thought** — graph-based reasoning beyond tree (Sprint D)
+- [x] **Self-critique loop** — agent reviews own answer before responding (Sprint C)
+- [x] **Cross-model consensus** — run same task on 3 models, reconcile results (Sprint D)
+- [x] **Mixture-of-Experts routing** — route subtasks to specialist model variants (Sprint C)
 
 ### Model expansion
 
 - [ ] Add 20+ more Ollama/cloud models by default (Qwen2.5-72B, DeepSeek-R1-70B, Llama-4 variants, Gemma-3, etc.)
 - [ ] Auto-select best Ollama model based on task type (coding vs reasoning vs creative)
-- [ ] Model benchmark dashboard — auto-benchmark new Ollama pulls
+- [x] Model benchmark dashboard — auto-benchmark new Ollama pulls (Sprint D)
 
 ### Memory & context
 
-- [ ] **Long-context summarization** — multi-step compression when window fills
-- [ ] Persistent vector store with filtering by date/tags/persona
-- [ ] Memory pruning — auto-delete low-value or outdated memories
+- [x] **Long-context summarization** — multi-step compression when window fills (Sprint D)
+- [x] Persistent vector store with filtering by date/tags/persona (Sprint E)
+- [x] Memory pruning — auto-delete low-value or outdated memories (Sprint C)
 
 ### Streaming & feedback
 
-- [ ] **Streaming token counter** — live input/output token count per response
-- [ ] Live confidence + reasoning trace badge in UI
-- [ ] Per-message feedback — 👍👎 stored as training signal
+- [x] **Streaming token counter** — live input/output token count per response (Sprint E)
+- [x] Live confidence + reasoning trace badge in UI — SSE events (Sprint E)
+- [x] Per-message feedback — 👍👎 stored as training signal (Sprint E)
 
 ---
 

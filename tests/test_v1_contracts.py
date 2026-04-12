@@ -385,3 +385,409 @@ class TestSprintC(unittest.TestCase):
         self.assertGreaterEqual(len(remaining), 2)
 
 
+class TestSprintD(unittest.TestCase):
+    """Sprint D — Graph-of-Thought, cross-model consensus, LLM context compression,
+    model benchmark endpoints."""
+
+    # ── Graph-of-Thought ─────────────────────────────────────────────────────
+
+    def test_got_prompt_contains_graph_terminology(self):
+        from src.thinking import build_got_prompt
+        prompt = build_got_prompt("How does a neural network learn?")
+        for term in ("nodes", "edges", "conclusion", "merges"):
+            self.assertIn(term, prompt.lower())
+
+    def test_parse_got_response_valid_json(self):
+        import json
+        from src.thinking import parse_got_response
+        payload = json.dumps({
+            "nodes":   [{"id": "n1", "thought": "Weights are adjusted."},
+                        {"id": "n2", "thought": "Gradient descent minimises loss."}],
+            "edges":   [{"from": "n1", "to": "n2", "relation": "feeds"}],
+            "merges":  [{"inputs": ["n1", "n2"], "output": "n3", "synthesis": "Backprop updates weights."}],
+            "conclusion": "Neural networks learn via backpropagation.",
+            "confidence": 0.92,
+        })
+        result = parse_got_response(payload)
+        self.assertEqual(len(result["nodes"]), 2)
+        self.assertEqual(len(result["edges"]), 1)
+        self.assertEqual(len(result["merges"]), 1)
+        self.assertAlmostEqual(result["confidence"], 0.92)
+        self.assertIn("Neural networks", result["conclusion"])
+        self.assertIn("n1", result["reasoning"])
+
+    def test_parse_got_response_fallback_on_bad_json(self):
+        from src.thinking import parse_got_response
+        result = parse_got_response("not valid json {{{")
+        self.assertEqual(result["nodes"], [])
+        self.assertEqual(result["edges"], [])
+        self.assertAlmostEqual(result["confidence"], 0.5)
+        self.assertEqual(result["reasoning"], "not valid json {{{")
+
+    # ── Cross-model consensus helpers ─────────────────────────────────────────
+
+    def test_parse_consensus_response_valid_json(self):
+        import json
+        from src.thinking import parse_consensus_response
+        payload = json.dumps({
+            "approach1": "Option A",
+            "approach2": "Option B",
+            "approach3": "Option C",
+            "consensus": "The best answer is A because…",
+            "confidence": 0.88,
+        })
+        result = parse_consensus_response(payload)
+        self.assertEqual(result["consensus"], "The best answer is A because…")
+        self.assertAlmostEqual(result["confidence"], 0.88)
+
+    def test_parse_consensus_response_fallback(self):
+        from src.thinking import parse_consensus_response
+        result = parse_consensus_response("malformed")
+        self.assertEqual(result["consensus"], "malformed")
+        self.assertAlmostEqual(result["confidence"], 0.5)
+
+    def test_call_llm_consensus_returns_text_and_meta(self):
+        from src.ensemble import call_llm_consensus
+
+        def _providers(task):
+            return ["p1", "p2", "p3"]
+
+        def _call(pid, msgs):
+            return {"action": "respond", "content": f"Answer from {pid}"}
+
+        text, pid, meta = call_llm_consensus(
+            messages=[{"role": "user", "content": "What is 2+2?"}],
+            task="What is 2+2?",
+            providers_fn=_providers,
+            call_single_fn=_call,
+            is_rate_limited_fn=lambda p: False,
+            mark_rate_limited_fn=lambda p: None,
+        )
+        self.assertIsInstance(text, str)
+        self.assertIn(pid, ("p1", "p2", "p3"))
+        self.assertIn("texts", meta)
+        self.assertTrue(meta.get("ensemble"))
+
+    def test_call_llm_consensus_falls_back_on_single_provider(self):
+        from src.ensemble import call_llm_consensus
+
+        def _providers(task):
+            return ["solo"]
+
+        def _call(pid, msgs):
+            return {"action": "respond", "content": "Solo answer"}
+
+        text, pid, meta = call_llm_consensus(
+            messages=[{"role": "user", "content": "test"}],
+            task="test",
+            providers_fn=_providers,
+            call_single_fn=_call,
+            is_rate_limited_fn=lambda p: False,
+            mark_rate_limited_fn=lambda p: None,
+        )
+        self.assertEqual(text, "Solo answer")
+        self.assertFalse(meta.get("ensemble"))
+
+    # ── LLM-backed context compression ───────────────────────────────────────
+
+    def test_compress_with_llm_calls_summarizer(self):
+        from src.context_window import ContextWindowManager, ContextWindowConfig
+
+        calls = []
+
+        def fake_summarizer(prompt: str) -> str:
+            calls.append(prompt)
+            return "Summary of earlier conversation."
+
+        cfg = ContextWindowConfig(max_turns=4, min_head_turns=1, min_tail_turns=2)
+        mgr = ContextWindowManager(cfg)
+
+        history = []
+        for i in range(10):
+            history.append({"role": "user", "content": f"User message {i}"})
+            history.append({"role": "assistant", "content": f"Assistant reply {i}"})
+
+        result = mgr.compress_history_with_llm(history, fake_summarizer)
+        self.assertGreater(len(calls), 0, "summarizer should have been called")
+        self.assertLess(len(result), len(history))
+        self.assertTrue(any("Summary" in m.get("content", "") for m in result))
+
+    def test_compress_with_llm_no_compression_when_short(self):
+        from src.context_window import ContextWindowManager, ContextWindowConfig
+
+        called = []
+
+        def fake_summarizer(prompt: str) -> str:
+            called.append(prompt)
+            return "summary"
+
+        cfg = ContextWindowConfig(max_turns=20)
+        mgr = ContextWindowManager(cfg)
+        short_history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+        result = mgr.compress_history_with_llm(short_history, fake_summarizer)
+        self.assertEqual(result, short_history)
+        self.assertEqual(len(called), 0)
+
+    # ── Benchmark endpoints ───────────────────────────────────────────────────
+
+    def test_benchmark_results_endpoint_returns_list(self):
+        response = client.get("/benchmark/results")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("results", payload)
+        self.assertIsInstance(payload["results"], list)
+
+    @patch("src.agent._call_single")
+    def test_benchmark_run_endpoint_stores_results(self, mock_call):
+        mock_call.return_value = {"action": "respond", "content": "42"}
+        response = client.post("/benchmark/run", json={"providers": []})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("results", payload)
+
+    # ── Consensus endpoint ────────────────────────────────────────────────────
+
+    def test_reason_consensus_missing_task_returns_422(self):
+        response = client.post("/reason/consensus", json={})
+        self.assertEqual(response.status_code, 422)
+
+    @patch("src.ensemble.call_llm_consensus")
+    def test_reason_consensus_returns_reconciled_answer(self, mock_consensus):
+        mock_consensus.return_value = (
+            "The answer is 4.",
+            "groq",
+            {"ensemble": True, "unanimous": True, "polled": ["groq", "llm7"]},
+        )
+        response = client.post("/reason/consensus", json={"task": "What is 2+2?"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["consensus"], "The answer is 4.")
+        self.assertEqual(payload["provider"], "groq")
+        self.assertTrue(payload["ensemble"])
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# Sprint E — Filtered memory, per-message feedback, SSE token/confidence/trace
+# ════════════════════════════════════════════════════════════════════════════
+
+
+class TestSprintE(unittest.TestCase):
+
+    # ── get_semantic_memory_filtered ─────────────────────────────────────────
+
+    def test_filtered_memory_returns_list_without_chroma(self):
+        """Should fall back to SQLite and return a list even with no Chroma."""
+        from src.memory import get_semantic_memory_filtered
+        result = get_semantic_memory_filtered("test query", limit=5)
+        self.assertIsInstance(result, list)
+
+    def test_filtered_memory_date_from_filters_out_old(self):
+        """Entries before date_from should be excluded in the SQLite fallback."""
+        import time
+        from src.memory import get_semantic_memory_filtered
+        from src.db import add_memory_entry
+
+        far_future = time.time() + 999999
+        result = get_semantic_memory_filtered(
+            "anything",
+            limit=10,
+            date_from=far_future,
+        )
+        self.assertEqual(result, [], "No entries should be newer than a far-future date")
+
+    def test_filtered_memory_date_to_filters_out_recent(self):
+        """Entries after date_to should be excluded in the SQLite fallback."""
+        from src.memory import get_semantic_memory_filtered
+
+        result = get_semantic_memory_filtered(
+            "anything",
+            limit=10,
+            date_to=0.0,   # epoch — nothing is older than this
+        )
+        self.assertEqual(result, [])
+
+    def test_filtered_memory_tag_filter(self):
+        """Tag filter should only return entries whose tags include the requested tag."""
+        import time
+        from src.db import add_memory_entry
+        from src.memory import get_semantic_memory_filtered
+
+        ts = time.time()
+        add_memory_entry("tagged entry for sprint E test", ["sprintE_unique_tag"], ts)
+        results = get_semantic_memory_filtered(
+            "",
+            limit=20,
+            tags=["sprintE_unique_tag"],
+        )
+        self.assertTrue(
+            any("sprintE_unique_tag" in e.get("tags", []) for e in results),
+            "Should find the entry with tag 'sprintE_unique_tag'",
+        )
+
+    def test_filtered_memory_persona_filter_excludes_others(self):
+        """Persona filter should exclude entries saved under a different persona."""
+        from src.memory import get_semantic_memory_filtered
+
+        result = get_semantic_memory_filtered(
+            "",
+            limit=10,
+            persona="__nonexistent_persona_xyz__",
+        )
+        self.assertIsInstance(result, list)
+        for e in result:
+            self.assertEqual(e.get("persona", ""), "__nonexistent_persona_xyz__")
+
+    # ── /memory/search endpoint ──────────────────────────────────────────────
+
+    def test_memory_search_endpoint_returns_results_key(self):
+        response = client.get("/memory/search?q=test")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("results", payload)
+        self.assertIn("count", payload)
+        self.assertIsInstance(payload["results"], list)
+
+    def test_memory_search_endpoint_date_filter_param(self):
+        response = client.get("/memory/search?q=hello&date_from=0&date_to=1")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["results"], [])
+
+    # ── feedback DB layer ────────────────────────────────────────────────────
+
+    def test_save_and_load_feedback(self):
+        import time
+        from src.db import save_feedback, load_feedback_export
+
+        save_feedback("chat_test_001", 3, "thumbs_up", provider="groq", model="llama3")
+        export = load_feedback_export(100)
+        self.assertTrue(
+            any(e["chat_id"] == "chat_test_001" and e["message_idx"] == 3 for e in export),
+            "Saved feedback should appear in export",
+        )
+
+    def test_feedback_upsert_updates_reaction(self):
+        """Saving feedback twice for the same message should update, not duplicate."""
+        from src.db import save_feedback, load_feedback_export
+
+        save_feedback("chat_upsert_test", 0, "thumbs_up")
+        save_feedback("chat_upsert_test", 0, "thumbs_down")
+        export = load_feedback_export(1000)
+        matching = [e for e in export if e["chat_id"] == "chat_upsert_test" and e["message_idx"] == 0]
+        self.assertEqual(len(matching), 1, "Upsert should yield exactly one row")
+        self.assertEqual(matching[0]["reaction"], "thumbs_down")
+
+    def test_get_feedback_stats_keys(self):
+        from src.db import get_feedback_stats
+        stats = get_feedback_stats()
+        self.assertIn("total", stats)
+        self.assertIn("up", stats)
+        self.assertIn("down", stats)
+
+    # ── /feedback endpoints ──────────────────────────────────────────────────
+
+    def test_feedback_endpoint_invalid_reaction_returns_422(self):
+        response = client.post("/feedback/chat_001/0", json={"reaction": "meh"})
+        self.assertEqual(response.status_code, 422)
+
+    def test_feedback_endpoint_valid_thumbs_up(self):
+        response = client.post(
+            "/feedback/chat_sprint_e/5",
+            json={"reaction": "thumbs_up", "provider": "groq", "model": "llama3"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["saved"])
+        self.assertEqual(payload["reaction"], "thumbs_up")
+
+    def test_feedback_export_endpoint(self):
+        response = client.get("/feedback/export")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("stats", payload)
+        self.assertIn("count", payload)
+        self.assertIn("data", payload)
+        self.assertIsInstance(payload["data"], list)
+
+    def test_feedback_stats_endpoint(self):
+        response = client.get("/feedback/stats")
+        self.assertEqual(response.status_code, 200)
+        stats = response.json()
+        self.assertIn("total", stats)
+        self.assertIn("up", stats)
+        self.assertIn("down", stats)
+
+    # ── SSE token_count / confidence / trace events ──────────────────────────
+
+    def test_stream_emits_confidence_event(self):
+        """stream_agent_task should emit a 'confidence' event before 'done'."""
+        from unittest.mock import patch
+        from src.agent import stream_agent_task
+
+        fake_action = {"action": "respond", "content": "hello", "confidence": 0.92}
+        with patch("src.agent.call_llm_smart", return_value=(fake_action, "llm7", {})):
+            events = list(stream_agent_task("hi", [], sid=""))
+        types = [e["type"] for e in events]
+        self.assertIn("confidence", types, "Expected a 'confidence' SSE event")
+        conf_event = next(e for e in events if e["type"] == "confidence")
+        self.assertAlmostEqual(conf_event["value"], 0.92, places=2)
+
+    def test_stream_emits_token_count_event(self):
+        """stream_agent_task should emit a 'token_count' event before 'done'."""
+        from unittest.mock import patch
+        from src.agent import stream_agent_task
+
+        fake_action = {"action": "respond", "content": "hello world", "confidence": 1.0}
+        with patch("src.agent.call_llm_smart", return_value=(fake_action, "llm7", {})):
+            events = list(stream_agent_task("hi", [], sid=""))
+        types = [e["type"] for e in events]
+        self.assertIn("token_count", types, "Expected a 'token_count' SSE event")
+        tc_event = next(e for e in events if e["type"] == "token_count")
+        self.assertIn("in_tokens", tc_event)
+        self.assertIn("out_tokens", tc_event)
+        self.assertIn("total", tc_event)
+
+    def test_stream_emits_trace_event_after_think(self):
+        """A think step followed by respond should emit a 'trace' SSE event."""
+        from unittest.mock import patch
+        from src.agent import stream_agent_task
+
+        think_action  = {"action": "think",  "thought": "Let me consider…"}
+        respond_action = {"action": "respond", "content": "Here is the answer.", "confidence": 0.9}
+        call_count = {"n": 0}
+
+        def _fake_smart(msgs, task, *a, **kw):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return (think_action,  "llm7", {})
+            return (respond_action, "llm7", {})
+
+        with patch("src.agent.call_llm_smart", side_effect=_fake_smart):
+            events = list(stream_agent_task("explain something", [], sid=""))
+        types = [e["type"] for e in events]
+        self.assertIn("trace", types, "Expected a 'trace' SSE event after reasoning steps")
+        trace_event = next(e for e in events if e["type"] == "trace")
+        self.assertIsInstance(trace_event["steps"], list)
+        self.assertGreater(len(trace_event["steps"]), 0)
+
+    def test_token_count_event_ordering(self):
+        """token_count and confidence events must appear before 'done'."""
+        from unittest.mock import patch
+        from src.agent import stream_agent_task
+
+        fake_action = {"action": "respond", "content": "ok", "confidence": 0.8}
+        with patch("src.agent.call_llm_smart", return_value=(fake_action, "llm7", {})):
+            events = list(stream_agent_task("hi", [], sid=""))
+        types = [e["type"] for e in events]
+        done_idx = types.index("done")
+        self.assertLess(
+            types.index("confidence"), done_idx,
+            "'confidence' must come before 'done'",
+        )
+        self.assertLess(
+            types.index("token_count"), done_idx,
+            "'token_count' must come before 'done'",
+        )
+
+
+
