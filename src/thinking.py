@@ -1,5 +1,6 @@
 """
-Phase 1 reasoning helpers — Tree-of-Thought, self-critique, cross-model consensus.
+Phase 1 reasoning helpers — Tree-of-Thought, Graph-of-Thought, self-critique,
+cross-model consensus.
 """
 import json
 
@@ -72,3 +73,85 @@ def parse_critique_response(response: str) -> dict:
         return json.loads(response)
     except Exception:
         return {"critique": response, "revised": response, "confidence": 0.5}
+
+
+def build_got_prompt(query: str) -> str:
+    """Build a Graph-of-Thought reasoning prompt.
+
+    Unlike Tree-of-Thought (which only branches), GoT allows thoughts to
+    merge back and cross-reference, enabling richer synthesis.
+    """
+    return (
+        "You are performing Graph-of-Thought reasoning.\n\n"
+        "Question: " + query + "\n\n"
+        "Build a directed reasoning graph:\n"
+        "  - NODES: individual atomic thoughts / sub-conclusions\n"
+        "  - EDGES: which node's insight feeds into which\n"
+        "  - MERGES: where multiple branches converge\n"
+        "  - CONCLUSION: the final synthesised answer after traversing the graph\n\n"
+        'Reply ONLY with valid JSON:\n'
+        '{"nodes": [{"id": "n1", "thought": "..."}], '
+        '"edges": [{"from": "n1", "to": "n2", "relation": "supports"}], '
+        '"merges": [{"inputs": ["n2", "n3"], "output": "n4", "synthesis": "..."}], '
+        '"conclusion": "<final answer>", "confidence": 0.9}'
+    )
+
+
+def parse_got_response(response: str) -> dict:
+    """Parse a Graph-of-Thought LLM response.
+
+    Returns a dict with at minimum:
+        nodes, edges, merges, conclusion, confidence, reasoning (human-readable)
+    """
+    try:
+        data = json.loads(response)
+        nodes = data.get("nodes", [])
+        edges = data.get("edges", [])
+        merges = data.get("merges", [])
+        conclusion = data.get("conclusion", "")
+
+        lines = []
+        if nodes:
+            lines.append("**Thought nodes:**")
+            for n in nodes:
+                lines.append(f"  [{n.get('id','?')}] {n.get('thought','')}")
+        if edges:
+            lines.append("\n**Reasoning edges:**")
+            for e in edges:
+                lines.append(
+                    f"  {e.get('from','?')} → {e.get('to','?')}"
+                    + (f" ({e.get('relation','')})" if e.get("relation") else "")
+                )
+        if merges:
+            lines.append("\n**Merge points:**")
+            for m in merges:
+                inputs = ", ".join(m.get("inputs", []))
+                lines.append(f"  [{inputs}] → [{m.get('output','?')}]: {m.get('synthesis','')}")
+        if conclusion:
+            lines.append(f"\n**Conclusion:** {conclusion}")
+
+        reasoning = "\n".join(lines) if lines else str(data)
+        return {"nodes": nodes, "edges": edges, "merges": merges,
+                "conclusion": conclusion, "confidence": data.get("confidence", 0.8),
+                "reasoning": reasoning, "data": data}
+    except Exception:
+        return {"nodes": [], "edges": [], "merges": [], "conclusion": response,
+                "confidence": 0.5, "reasoning": response, "data": {}}
+
+
+def parse_consensus_response(response: str) -> dict:
+    """Parse a cross-model consensus LLM response (from build_consensus_prompt)."""
+    try:
+        data = json.loads(response)
+        return {
+            "approach1":  data.get("approach1", ""),
+            "approach2":  data.get("approach2", ""),
+            "approach3":  data.get("approach3", ""),
+            "consensus":  data.get("consensus", ""),
+            "confidence": float(data.get("confidence", 0.8)),
+        }
+    except Exception:
+        return {
+            "approach1": "", "approach2": "", "approach3": "",
+            "consensus": response, "confidence": 0.5,
+        }

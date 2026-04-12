@@ -201,3 +201,47 @@ def call_llm_ensemble(
         )
 
     return chosen, winning_pid, meta
+
+
+def call_llm_consensus(
+    messages: List[Dict],
+    task: str,
+    providers_fn: Callable[[str], List[str]],
+    call_single_fn: Callable[[str, List[Dict]], Dict],
+    is_rate_limited_fn: Callable[[str], bool],
+    mark_rate_limited_fn: Callable[[str], None],
+) -> Tuple[str, str, Dict[str, Any]]:
+    """Run the same task through up to ENSEMBLE_SIZE providers and reconcile
+    their *text content* into a single consensus answer.
+
+    Unlike ``call_llm_ensemble`` (which reconciles at the action/JSON level),
+    this function is intended for free-text reasoning tasks where the caller
+    needs a synthesised narrative rather than a structured action choice.
+
+    Returns:
+        (consensus_text, winning_provider_id, metadata_dict)
+
+    Metadata keys (superset of call_llm_ensemble metadata):
+        ensemble      — bool
+        polled        — list[str]
+        succeeded     — list[str]
+        texts         — dict mapping provider_id → extracted text
+        errors        — dict mapping provider_id → error string
+    """
+    chosen, winning_pid, meta = call_llm_ensemble(
+        messages=messages,
+        task=task,
+        providers_fn=providers_fn,
+        call_single_fn=call_single_fn,
+        is_rate_limited_fn=is_rate_limited_fn,
+        mark_rate_limited_fn=mark_rate_limited_fn,
+    )
+
+    # Extract text-level content from the winning response
+    if isinstance(chosen, dict):
+        text = chosen.get("content") or chosen.get("thought") or chosen.get("consensus") or str(chosen)
+    else:
+        text = str(chosen)
+
+    meta["texts"] = {winning_pid: text}
+    return text, winning_pid, meta

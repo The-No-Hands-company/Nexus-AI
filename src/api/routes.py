@@ -519,7 +519,111 @@ async def add_semantic_mem(request: Request):
         return {"error": str(e)}
 
 
-# ── RAG endpoints ─────────────────────────────────────────────────────────────
+# ── Benchmark endpoints ────────────────────────────────────────────────────────
+_BENCHMARK_PROBES = [
+    ("arithmetic",  "What is 17 * 23?"),
+    ("reasoning",   "If all roses are flowers and some flowers fade quickly, can we conclude that some roses fade quickly?"),
+    ("coding",      "Write a one-line Python expression to reverse a string."),
+]
+
+@app.post("/benchmark/run")
+async def benchmark_run(request: Request):
+    """Run a lightweight probe suite against all available providers and store results.
+
+    Returns per-provider latency and response length for each probe.
+    POST body is optional; set ``providers`` (list) to limit which providers to benchmark.
+    """
+    import time as _t
+    from ..db import save_benchmark_result
+    from ..agent import _call_single, _has_key, PROVIDERS, _is_rate_limited
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    requested_providers = body.get("providers") or []
+    available = [
+        pid for pid, cfg in PROVIDERS.items()
+        if _has_key(cfg) and not _is_rate_limited(pid)
+    ]
+    target_providers = [p for p in requested_providers if p in available] or available
+
+    results = []
+    for pid in target_providers:
+        for probe_name, probe_text in _BENCHMARK_PROBES:
+            t0 = _t.time()
+            try:
+                resp = _call_single(pid, [{"role": "user", "content": probe_text}])
+                latency_ms = (_t.time() - t0) * 1000
+                text = resp.get("content") or str(resp)
+                save_benchmark_result(pid, probe_name, latency_ms, len(text))
+                results.append({
+                    "provider": pid, "probe": probe_name,
+                    "latency_ms": round(latency_ms, 1), "response_len": len(text),
+                    "ok": True,
+                })
+            except Exception as exc:
+                results.append({
+                    "provider": pid, "probe": probe_name,
+                    "latency_ms": None, "response_len": 0,
+                    "ok": False, "error": str(exc)[:120],
+                })
+    return {"results": results}
+
+
+@app.get("/benchmark/results")
+def benchmark_results():
+    """Return stored benchmark results (most recent first)."""
+    from ..db import load_benchmark_results
+    return {"results": load_benchmark_results()}
+
+
+# ── Consensus reasoning endpoint ──────────────────────────────────────────────
+@app.post("/reason/consensus")
+async def reason_consensus(request: Request):
+    """Run a task through multiple providers and return a reconciled consensus answer.
+
+    POST body: {"task": "...", "providers": [...optional list...]}
+    """
+    from ..ensemble import call_llm_consensus
+    from ..agent import (
+        _call_single, _has_key, _is_rate_limited, _mark_rate_limited,
+        _smart_order, get_system_resources,
+    )
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    task = (body.get("task") or "").strip()
+    if not task:
+        return _api_error("task is required", "validation_error", 422)
+
+    try:
+        consensus_text, winning_pid, meta = call_llm_consensus(
+            messages=[{"role": "user", "content": task}],
+            task=task,
+            providers_fn=lambda t: _smart_order(t, get_system_resources()),
+            call_single_fn=_call_single,
+            is_rate_limited_fn=_is_rate_limited,
+            mark_rate_limited_fn=_mark_rate_limited,
+        )
+        return {
+            "consensus": consensus_text,
+            "provider":  winning_pid,
+            "ensemble":  meta.get("ensemble", False),
+            "unanimous": meta.get("unanimous"),
+            "polled":    meta.get("polled", []),
+        }
+    except Exception as exc:
+        return _api_error(str(exc), "consensus_error", 500)
+
+
+# ── RAG endpoints ─────────────────────────────────────────────────────────
 @app.post("/rag/ingest")
 async def rag_ingest(request: Request):
     data = await request.json()
@@ -1261,9 +1365,90 @@ async def _heartbeat_loop():
         except Exception:
             pass
 
+# ── Sprint E: filtered memory search ─────────────────────────────────────────
+
+@app.get("/memory/search")
+async def memory_search(
+    request: Request,
+    q: str = "",
+    limit: int = 10,
+    date_from: float | None = None,
+    date_to: float | None = None,
+    tags: str = "",
+    persona: str = "",
+):
+    """Filtered semantic memory search.
+
+    Query params:
+      q         — search query (empty returns recency-ordered entries)
+      limit     — max results (default 10)
+      date_from — unix timestamp lower bound
+      date_to   — unix timestamp upper bound
+      tags      — comma-separated tag substrings
+      persona   — exact persona name filter
+    """
+    from ..memory import get_semantic_memory_filtered
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
+    results = get_semantic_memory_filtered(
+        query=q,
+        limit=limit,
+        date_from=date_from,
+        date_to=date_to,
+        tags=tag_list,
+        persona=persona or None,
+    )
+    return {"results": results, "count": len(results)}
+
+
+# ── Sprint E: per-message feedback ────────────────────────────────────────────
+
+@app.post("/feedback/{chat_id}/{message_idx}")
+async def save_message_feedback(chat_id: str, message_idx: int, request: Request):
+    """Store a 👍/👎 reaction for a specific message.
+
+    POST body: {"reaction": "thumbs_up" | "thumbs_down", "provider": "...", "model": "..."}
+    """
+    from ..db import save_feedback as db_save_feedback
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    reaction = (body.get("reaction") or "").strip()
+    if reaction not in ("thumbs_up", "thumbs_down"):
+        return _api_error("reaction must be 'thumbs_up' or 'thumbs_down'", "validation_error", 422)
+    db_save_feedback(
+        chat_id=chat_id,
+        message_idx=message_idx,
+        reaction=reaction,
+        provider=body.get("provider", ""),
+        model=body.get("model", ""),
+    )
+    return {"saved": True, "chat_id": chat_id, "message_idx": message_idx, "reaction": reaction}
+
+
+@app.get("/feedback/export")
+def feedback_export(limit: int = 5000):
+    """Export all message feedback as JSON training data."""
+    from ..db import load_feedback_export, get_feedback_stats
+    data    = load_feedback_export(limit)
+    stats   = get_feedback_stats()
+    return {
+        "stats":  stats,
+        "count":  len(data),
+        "data":   data,
+    }
+
+
+@app.get("/feedback/stats")
+def feedback_stats():
+    """Return aggregate thumbs-up / thumbs-down counts."""
+    from ..db import get_feedback_stats
+    return get_feedback_stats()
+
+
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(_register_with_nexus_cloud())
     asyncio.create_task(_heartbeat_loop())
-
 

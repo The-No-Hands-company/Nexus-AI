@@ -597,3 +597,148 @@ try:
     init_users_table()
 except Exception:
     pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# BENCHMARK RESULTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def init_benchmark_table() -> None:
+    c = _conn()
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS benchmark_results (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider    TEXT NOT NULL,
+            probe_name  TEXT NOT NULL,
+            latency_ms  REAL NOT NULL,
+            response_len INTEGER NOT NULL,
+            ts          REAL NOT NULL
+        );
+    """)
+    c.commit()
+
+
+def save_benchmark_result(
+    provider: str, probe_name: str, latency_ms: float,
+    response_len: int, ts: float | None = None,
+) -> None:
+    import time as _t
+    _conn().execute(
+        "INSERT INTO benchmark_results(provider, probe_name, latency_ms, response_len, ts) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (provider, probe_name, latency_ms, response_len, ts or _t.time()),
+    )
+    _conn().commit()
+
+
+def load_benchmark_results(limit: int = 200) -> list[dict]:
+    rows = _conn().execute(
+        "SELECT provider, probe_name, latency_ms, response_len, ts "
+        "FROM benchmark_results ORDER BY ts DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+# Seed benchmark table on import
+try:
+    init_benchmark_table()
+except Exception:
+    pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PER-MESSAGE FEEDBACK (training signal)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def init_feedback_table() -> None:
+    _conn().executescript("""
+        CREATE TABLE IF NOT EXISTS message_feedback (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id     TEXT NOT NULL,
+            message_idx INTEGER NOT NULL,
+            reaction    TEXT NOT NULL,   -- 'thumbs_up' | 'thumbs_down'
+            provider    TEXT NOT NULL DEFAULT '',
+            model       TEXT NOT NULL DEFAULT '',
+            ts          REAL NOT NULL,
+            UNIQUE (chat_id, message_idx)
+        );
+        CREATE INDEX IF NOT EXISTS idx_feedback_ts ON message_feedback(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_feedback_reaction ON message_feedback(reaction);
+    """)
+    _conn().commit()
+
+
+def save_feedback(
+    chat_id: str,
+    message_idx: int,
+    reaction: str,
+    provider: str = "",
+    model: str = "",
+) -> None:
+    import time as _t
+    _conn().execute(
+        """INSERT INTO message_feedback(chat_id, message_idx, reaction, provider, model, ts)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(chat_id, message_idx) DO UPDATE SET
+               reaction=excluded.reaction,
+               provider=excluded.provider,
+               model=excluded.model,
+               ts=excluded.ts""",
+        (chat_id, message_idx, reaction, provider, model, _t.time()),
+    )
+    _conn().commit()
+    _schedule_push()
+
+
+def load_feedback_export(limit: int = 5000) -> list[dict]:
+    """Return all feedback rows ordered newest-first, for training data export."""
+    rows = _conn().execute(
+        """SELECT f.chat_id, f.message_idx, f.reaction, f.provider, f.model, f.ts,
+                  c.messages
+           FROM message_feedback f
+           LEFT JOIN chats c ON c.id = f.chat_id
+           ORDER BY f.ts DESC LIMIT ?""",
+        (limit,),
+    ).fetchall()
+    results = []
+    for r in rows:
+        entry: dict = {
+            "chat_id":     r["chat_id"],
+            "message_idx": r["message_idx"],
+            "reaction":    r["reaction"],
+            "provider":    r["provider"],
+            "model":       r["model"],
+            "ts":          r["ts"],
+        }
+        if r["messages"]:
+            try:
+                msgs = json.loads(r["messages"])
+                idx  = r["message_idx"]
+                if 0 <= idx < len(msgs):
+                    entry["content"] = msgs[idx].get("content", "")
+                # Try to include the user turn that prompted this response
+                if idx > 0 and msgs[idx - 1].get("role") == "user":
+                    entry["prompt"] = msgs[idx - 1].get("content", "")
+            except Exception:
+                pass
+        results.append(entry)
+    return results
+
+
+def get_feedback_stats() -> dict:
+    row = _conn().execute(
+        """SELECT
+               COUNT(*) as total,
+               SUM(CASE WHEN reaction='thumbs_up'   THEN 1 ELSE 0 END) as up,
+               SUM(CASE WHEN reaction='thumbs_down' THEN 1 ELSE 0 END) as down
+           FROM message_feedback"""
+    ).fetchone()
+    return dict(row) if row else {"total": 0, "up": 0, "down": 0}
+
+
+# Seed feedback table on import
+try:
+    init_feedback_table()
+except Exception:
+    pass

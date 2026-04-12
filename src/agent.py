@@ -5,7 +5,7 @@ from typing import Dict, Any, List, Iterator, Optional
 from .tools_builtin import dispatch_builtin
 from .autonomy import Orchestrator, classify_subtask, PlanningSystem
 from .personas import build_system_prompt, get_active_persona_name, get_persona
-from .thinking import build_tot_prompt, parse_tot_response, build_critique_prompt, parse_critique_response
+from .thinking import build_tot_prompt, parse_tot_response, build_critique_prompt, parse_critique_response, build_got_prompt, parse_got_response
 from .context_window import ContextWindowManager
 from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk
 from .db import load_custom_instructions, log_usage, init_usage_table
@@ -380,7 +380,7 @@ Available actions:
   { "action": "plan",       "title": "What I'm building", "steps": ["1. ...", "2. ..."] }
   { "action": "think",      "thought": "brief reasoning" },
   { "action": "think_deep",  "query": "complex question", "mode": "tree" }  -- Tree-of-Thought,
-  { "action": "think_deep",  "query": "complex question", "mode": "tree" }  -- Tree-of-Thought
+  { "action": "think_deep",  "query": "complex question", "mode": "graph" }  -- Graph-of-Thought
   { "action": "think_deep",  "query": "complex question", "mode": "tree" }  ← Tree-of-Thought reasoning
   { "action": "respond",    "content": "<markdown>", "confidence": 0.95 }
   { "action": "get_time",   "timezone": "Europe/Stockholm" }
@@ -1017,9 +1017,16 @@ def call_llm_smart(
 
 
 def _maybe_compress_history(history: List[Dict]) -> List[Dict]:
-    """If history is longer than 20 turns, keep first 2 + last 14 and add a summary marker."""
+    """Compress history using the LLM-backed summarizer for very long contexts,
+    falling back to the naive truncation approach for moderate lengths."""
     if len(history) <= 20:
         return history
+    # For histories long enough to warrant an LLM summary, use the smart path
+    if len(history) > 40:
+        try:
+            return CONTEXT_WINDOW.compress_history_with_llm(history, _orchestrator_llm)
+        except Exception:
+            pass
     head = history[:2]
     tail = history[-14:]
     omitted = len(history) - 16
@@ -1114,6 +1121,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
     # Mask tokens before LLM ever sees them
     clean_task = mask_token(task)
+
+    # Accumulated reasoning trace — populated by think/think_deep steps
+    _trace_steps: List[Dict[str, Any]] = []
 
     # Direct answer bypass
     direct = _try_direct(clean_task)
@@ -1239,22 +1249,30 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 except Exception as e:
                     reasoning = f"Self-critique failed: {e}"
             else:
-                tot_prompt = build_tot_prompt(query, mode)
+                if mode == "graph":
+                    reasoning_prompt = build_got_prompt(query)
+                else:
+                    reasoning_prompt = build_tot_prompt(query, mode)
                 try:
                     result_action, _, _ = call_llm_smart(
-                        [{"role": "user", "content": tot_prompt}], tot_prompt
+                        [{"role": "user", "content": reasoning_prompt}], reasoning_prompt
                     )
-                    parsed = parse_tot_response(json.dumps(result_action))
+                    if mode == "graph":
+                        parsed = parse_got_response(json.dumps(result_action))
+                    else:
+                        parsed = parse_tot_response(json.dumps(result_action))
                     reasoning = parsed.get("reasoning", str(result_action))
                 except Exception as e:
                     reasoning = "Tree-of-Thought reasoning failed: " + str(e)
             yield {"type": "think", "thought": reasoning}
+            _trace_steps.append({"kind": "think_deep", "mode": mode, "thought": reasoning})
             messages.append({"role": "assistant", "content": json.dumps(action)})
             messages.append({"role": "user", "content": "Continue using that reasoning."})
             continue
 
         if kind == "think":
             yield {"type":"think","thought":action.get("thought","")}
+            _trace_steps.append({"kind": "think", "thought": action.get("thought", "")})
             messages.append({"role":"assistant","content":json.dumps(action)})
             messages.append({"role":"user","content":"Continue based on your reasoning."})
             continue
@@ -1286,6 +1304,17 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             messages.append({"role": "assistant", "content": final})
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
             output_tokens = _estimate_tokens(final)
+            # ── Sprint E: live SSE signals ────────────────────────────────────
+            yield {"type": "confidence", "value": round(confidence, 4)}
+            if _trace_steps:
+                yield {"type": "trace", "steps": _trace_steps}
+            yield {
+                "type": "token_count",
+                "in_tokens": input_token_estimate,
+                "out_tokens": output_tokens,
+                "total": input_token_estimate + output_tokens,
+            }
+            # ─────────────────────────────────────────────────────────────────
             yield {
                 "type": "done",
                 "content": final,
