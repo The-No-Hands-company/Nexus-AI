@@ -25,9 +25,12 @@
       --accent:#7c6af7;--accent-d:#5a4fd4;--green:#22c55e;--amber:#f59e0b;
       --red:#f87171;--teal:#5eead4;--text:#e2e8f0;--muted:#64748b;
       --sidebar-w:260px;
+      color-scheme:dark;
     }
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    html{-webkit-text-size-adjust:100%}
     html,body{height:100%;overflow:hidden}
+    body{-webkit-font-smoothing:antialiased;-moz-osx-font-smoothing:grayscale}
     body{background:var(--bg);color:var(--text);
       font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
       display:flex;flex-direction:column;
