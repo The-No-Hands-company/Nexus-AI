@@ -4,6 +4,8 @@ preferred provider tier, and UI accent color.
 """
 from typing import Dict, Any
 
+from .db import load_custom_personas
+
 PERSONAS: Dict[str, Dict[str, Any]] = {
     "assistant": {
         "label":       "Assistant",
@@ -75,7 +77,7 @@ def get_persona(name: str | None = None) -> Dict[str, Any]:
         return PERSONAS[pid]
     # Check custom personas
     try:
-        from db import load_custom_personas
+        from .db import load_custom_personas
         for p in load_custom_personas():
             if p["id"] == pid:
                 return {
@@ -103,7 +105,7 @@ def get_active_persona_name() -> str:
 def list_personas() -> list:
     """Returns built-in personas merged with any custom ones from DB."""
     try:
-        from db import load_custom_personas
+        from .db import load_custom_personas
         custom = load_custom_personas()
         custom_converted = {
             p["id"]: {

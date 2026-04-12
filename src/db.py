@@ -162,6 +162,30 @@ def delete_all_memory() -> None:
     _schedule_push()
 
 
+def prune_memory_by_age(older_than_ts: float, keep_min: int = 5) -> int:
+    """Delete memory entries older than *older_than_ts* but always keep at least
+    *keep_min* most-recent entries. Returns the number of deleted rows."""
+    # Identify the IDs of the *keep_min* most-recent entries — never delete those.
+    protected_ids = [
+        r[0] for r in _conn().execute(
+            "SELECT id FROM memory ORDER BY created_at DESC LIMIT ?", (keep_min,)
+        ).fetchall()
+    ]
+    if protected_ids:
+        placeholders = ",".join("?" * len(protected_ids))
+        cur = _conn().execute(
+            f"DELETE FROM memory WHERE created_at < ? AND id NOT IN ({placeholders})",
+            (older_than_ts, *protected_ids),
+        )
+    else:
+        cur = _conn().execute("DELETE FROM memory WHERE created_at < ?", (older_than_ts,))
+    deleted = cur.rowcount
+    _conn().commit()  # always commit to close the implicit write transaction
+    if deleted:
+        _schedule_push()
+    return deleted
+
+
 # ── PROJECTS ──────────────────────────────────────────────────────────────────
 
 def init_projects_table() -> None:
