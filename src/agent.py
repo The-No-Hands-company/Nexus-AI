@@ -1326,6 +1326,57 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         p = m.group(1)
         return "" if p.startswith("http") else p
 
+    def _blocker_reason(kind: str, result_text: str) -> str:
+        txt = (result_text or "").lower()
+        if not txt:
+            return ""
+        if "host mount paths are not available in this runtime" in txt:
+            return "runtime_path_mismatch"
+        if "packfile cannot be mapped" in txt or "cannot allocate memory" in txt:
+            return "runtime_clone_limits"
+        if kind == "clone_repo" and (
+            "both api fetch and git clone failed" in txt
+            or "operation timed out" in txt
+            or "timed out" in txt
+        ):
+            return "runtime_clone_limits"
+        # Reserve workstation/environment change guidance for truly unavoidable cases.
+        # Do not infer this from ordinary sandbox/runtime mismatches.
+        return ""
+
+    def _single_shot_blocker_reply(reason: str) -> str:
+        req_path = _requested_path_from_text(clean_task) or "(path not detected)"
+        if reason == "runtime_path_mismatch":
+            return (
+                "I hit a runtime limitation here, so I am stopping tool retries.\n\n"
+                f"- Requested host path: {req_path}\n"
+                f"- This Nexus AI runtime cannot access that host mount directly.\n"
+                f"- This does not mean your workstation is misconfigured.\n"
+                f"- Immediate fallback: I can clone into this runtime now at {workdir}, "
+                "or give you a single host command to run locally.\n\n"
+                "Reply with: `runtime` or `host` and I will do exactly one path."
+            )
+        if reason == "runtime_clone_limits":
+            return (
+                "I hit a runtime limitation here, so I am stopping tool retries.\n\n"
+                "- Clone failed due to runtime memory/map limits in this sandbox.\n"
+                f"- Your workstation may still be fine; this is runtime-specific.\n"
+                "- Immediate fallback: I can provide one exact host command for your machine, "
+                "or clone a smaller mirror/test repo here to verify flow.\n\n"
+                "Reply with: `host command` or `sandbox test`."
+            )
+        if reason == "host_env_change_required":
+            return (
+                "I hit a blocker that cannot be solved from inside Nexus AI alone.\n\n"
+                "- At this point, the remaining path requires a change on your workstation or host environment.\n"
+                "- I should only say this when there is no tool-only or runtime-only workaround left.\n\n"
+                "If you want, I will give you one exact host-side fix command and nothing more."
+            )
+        return (
+            "I hit a hard blocker in this runtime and stopped retries to avoid looping.\n"
+            "Tell me whether to continue on host or sandbox and I will do one direct path."
+        )
+
     # Checkpoint tracking
     _step_idx: int = 0
     _checkpoint_events: List[Dict[str, Any]] = []
@@ -1745,6 +1796,26 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             _checkpoint_events.append({k: v for k, v in _evt.items() if k not in ("file_content", "workdir")})
             _push_activity({"ts": time.time(), "action": kind, "label": str(label)[:120],
                             "status": result_stat, "session": sid})
+
+            _hard = _blocker_reason(kind, result_str)
+            if _hard:
+                final = _single_shot_blocker_reply(_hard)
+                messages.append({"role": "assistant", "content": final})
+                cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+                yield {
+                    "type": "done",
+                    "content": final,
+                    "provider": cfg.get("label", "?"),
+                    "model": _config["model"] or cfg.get("default_model", "?"),
+                    "history": messages,
+                    "tokens": {
+                        "input": input_token_estimate,
+                        "output": _estimate_tokens(final),
+                        "total": input_token_estimate + _estimate_tokens(final),
+                    },
+                }
+                return
+
             messages.append({"role":"assistant","content":json.dumps(action)})
             messages.append({"role":"user","content":f"Tool result:\n{result_str}\n\nContinue."})
             _step_idx += 1
@@ -1865,6 +1936,26 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         _checkpoint_events.append({k: v for k, v in _evt.items() if k not in ("file_content", "workdir")})
         _push_activity({"ts": time.time(), "action": kind, "label": str(label)[:120],
                         "status": "done", "session": sid})
+
+        _hard = _blocker_reason(kind, str(result))
+        if _hard:
+            final = _single_shot_blocker_reply(_hard)
+            messages.append({"role": "assistant", "content": final})
+            cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+            yield {
+                "type": "done",
+                "content": final,
+                "provider": cfg.get("label", "?"),
+                "model": _config["model"] or cfg.get("default_model", "?"),
+                "history": messages,
+                "tokens": {
+                    "input": input_token_estimate,
+                    "output": _estimate_tokens(final),
+                    "total": input_token_estimate + _estimate_tokens(final),
+                },
+            }
+            return
+
         messages.append({"role":"assistant","content":json.dumps(action)})
         messages.append({"role":"user","content":f"Tool result:\n{result}\n\nContinue."})
         _step_idx += 1
