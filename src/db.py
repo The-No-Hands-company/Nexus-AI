@@ -774,6 +774,307 @@ def init_marketplace_table() -> None:
     _conn().commit()
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# ARCHITECTURE REGISTRY + VERSIONED BLUEPRINTS
+# ══════════════════════════════════════════════════════════════════════════════
+
+def init_architecture_tables() -> None:
+    _conn().executescript("""
+        CREATE TABLE IF NOT EXISTS architecture_blueprints (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            name         TEXT NOT NULL,
+            version      INTEGER NOT NULL,
+            created_at   TEXT NOT NULL,
+            notes        TEXT NOT NULL DEFAULT '',
+            snapshot     TEXT NOT NULL,
+            UNIQUE(name, version)
+        );
+
+        CREATE TABLE IF NOT EXISTS architecture_registry_nodes (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            blueprint_name     TEXT NOT NULL,
+            blueprint_version  INTEGER NOT NULL,
+            node_type          TEXT NOT NULL,
+            node_id            TEXT NOT NULL,
+            label              TEXT NOT NULL DEFAULT '',
+            payload            TEXT NOT NULL,
+            created_at         TEXT NOT NULL,
+            UNIQUE(blueprint_name, blueprint_version, node_type, node_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS architecture_registry_edges (
+            id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+            blueprint_name     TEXT NOT NULL,
+            blueprint_version  INTEGER NOT NULL,
+            source_type        TEXT NOT NULL,
+            source_id          TEXT NOT NULL,
+            target_type        TEXT NOT NULL,
+            target_id          TEXT NOT NULL,
+            relation           TEXT NOT NULL,
+            payload            TEXT NOT NULL,
+            created_at         TEXT NOT NULL,
+            UNIQUE(
+                blueprint_name, blueprint_version,
+                source_type, source_id,
+                target_type, target_id,
+                relation
+            )
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_arch_bp_name_ver
+            ON architecture_blueprints(name, version DESC);
+        CREATE INDEX IF NOT EXISTS idx_arch_nodes_bp
+            ON architecture_registry_nodes(blueprint_name, blueprint_version);
+        CREATE INDEX IF NOT EXISTS idx_arch_edges_bp
+            ON architecture_registry_edges(blueprint_name, blueprint_version);
+    """)
+    _conn().commit()
+
+
+def _arch_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _extract_arch_nodes(snapshot: dict) -> list[tuple[str, str, str, dict]]:
+    nodes: list[tuple[str, str, str, dict]] = []
+    system = snapshot.get("system") or {}
+    system_name = str(system.get("name") or "Nexus AI")
+    nodes.append(("system", "system", system_name, system))
+
+    for item in snapshot.get("foundation_models", []) or []:
+        node_id = str(item.get("id") or "")
+        if node_id:
+            nodes.append(("foundation_model", node_id, str(item.get("label") or node_id), item))
+
+    for item in snapshot.get("agent_layer", []) or []:
+        node_id = str(item.get("id") or "")
+        if node_id:
+            nodes.append(("agent", node_id, str(item.get("name") or node_id), item))
+
+    for item in snapshot.get("workflow_layer", []) or []:
+        node_id = str(item.get("id") or "")
+        if node_id:
+            nodes.append(("workflow", node_id, str(item.get("name") or node_id), item))
+
+    for item in snapshot.get("task_layer", []) or []:
+        node_id = str(item.get("id") or "")
+        if node_id:
+            nodes.append(("tool", node_id, str(item.get("name") or node_id), item))
+
+    return nodes
+
+
+def _extract_arch_edges(snapshot: dict) -> list[tuple[str, str, str, str, str, dict]]:
+    edges: list[tuple[str, str, str, str, str, dict]] = []
+    system_name = str((snapshot.get("system") or {}).get("name") or "Nexus AI")
+
+    for model in snapshot.get("foundation_models", []) or []:
+        mid = str(model.get("id") or "")
+        if mid:
+            edges.append(("system", system_name, "foundation_model", mid, "contains_model", {}))
+
+    for agent in snapshot.get("agent_layer", []) or []:
+        aid = str(agent.get("id") or "")
+        if not aid:
+            continue
+        edges.append(("system", system_name, "agent", aid, "contains_agent", {}))
+        for mid in agent.get("model_ids", []) or []:
+            edges.append(("agent", aid, "foundation_model", str(mid), "uses_model", {}))
+        for wid in agent.get("workflow_ids", []) or []:
+            edges.append(("agent", aid, "workflow", str(wid), "participates_in", {}))
+        for tid in agent.get("tool_ids", []) or []:
+            edges.append(("agent", aid, "tool", str(tid), "can_call_tool", {}))
+
+    for workflow in snapshot.get("workflow_layer", []) or []:
+        wid = str(workflow.get("id") or "")
+        if not wid:
+            continue
+        edges.append(("system", system_name, "workflow", wid, "contains_workflow", {}))
+        for aid in workflow.get("agent_ids", []) or []:
+            edges.append(("workflow", wid, "agent", str(aid), "orchestrates_agent", {}))
+        for tid in workflow.get("tool_ids", []) or []:
+            edges.append(("workflow", wid, "tool", str(tid), "uses_tool", {}))
+
+    return edges
+
+
+def save_architecture_blueprint(name: str, snapshot: dict, notes: str = "") -> dict:
+    init_architecture_tables()
+    bp_name = (name or "default").strip() or "default"
+    ts = _arch_now_iso()
+
+    c = _conn()
+    row = c.execute(
+        "SELECT COALESCE(MAX(version), 0) as max_version FROM architecture_blueprints WHERE name=?",
+        (bp_name,),
+    ).fetchone()
+    next_version = int((row["max_version"] if row else 0) or 0) + 1
+
+    c.execute(
+        "INSERT INTO architecture_blueprints(name, version, created_at, notes, snapshot) VALUES(?,?,?,?,?)",
+        (bp_name, next_version, ts, notes or "", json.dumps(snapshot)),
+    )
+
+    nodes = _extract_arch_nodes(snapshot)
+    for node_type, node_id, label, payload in nodes:
+        c.execute(
+            """INSERT OR REPLACE INTO architecture_registry_nodes(
+                   blueprint_name, blueprint_version, node_type, node_id, label, payload, created_at
+               ) VALUES(?,?,?,?,?,?,?)""",
+            (bp_name, next_version, node_type, node_id, label, json.dumps(payload), ts),
+        )
+
+    edges = _extract_arch_edges(snapshot)
+    for source_type, source_id, target_type, target_id, relation, payload in edges:
+        c.execute(
+            """INSERT OR REPLACE INTO architecture_registry_edges(
+                   blueprint_name, blueprint_version,
+                   source_type, source_id, target_type, target_id,
+                   relation, payload, created_at
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (
+                bp_name,
+                next_version,
+                source_type,
+                source_id,
+                target_type,
+                target_id,
+                relation,
+                json.dumps(payload or {}),
+                ts,
+            ),
+        )
+
+    c.commit()
+    _schedule_push()
+    return {
+        "name": bp_name,
+        "version": next_version,
+        "created_at": ts,
+        "notes": notes or "",
+        "nodes": len(nodes),
+        "edges": len(edges),
+    }
+
+
+def list_architecture_blueprints(name: str = "", limit: int = 50) -> list[dict]:
+    init_architecture_tables()
+    limit = max(1, min(int(limit or 50), 500))
+    bp_name = (name or "").strip()
+    if bp_name:
+        rows = _conn().execute(
+            """SELECT name, version, created_at, notes
+               FROM architecture_blueprints
+               WHERE name=?
+               ORDER BY version DESC
+               LIMIT ?""",
+            (bp_name, limit),
+        ).fetchall()
+    else:
+        rows = _conn().execute(
+            """SELECT name, version, created_at, notes
+               FROM architecture_blueprints
+               ORDER BY created_at DESC
+               LIMIT ?""",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def load_architecture_blueprint(name: str, version: int | None = None) -> dict | None:
+    init_architecture_tables()
+    bp_name = (name or "").strip()
+    if not bp_name:
+        return None
+
+    if version is None:
+        row = _conn().execute(
+            """SELECT name, version, created_at, notes, snapshot
+               FROM architecture_blueprints
+               WHERE name=?
+               ORDER BY version DESC
+               LIMIT 1""",
+            (bp_name,),
+        ).fetchone()
+    else:
+        row = _conn().execute(
+            """SELECT name, version, created_at, notes, snapshot
+               FROM architecture_blueprints
+               WHERE name=? AND version=?
+               LIMIT 1""",
+            (bp_name, int(version)),
+        ).fetchone()
+
+    if not row:
+        return None
+    data = dict(row)
+    data["snapshot"] = json.loads(data["snapshot"])
+    return data
+
+
+def load_architecture_registry(name: str, version: int | None = None) -> dict | None:
+    base = load_architecture_blueprint(name, version)
+    if not base:
+        return None
+
+    bp_name = base["name"]
+    bp_ver = int(base["version"])
+    node_rows = _conn().execute(
+        """SELECT node_type, node_id, label, payload
+           FROM architecture_registry_nodes
+           WHERE blueprint_name=? AND blueprint_version=?
+           ORDER BY node_type, node_id""",
+        (bp_name, bp_ver),
+    ).fetchall()
+    edge_rows = _conn().execute(
+        """SELECT source_type, source_id, target_type, target_id, relation, payload
+           FROM architecture_registry_edges
+           WHERE blueprint_name=? AND blueprint_version=?
+           ORDER BY source_type, source_id, relation, target_type, target_id""",
+        (bp_name, bp_ver),
+    ).fetchall()
+
+    nodes = [
+        {
+            "type": r["node_type"],
+            "id": r["node_id"],
+            "label": r["label"],
+            "payload": json.loads(r["payload"]),
+        }
+        for r in node_rows
+    ]
+    edges = [
+        {
+            "source": {"type": r["source_type"], "id": r["source_id"]},
+            "target": {"type": r["target_type"], "id": r["target_id"]},
+            "relation": r["relation"],
+            "payload": json.loads(r["payload"]),
+        }
+        for r in edge_rows
+    ]
+
+    return {
+        "name": bp_name,
+        "version": bp_ver,
+        "created_at": base["created_at"],
+        "notes": base.get("notes", ""),
+        "counts": {
+            "nodes": len(nodes),
+            "edges": len(edges),
+        },
+        "nodes": nodes,
+        "edges": edges,
+        "snapshot": base["snapshot"],
+    }
+
+
+# Seed architecture tables on import
+try:
+    init_architecture_tables()
+except Exception:
+    pass
+
+
 def save_marketplace_agent(
     agent_id: str,
     name: str,

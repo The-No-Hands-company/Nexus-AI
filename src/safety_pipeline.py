@@ -110,6 +110,40 @@ def _contains_pattern(text: str, patterns: List[str]) -> Optional[str]:
     return None
 
 
+def find_matching_patterns(text: str, patterns: List[str]) -> List[str]:
+    source = text or ""
+    return [pattern for pattern in patterns if re.search(pattern, source, re.IGNORECASE)]
+
+
+def explain_prompt_injection(text: str) -> Dict[str, Any]:
+    source = (text or "").strip()
+    matched = find_matching_patterns(source, INJECTION_PATTERNS)
+    cleaned = source
+    for pattern in matched:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .,-;:\n\t")
+    if cleaned:
+        safer_rewrite = (
+            "Please help with this request while following all system and safety instructions: "
+            f"{cleaned}"
+        )
+    else:
+        safer_rewrite = (
+            "Please help with my request while following all system and safety instructions."
+        )
+
+    return {
+        "matched_patterns": matched,
+        "rule_count": len(matched),
+        "safer_rewrite": safer_rewrite,
+        "recommendations": [
+            "Describe the goal directly without asking to ignore instructions.",
+            "Avoid requests to bypass safety, system prompts, or restrictions.",
+            "Ask for safe alternatives when a task may be risky or destructive.",
+        ],
+    }
+
+
 def _get_policy_profile_name(explicit_profile: Optional[str], action: Optional[Dict[str, Any]] = None) -> Optional[str]:
     if explicit_profile:
         return explicit_profile

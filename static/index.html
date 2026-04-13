@@ -872,6 +872,14 @@
     .audit-event .ae-time{color:var(--muted);font-size:.64rem}
     .audit-event .ae-type{font-weight:700;text-transform:uppercase;font-size:.6rem;padding:1px 5px;
       border-radius:4px;background:var(--surface3,var(--surface));margin-right:4px}
+    .audit-event .ae-sev{font-weight:700;text-transform:uppercase;font-size:.58rem;padding:1px 5px;
+      border-radius:4px;border:1px solid var(--border);margin-right:4px}
+    .audit-event .ae-sev.high{color:#fb7185;border-color:color-mix(in srgb,#fb7185 45%,transparent)}
+    .audit-event .ae-sev.critical{color:#f87171;border-color:color-mix(in srgb,#f87171 55%,transparent)}
+    .audit-event .ae-sev.medium{color:#f59e0b;border-color:color-mix(in srgb,#f59e0b 45%,transparent)}
+    .audit-event .ae-sev.low{color:#22c55e;border-color:color-mix(in srgb,#22c55e 45%,transparent)}
+    .safety-scan-result{background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:10px}
+    .safety-scan-result b{color:var(--text)}
 
     /* mobile sidebar overlay */
     #sidebar-overlay{display:none;position:fixed;inset:0;z-index:15;background:rgba(0,0,0,.5)}
@@ -963,6 +971,7 @@
       <button onclick="openUsageModal();toggleOverflow()">📊 Usage</button>
       <button onclick="openHealthModal();toggleOverflow()">🏥 Provider health</button>
       <button onclick="openSafetyAudit();toggleOverflow()">🛡 Safety audit log</button>
+      <button onclick="openSafetyScanner();toggleOverflow()">🧪 Safety scanner</button>
       <button onclick="showTokenBar();toggleOverflow()">🔑 GitHub token</button>
       <button onclick="openPersonaEditor();toggleOverflow()">🎭 Persona editor</button>
       <button onclick="openSchedulerPanel();toggleOverflow()">⏱ Scheduler</button>
@@ -1170,11 +1179,40 @@
           <option value="pii_scrub">PII scrubs</option>
           <option value="session">Session-only events</option>
         </select>
+        <select id="audit-severity" onchange="loadAuditLog()" style="font-size:.72rem;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 6px">
+          <option value="">All severities</option>
+          <option value="low">Low+</option>
+          <option value="medium">Medium+</option>
+          <option value="high">High+</option>
+          <option value="critical">Critical only</option>
+        </select>
         <button onclick="loadAuditLog()" style="font-size:.72rem;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:2px 8px;cursor:pointer">↻ Refresh</button>
         <span id="audit-session-count" style="font-size:.65rem;color:var(--teal);padding:2px 6px;border:1px solid color-mix(in srgb,var(--teal)25%,transparent);border-radius:999px;background:color-mix(in srgb,var(--teal)10%,transparent)"></span>
         <span id="audit-count" style="font-size:.65rem;color:var(--muted);margin-left:auto"></span>
       </div>
       <div class="audit-list" id="audit-list"><span style="color:var(--muted);font-size:.76rem">Loading…</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="safety-scanner-modal" onclick="if(event.target===this)closeSafetyScanner()">
+  <div class="modal-box" style="max-width:680px">
+    <div class="modal-header">
+      <h2>🧪 Prompt-Injection Safety Scanner</h2>
+      <button class="modal-x" onclick="closeSafetyScanner()">×</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:10px">
+      <textarea id="scanner-input" placeholder="Paste a prompt to triage for injection attempts..."
+        style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);min-height:110px;resize:vertical;outline:none;line-height:1.5"></textarea>
+      <label style="display:flex;align-items:center;gap:6px;font-size:.72rem;color:var(--muted)">
+        <input type="checkbox" id="scanner-explain" checked>
+        Explain mode (matched rule + safer rewrite)
+      </label>
+      <div class="safety-scan-result" id="scanner-result" style="font-size:.78rem;color:var(--muted)">Run a scan to see results.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeSafetyScanner()">Close</button>
+      <button class="btn-primary" onclick="runSafetyScanner()">Scan</button>
     </div>
   </div>
 </div>
@@ -2679,13 +2717,21 @@ function closeAuditModal() { document.getElementById('audit-modal').classList.re
 
 async function loadAuditLog() {
   const filter = document.getElementById('audit-filter')?.value || '';
+  const severity = document.getElementById('audit-severity')?.value || '';
   let url = '/safety/audit?limit=500';
   if (filter === 'session' && sid) {
     url += `&session_id=${encodeURIComponent(sid)}`;
   } else if (filter && filter !== 'session') {
     url += `&event_type=${encodeURIComponent(filter)}`;
   }
+  if (severity) {
+    url += `&severity=${encodeURIComponent(severity)}`;
+  }
   const data = await fetch(url).then(r=>r.json()).catch(()=>({events:[],total:0,filtered:false}));
+  if (data?.type === 'validation_error') {
+    document.getElementById('audit-list').innerHTML = `<span style="color:var(--red);font-size:.76rem">${esc(data.error || 'Invalid audit filter')}</span>`;
+    return;
+  }
   _auditEvents = data.events||[];
   const sessionEvents = (filter === 'session' && data.filtered)
     ? (data.total||0)
@@ -2727,12 +2773,82 @@ function renderAuditList() {
     } else {
       detail = JSON.stringify(e).slice(0,120);
     }
+    const sev = (e.severity || 'none').toLowerCase();
     return `<div class="audit-event ${e.type}">
       <span class="ae-type">${e.type}</span>
+      <span class="ae-sev ${sev}">${sev}</span>
       ${detail}
       <div class="ae-time">${time}</div>
     </div>`;
   }).join('');
+}
+
+function openSafetyScanner() {
+  document.getElementById('safety-scanner-modal').classList.add('open');
+}
+
+function closeSafetyScanner() {
+  document.getElementById('safety-scanner-modal').classList.remove('open');
+}
+
+function useScannerRewrite(text) {
+  const ta = document.getElementById('scanner-input');
+  if (!ta) return;
+  ta.value = text;
+  ta.focus();
+}
+
+async function runSafetyScanner() {
+  const text = (document.getElementById('scanner-input')?.value || '').trim();
+  const explain = !!document.getElementById('scanner-explain')?.checked;
+  const out = document.getElementById('scanner-result');
+  if (!text) {
+    out.innerHTML = '<span style="color:var(--red)">Enter text to scan.</span>';
+    return;
+  }
+
+  out.innerHTML = '<span style="color:var(--muted)">Scanning…</span>';
+  const payload = await fetch('/safety/prompt-injection', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({text, explain}),
+  }).then(r=>r.json()).catch(()=>null);
+
+  if (!payload) {
+    out.innerHTML = '<span style="color:var(--red)">Scanner request failed.</span>';
+    return;
+  }
+  if (payload.type === 'validation_error') {
+    out.innerHTML = `<span style="color:var(--red)">${esc(payload.error || 'Validation error')}</span>`;
+    return;
+  }
+
+  const statusColor = payload.detected ? 'var(--red)' : 'var(--teal)';
+  let html = `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="font-weight:700;color:${statusColor}">${payload.detected ? 'Injection detected' : 'No injection detected'}</span>
+      <span style="font-size:.68rem;color:var(--muted)">threat: ${esc(payload.threat || 'none')}</span>
+    </div>
+  `;
+
+  if (payload.issues?.length) {
+    html += `<div style="margin-bottom:8px"><b>Matched issues:</b><ul style="margin:4px 0 0 16px">`
+      + payload.issues.map(i => `<li>${esc(i.reason || i.code || 'rule')}</li>`).join('')
+      + `</ul></div>`;
+  }
+
+  if (payload.explain) {
+    const safer = payload.explain.safer_rewrite || '';
+    html += `
+      <div style="margin-bottom:6px"><b>Rule explain:</b></div>
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:8px">${esc((payload.explain.matched_patterns||[]).join(', ') || 'No pattern details')}</div>
+      <div><b>Safer rewrite:</b></div>
+      <div style="margin:4px 0 8px 0;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg)">${esc(safer)}</div>
+      <button class="btn-ghost" onclick="useScannerRewrite(${JSON.stringify(safer)})">Use safer rewrite</button>
+    `;
+  }
+
+  out.innerHTML = html;
 }
 
 // ── SESSION SAFETY OVERRIDE ────────────────────────────────────────────────────
