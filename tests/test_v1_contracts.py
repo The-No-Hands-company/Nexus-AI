@@ -646,7 +646,13 @@ class TestSprintC(unittest.TestCase):
 
     def test_smart_order_boosts_coding_providers(self):
         from src.agent import _smart_order, PROVIDER_SPECIALIZATIONS
-        order = _smart_order("write a Python function to sort a list")
+        with patch("src.agent._has_key", return_value=True), \
+             patch("src.agent._is_rate_limited", return_value=False), \
+             patch.dict("src.agent._config", {"provider": "auto"}, clear=False):
+            order = _smart_order(
+                "write a Python function to sort a list",
+                resources={"available_ram_gb": 8.0},
+            )
         coding_preferred = PROVIDER_SPECIALIZATIONS["coding"]
         # At least one coding-preferred provider should appear before any
         # non-coding-preferred provider that is available.
