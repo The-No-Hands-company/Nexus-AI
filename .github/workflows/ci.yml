@@ -1,0 +1,43 @@
+name: Nexus-AI CI
+
+on:
+  push:
+    paths:
+      - '**.py'
+      - 'requirements.txt'
+      - 'requirements.rag.txt'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    paths:
+      - '**.py'
+      - 'requirements.txt'
+      - 'requirements.rag.txt'
+      - '.github/workflows/ci.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Prevent third-party globally-installed pytest plugins from polluting logs.
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run unit tests
+        run: python -m unittest tests.test_v1_contracts
+
+      - name: Run pytest contracts
+        run: python -m pytest tests/test_v1_contracts.py -q
