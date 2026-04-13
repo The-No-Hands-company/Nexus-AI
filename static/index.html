@@ -2679,12 +2679,15 @@ function closeAuditModal() { document.getElementById('audit-modal').classList.re
 
 async function loadAuditLog() {
   const filter = document.getElementById('audit-filter')?.value || '';
-  const url = (filter === 'session' && sid)
-    ? `/safety/audit?limit=500&session_id=${encodeURIComponent(sid)}`
-    : '/safety/audit?limit=500';
+  let url = '/safety/audit?limit=500';
+  if (filter === 'session' && sid) {
+    url += `&session_id=${encodeURIComponent(sid)}`;
+  } else if (filter && filter !== 'session') {
+    url += `&event_type=${encodeURIComponent(filter)}`;
+  }
   const data = await fetch(url).then(r=>r.json()).catch(()=>({events:[],total:0,filtered:false}));
   _auditEvents = data.events||[];
-  const sessionEvents = data.filtered
+  const sessionEvents = (filter === 'session' && data.filtered)
     ? (data.total||0)
     : _auditEvents.filter(e=>e.session || e.session_id).length;
   document.getElementById('audit-session-count').textContent = `${sessionEvents} session events`;
@@ -2695,9 +2698,11 @@ async function loadAuditLog() {
 function renderAuditList() {
   const filter = document.getElementById('audit-filter').value;
   const list   = document.getElementById('audit-list');
-  const events = filter === 'session'
+  // _auditEvents is already server-filtered for event_type and session (when sid present);
+  // only fall back to client-side session filter when no active session
+  const events = (filter === 'session' && !sid)
     ? _auditEvents.filter(e=>e.session || e.session_id)
-    : filter ? _auditEvents.filter(e=>e.type===filter) : _auditEvents;
+    : _auditEvents;
   if(!events.length){
     list.innerHTML='<span style="color:var(--muted);font-size:.76rem">No events yet.</span>';
     return;
