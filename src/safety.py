@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
@@ -77,6 +77,40 @@ def _contains_pattern(text: str, patterns: List[str]) -> Optional[str]:
 def mask_sensitive_tokens(text: str) -> str:
     pattern = re.compile(r"\b(?:gh[ps]_[A-Za-z0-9_]{36,}|github_pat_[A-Za-z0-9_]{80,}|sk-[A-Za-z0-9\-_]{20,})\b")
     return pattern.sub("[REDACTED]", text)
+
+
+PII_PATTERNS: Dict[str, str] = {
+    "email": r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b",
+    "phone": r"\b(?:\+?\d{1,3}[\s.-]?)?(?:\(?\d{2,4}\)?[\s.-]?)\d{3,4}[\s.-]?\d{3,4}\b",
+    "ssn": r"\b\d{3}-\d{2}-\d{4}\b",
+    "credit_card": r"\b(?:\d[ -]*?){13,19}\b",
+    "ipv4": r"\b(?:\d{1,3}\.){3}\d{1,3}\b",
+}
+
+
+def scrub_pii(text: str) -> Dict[str, Any]:
+    """Redact common PII patterns and return structured findings.
+
+    Returns:
+      {
+        "redacted_text": "...",
+        "findings": [{"type": "email", "count": 2}, ...],
+        "total_findings": 3
+      }
+    """
+    redacted = text or ""
+    findings: List[Dict[str, Any]] = []
+    for pii_type, pattern in PII_PATTERNS.items():
+        matches = re.findall(pattern, redacted)
+        if not matches:
+            continue
+        findings.append({"type": pii_type, "count": len(matches)})
+        redacted = re.sub(pattern, f"[REDACTED_{pii_type.upper()}]", redacted)
+    return {
+        "redacted_text": redacted,
+        "findings": findings,
+        "total_findings": sum(f["count"] for f in findings),
+    }
 
 
 def check_text_against_guardrail(text: str, allow_destructive: bool = False) -> SafetyDecision:

@@ -1632,3 +1632,77 @@ class TestSprintH(unittest.TestCase):
         self.assertIn("file_diff", TOOL_ICONS)
 
 
+class TestSprintI(unittest.TestCase):
+    def test_scrub_pii_redacts_email_and_token(self):
+        from src.safety import scrub_pii
+        text = "Reach me at alice@example.com and card 4111 1111 1111 1111"
+        out = scrub_pii(text)
+        self.assertIn("[REDACTED_EMAIL]", out["redacted_text"])
+        self.assertGreaterEqual(out["total_findings"], 1)
+
+    def test_pii_scan_endpoint(self):
+        response = client.post("/safety/pii-scan", json={"text": "Call me at +1 555-123-4567"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("redacted_text", payload)
+        self.assertIn("findings", payload)
+        self.assertGreaterEqual(payload["total_findings"], 1)
+
+    def test_scheduler_create_list_cancel_endpoints(self):
+        create = client.post("/scheduler/jobs", json={
+            "name": "test-job-i",
+            "task": "Summarize latest project status",
+            "schedule": "30s",
+        })
+        self.assertEqual(create.status_code, 200)
+        job = create.json()["job"]
+        self.assertIn("id", job)
+        self.assertEqual(job["name"], "test-job-i")
+
+        listed = client.get("/scheduler/jobs")
+        self.assertEqual(listed.status_code, 200)
+        payload = listed.json()
+        self.assertIn("jobs", payload)
+        self.assertTrue(any(j["id"] == job["id"] for j in payload["jobs"]))
+
+        cancel = client.post(f"/scheduler/jobs/{job['id']}/cancel")
+        self.assertEqual(cancel.status_code, 200)
+        self.assertTrue(cancel.json().get("ok"))
+
+    def test_scheduler_create_requires_task(self):
+        response = client.post("/scheduler/jobs", json={"name": "bad", "schedule": "5m"})
+        self.assertEqual(response.status_code, 422)
+
+    def test_scheduler_cancel_missing_job(self):
+        response = client.post("/scheduler/jobs/nope1234/cancel")
+        self.assertEqual(response.status_code, 404)
+
+    def test_cron_tools_in_dispatch(self):
+        from src.tools_builtin import dispatch_builtin
+
+        scheduled = dispatch_builtin({
+            "action": "cron_schedule",
+            "name": "test-dispatch-job",
+            "task": "Echo health check",
+            "schedule": "1m",
+        })
+        self.assertIsNotNone(scheduled)
+        self.assertIn("Scheduled", scheduled.get("result", ""))
+
+        listed = dispatch_builtin({"action": "cron_list"})
+        self.assertIsNotNone(listed)
+        self.assertIn("Scheduled jobs", listed.get("result", ""))
+
+    def test_tools_description_contains_cron_actions(self):
+        from src.agent import TOOLS_DESCRIPTION
+        self.assertIn("cron_schedule", TOOLS_DESCRIPTION)
+        self.assertIn("cron_list", TOOLS_DESCRIPTION)
+        self.assertIn("cron_cancel", TOOLS_DESCRIPTION)
+
+    def test_tool_icons_contains_cron_actions(self):
+        from src.agent import TOOL_ICONS
+        self.assertIn("cron_schedule", TOOL_ICONS)
+        self.assertIn("cron_list", TOOL_ICONS)
+        self.assertIn("cron_cancel", TOOL_ICONS)
+
+

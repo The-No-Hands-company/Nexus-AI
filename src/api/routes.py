@@ -6,12 +6,19 @@ from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSO
 from pydantic import ValidationError
 from ..app import app
 from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY)
+from ..scheduler import (
+    schedule_job,
+    list_jobs,
+    cancel_job,
+    job_to_dict,
+    set_run_function,
+)
 from ..gist_backup import restore_from_gist
 from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref)
 from ..personas import list_personas, set_persona, get_active_persona_name, get_persona
 from ..memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory, delete_all as delete_all_memory, get_all as get_all_memory)
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
-from ..safety import GuardrailViolation, check_user_task
+from ..safety import GuardrailViolation, check_user_task, scrub_pii
 from .schemas import *
 from .state import (
     run_results,
@@ -44,6 +51,13 @@ def _apply_response_format_hint(task: str, response_format: str) -> str:
             "The response must be valid JSON and contain no extra prose or markdown."
         )
     return task
+
+
+def _run_scheduled_task(task: str) -> str:
+    """Execute a scheduled background task and return short result text."""
+    sid = f"sched_{uuid.uuid4().hex[:8]}"
+    result = run_agent_task(task, history=[], sid=sid)
+    return str(result.get("result", ""))[:1200]
 
 
 def _validate_json_output(text: str):
@@ -227,6 +241,45 @@ async def safety_check(request: Request):
         ],
         "masked_text": decision.masked_text,
     }
+
+
+@app.post("/safety/pii-scan")
+async def pii_scan(request: Request):
+    data = await request.json()
+    text = (data.get("text") or "")
+    if not text.strip():
+        return _api_error("text is required", "validation_error", 422)
+    return scrub_pii(text)
+
+
+# ── Scheduler API ─────────────────────────────────────────────────────────────
+
+@app.get("/scheduler/jobs")
+def scheduler_jobs():
+    jobs = [job_to_dict(j) for j in list_jobs()]
+    return {"jobs": jobs, "total": len(jobs)}
+
+
+@app.post("/scheduler/jobs")
+async def scheduler_create_job(request: Request):
+    body = await request.json()
+    name = (body.get("name") or "background-task").strip()
+    task = (body.get("task") or "").strip()
+    schedule = (body.get("schedule") or "5m").strip()
+    if not task:
+        return _api_error("task is required", "validation_error", 422)
+    try:
+        job = schedule_job(name=name, task=task, schedule=schedule)
+        return {"job": job_to_dict(job)}
+    except Exception as exc:
+        return _api_error(f"Failed to create job: {exc}", "validation_error", 422)
+
+
+@app.post("/scheduler/jobs/{job_id}/cancel")
+def scheduler_cancel_job(job_id: str):
+    if cancel_job(job_id):
+        return {"ok": True, "job_id": job_id}
+    return _api_error("job not found", "not_found", 404)
 
 
 # ── OpenAI-compatible API (v1) ────────────────────────────────────────────────
@@ -1842,6 +1895,7 @@ async def post_agent_message(request: Request):
 
 @app.on_event("startup")
 async def startup_event():
+    set_run_function(_run_scheduled_task)
     asyncio.create_task(_register_with_nexus_cloud())
     asyncio.create_task(_heartbeat_loop())
 
