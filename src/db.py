@@ -742,3 +742,103 @@ try:
     init_feedback_table()
 except Exception:
     pass
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# AGENT MARKETPLACE  (Sprint G)
+# ══════════════════════════════════════════════════════════════════════════════
+
+def init_marketplace_table() -> None:
+    """Create the marketplace_agents table if it doesn't exist."""
+    _conn().executescript("""
+        CREATE TABLE IF NOT EXISTS marketplace_agents (
+            id                  TEXT PRIMARY KEY,
+            name                TEXT NOT NULL,
+            icon                TEXT NOT NULL DEFAULT '🤖',
+            description         TEXT NOT NULL DEFAULT '',
+            system_prompt       TEXT NOT NULL DEFAULT '',
+            keywords            TEXT NOT NULL DEFAULT '[]',  -- JSON array of str
+            preferred_providers TEXT NOT NULL DEFAULT '[]',  -- JSON array of str
+            temperature         REAL NOT NULL DEFAULT 0.7,
+            tier                TEXT NOT NULL DEFAULT 'standard',
+            source              TEXT NOT NULL DEFAULT 'imported', -- 'builtin'|'imported'
+            created_at          REAL NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_marketplace_source
+            ON marketplace_agents(source);
+    """)
+    _conn().commit()
+
+
+def save_marketplace_agent(
+    agent_id: str,
+    name: str,
+    icon: str,
+    description: str,
+    system_prompt: str,
+    keywords: list,
+    preferred_providers: list,
+    temperature: float,
+    tier: str,
+    source: str = "imported",
+) -> None:
+    import time as _t
+    _conn().execute(
+        """INSERT INTO marketplace_agents
+               (id, name, icon, description, system_prompt, keywords,
+                preferred_providers, temperature, tier, source, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+               name=excluded.name,
+               icon=excluded.icon,
+               description=excluded.description,
+               system_prompt=excluded.system_prompt,
+               keywords=excluded.keywords,
+               preferred_providers=excluded.preferred_providers,
+               temperature=excluded.temperature,
+               tier=excluded.tier,
+               source=excluded.source""",
+        (
+            agent_id, name, icon, description, system_prompt,
+            json.dumps(keywords), json.dumps(preferred_providers),
+            temperature, tier, source, _t.time(),
+        ),
+    )
+    _conn().commit()
+
+
+def load_marketplace_agents(source: str | None = None) -> list[dict]:
+    """Return all (or filtered) marketplace agents ordered by name."""
+    if source:
+        rows = _conn().execute(
+            "SELECT * FROM marketplace_agents WHERE source=? ORDER BY name",
+            (source,),
+        ).fetchall()
+    else:
+        rows = _conn().execute(
+            "SELECT * FROM marketplace_agents ORDER BY name"
+        ).fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        d["keywords"]            = json.loads(d["keywords"])
+        d["preferred_providers"] = json.loads(d["preferred_providers"])
+        results.append(d)
+    return results
+
+
+def delete_marketplace_agent(agent_id: str) -> bool:
+    """Delete an imported agent. Returns True if a row was deleted."""
+    cur = _conn().execute(
+        "DELETE FROM marketplace_agents WHERE id=? AND source='imported'",
+        (agent_id,),
+    )
+    _conn().commit()
+    return cur.rowcount > 0
+
+
+# Seed marketplace table on import
+try:
+    init_marketplace_table()
+except Exception:
+    pass

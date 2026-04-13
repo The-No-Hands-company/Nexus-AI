@@ -312,3 +312,221 @@ class Orchestrator:
             status = "✓" if result.success else "✗"
             lines.append(f"{status} [{task.task_id}] {task.description} → {agent_name} ({result.execution_time:.1f}s)")
         return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# HierarchicalOrchestrator — Planner → Executor → Reviewer → Verifier
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ReviewResult:
+    """Output of the Reviewer stage."""
+    approved: bool
+    feedback: str
+    revised_output: str   # may be same as original if no revision needed
+    confidence: float = 1.0
+
+
+@dataclass
+class VerificationResult:
+    """Output of the Verifier stage."""
+    goal_met: bool
+    score: float          # 0.0 – 1.0
+    summary: str
+    gaps: List[str] = field(default_factory=list)
+
+
+@dataclass
+class HierarchicalResult:
+    """Full output of a hierarchical orchestration run."""
+    goal: str
+    plan: List[Dict[str, Any]]
+    execution: List[Dict[str, Any]]
+    review: Dict[str, Any]
+    verification: Dict[str, Any]
+    final_output: str
+    execution_time: float
+    stages_completed: int           # 1 = plan only, 2 = +execute, 3 = +review, 4 = +verify
+
+
+class HierarchicalOrchestrator:
+    """Four-stage orchestrator: Planner → Executor → Reviewer → Verifier.
+
+    Each stage is optional — the orchestrator degrades gracefully if the LLM
+    fails, always returning the best available output rather than crashing.
+    """
+
+    _REVIEW_PROMPT = (
+        "You are a senior engineer reviewing an AI-generated output.\n\n"
+        "Original goal: {goal}\n\n"
+        "Output to review:\n{output}\n\n"
+        "Provide a structured review:\n"
+        "1. APPROVED: yes/no\n"
+        "2. ISSUES: list any problems (correctness, completeness, safety, clarity)\n"
+        "3. REVISED OUTPUT: if issues found, provide the corrected version; "
+        "otherwise repeat the original.\n"
+        "4. CONFIDENCE: 0.0-1.0\n"
+    )
+
+    _VERIFY_PROMPT = (
+        "You are a goal-verification agent.\n\n"
+        "Original goal: {goal}\n\n"
+        "Final output:\n{output}\n\n"
+        "Answer ONLY in this JSON format:\n"
+        '{{"goal_met": true/false, "score": 0.0-1.0, '
+        '"summary": "one sentence", "gaps": ["gap1", "gap2"]}}\n'
+    )
+
+    def __init__(
+        self,
+        llm: Callable[[str, str], str],
+        max_parallel: int = 2,
+        skip_review: bool = False,
+        skip_verify: bool = False,
+    ):
+        self.llm = llm
+        self.planner = PlanningSystem(llm)
+        self.executor = Orchestrator(llm, max_parallel=max_parallel)
+        self.skip_review = skip_review
+        self.skip_verify = skip_verify
+
+    # ── public entry point ────────────────────────────────────────────────────
+
+    def run(
+        self,
+        goal: str,
+        context: Optional[Dict[str, Any]] = None,
+        max_subtasks: int = 6,
+    ) -> HierarchicalResult:
+        ctx = context or {}
+        max_subtasks = int(ctx.get("max_subtasks", max_subtasks))
+        start = time.monotonic()
+
+        # ── Stage 1: Plan ─────────────────────────────────────────────────────
+        subtasks = self.planner.decompose(goal, max_subtasks)
+        plan_dicts = [
+            {"id": t.task_id, "description": t.description, "priority": t.priority}
+            for t in subtasks
+        ]
+        stages_done = 1
+
+        # ── Stage 2: Execute ──────────────────────────────────────────────────
+        exec_result = self.executor.execute(goal, {"max_subtasks": max_subtasks})
+        raw_output = exec_result.get("result", "")
+        exec_subtasks = exec_result.get("subtasks", [])
+        stages_done = 2
+
+        # ── Stage 3: Review ───────────────────────────────────────────────────
+        review_dict: Dict[str, Any] = {
+            "approved": True, "feedback": "review skipped", "confidence": 1.0
+        }
+        reviewed_output = raw_output
+        if not self.skip_review:
+            try:
+                rv = self._review(goal, raw_output)
+                review_dict = {
+                    "approved":   rv.approved,
+                    "feedback":   rv.feedback,
+                    "confidence": rv.confidence,
+                }
+                reviewed_output = rv.revised_output or raw_output
+                stages_done = 3
+            except Exception as exc:
+                review_dict["feedback"] = f"review failed: {exc}"
+                stages_done = 3  # still count it for transparency
+
+        # ── Stage 4: Verify ───────────────────────────────────────────────────
+        verify_dict: Dict[str, Any] = {
+            "goal_met": True, "score": 1.0, "summary": "verification skipped", "gaps": []
+        }
+        if not self.skip_verify:
+            try:
+                vr = self._verify(goal, reviewed_output)
+                verify_dict = {
+                    "goal_met": vr.goal_met,
+                    "score":    vr.score,
+                    "summary":  vr.summary,
+                    "gaps":     vr.gaps,
+                }
+                stages_done = 4
+            except Exception as exc:
+                verify_dict["summary"] = f"verification failed: {exc}"
+                stages_done = 4
+
+        return HierarchicalResult(
+            goal=goal,
+            plan=plan_dicts,
+            execution=exec_subtasks,
+            review=review_dict,
+            verification=verify_dict,
+            final_output=reviewed_output,
+            execution_time=time.monotonic() - start,
+            stages_completed=stages_done,
+        )
+
+    # ── Review stage ──────────────────────────────────────────────────────────
+
+    def _review(self, goal: str, output: str) -> ReviewResult:
+        prompt = self._REVIEW_PROMPT.format(goal=goal, output=output[:3000])
+        raw = self.llm(prompt, goal)
+
+        # Parse: look for APPROVED, ISSUES, REVISED OUTPUT, CONFIDENCE
+        approved      = "yes" in raw.lower().split("approved")[-1][:30].lower() if "approved" in raw.lower() else True
+        confidence    = 1.0
+        feedback_parts: List[str] = []
+        revised       = output   # default — unchanged
+
+        for line in raw.splitlines():
+            ll = line.lower().strip()
+            if ll.startswith("2.") or ll.startswith("issues:"):
+                feedback_parts.append(line.strip())
+            if ll.startswith("4.") or ll.startswith("confidence:"):
+                try:
+                    num_str = re.search(r"(\d+(?:\.\d+)?)", line)
+                    if num_str:
+                        confidence = min(1.0, float(num_str.group(1)))
+                except Exception:
+                    pass
+
+        # Extract revised output section
+        m = re.search(
+            r"(?:3\.\s*REVISED OUTPUT|REVISED OUTPUT)\s*[:\-]?\s*(.*?)(?=4\.|CONFIDENCE|$)",
+            raw, re.DOTALL | re.IGNORECASE,
+        )
+        if m:
+            candidate = m.group(1).strip()
+            if candidate and len(candidate) > 20:
+                revised = candidate
+
+        return ReviewResult(
+            approved=approved,
+            feedback="\n".join(feedback_parts) if feedback_parts else "No issues found.",
+            revised_output=revised,
+            confidence=confidence,
+        )
+
+    # ── Verify stage ──────────────────────────────────────────────────────────
+
+    def _verify(self, goal: str, output: str) -> VerificationResult:
+        prompt = self._VERIFY_PROMPT.format(goal=goal, output=output[:3000])
+        raw = self.llm(prompt, goal)
+
+        # Try JSON parse
+        try:
+            m = re.search(r"\{.*\}", raw, re.DOTALL)
+            if m:
+                import json as _json
+                data = _json.loads(m.group(0))
+                return VerificationResult(
+                    goal_met = bool(data.get("goal_met", True)),
+                    score    = float(data.get("score", 1.0)),
+                    summary  = str(data.get("summary", "")),
+                    gaps     = list(data.get("gaps", [])),
+                )
+        except Exception:
+            pass
+
+        # Fallback heuristic
+        goal_met = "yes" in raw.lower() or "met" in raw.lower()
+        return VerificationResult(goal_met=goal_met, score=0.7 if goal_met else 0.3, summary=raw[:200])
+

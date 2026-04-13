@@ -790,4 +790,593 @@ class TestSprintE(unittest.TestCase):
         )
 
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Sprint F — Specialist Agents, Hierarchical Orchestration, Auto Ollama
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSprintF(unittest.TestCase):
+    """Sprint F: specialist agent library, hierarchical planner→executor→
+    reviewer→verifier pipeline, auto Ollama model selection."""
+
+    # ── Specialist agent registry ──────────────────────────────────────────
+
+    def test_list_agents_returns_all_eight(self):
+        from src.agents import list_agents
+        agents = list_agents()
+        self.assertEqual(len(agents), 8, "Expected exactly 8 built-in specialist agents")
+        ids = [a["id"] for a in agents]
+        for expected in ("architect", "security_auditor", "debugger", "data_scientist",
+                         "ui_ux_designer", "documentation_writer", "product_manager",
+                         "code_reviewer"):
+            self.assertIn(expected, ids, f"Agent '{expected}' missing from registry")
+
+    def test_get_specialist_by_id_returns_agent(self):
+        from src.agents import get_specialist
+        agent = get_specialist("architect")
+        self.assertIsNotNone(agent)
+        self.assertEqual(agent.id, "architect")
+        self.assertIn("architect", agent.name.lower())
+
+    def test_get_specialist_unknown_returns_none(self):
+        from src.agents import get_specialist
+        result = get_specialist("does_not_exist_xyz")
+        self.assertIsNone(result)
+
+    def test_classify_security_task(self):
+        from src.agents import classify_to_specialist
+        agent = classify_to_specialist("audit the login form for XSS and SQL injection")
+        self.assertEqual(agent.id, "security_auditor",
+                         f"Expected security_auditor but got {agent.id}")
+
+    def test_classify_coding_task_defaults_to_coding_agent(self):
+        from src.agents import classify_to_specialist
+        agent = classify_to_specialist("debug this Python function and fix the bug")
+        self.assertIn(agent.id, ("debugger", "code_reviewer"),
+                      f"Unexpected agent for a debug task: {agent.id}")
+
+    def test_classify_data_task(self):
+        from src.agents import classify_to_specialist
+        agent = classify_to_specialist("build a pandas pipeline with sklearn machine learning model")
+        self.assertEqual(agent.id, "data_scientist",
+                         f"Expected data_scientist but got {agent.id}")
+
+    def test_specialist_agent_match_score_positive_on_relevant_task(self):
+        from src.agents import get_specialist
+        sec = get_specialist("security_auditor")
+        score = sec.matches("find vulnerabilities and harden the auth endpoint")
+        self.assertGreater(score, 0, "security_auditor should score > 0 on a security task")
+
+    def test_specialist_agent_match_score_zero_on_unrelated_task(self):
+        from src.agents import get_specialist
+        sec = get_specialist("security_auditor")
+        score = sec.matches("write a haiku about spring flowers")
+        self.assertEqual(score, 0, "security_auditor should score 0 on an unrelated creative task")
+
+    def test_list_agents_schema_keys(self):
+        from src.agents import list_agents
+        agents = list_agents()
+        required_keys = {"id", "name", "icon", "description", "tier"}
+        for agent in agents:
+            missing = required_keys - set(agent.keys())
+            self.assertFalse(missing, f"Agent {agent.get('id')} missing keys: {missing}")
+
+    # ── Hierarchical orchestration dataclasses ─────────────────────────────
+
+    def test_review_result_dataclass_fields(self):
+        from src.autonomy import ReviewResult
+        rv = ReviewResult(approved=True, feedback="Looks good", revised_output=None, confidence=0.9)
+        self.assertTrue(rv.approved)
+        self.assertEqual(rv.confidence, 0.9)
+        self.assertIsNone(rv.revised_output)
+
+    def test_verification_result_dataclass_fields(self):
+        from src.autonomy import VerificationResult
+        vr = VerificationResult(goal_met=True, score=0.95, summary="All criteria met", gaps=[])
+        self.assertTrue(vr.goal_met)
+        self.assertAlmostEqual(vr.score, 0.95)
+        self.assertIsInstance(vr.gaps, list)
+
+    def test_hierarchical_result_dataclass_fields(self):
+        from src.autonomy import HierarchicalResult
+        hr = HierarchicalResult(
+            goal="test goal",
+            plan={"subtasks": []},
+            execution={"outputs": []},
+            review=None,
+            verification=None,
+            final_output="output",
+            execution_time=0.5,
+            stages_completed=2,
+        )
+        self.assertEqual(hr.goal, "test goal")
+        self.assertEqual(hr.stages_completed, 2)
+        self.assertAlmostEqual(hr.execution_time, 0.5)
+
+    def test_hierarchical_orchestrator_produces_result_with_mock_llm(self):
+        """HierarchicalOrchestrator.run() should complete stages 1–2 with a mocked LLM."""
+        from unittest.mock import MagicMock
+        from src.autonomy import HierarchicalOrchestrator
+
+        def _mock_llm(messages, context="", **kwargs):
+            # Return a minimal plan on first call, output on subsequent calls
+            return '{"subtasks": [{"id": "t1", "title": "Do it", "description": "Just do it", "priority": 1}]}'
+
+        orch = HierarchicalOrchestrator(
+            llm=_mock_llm,
+            max_parallel=1,
+            skip_review=True,
+            skip_verify=True,
+        )
+        hr = orch.run("Write a hello world program", max_subtasks=2)
+        self.assertIsNotNone(hr)
+        self.assertGreaterEqual(hr.stages_completed, 1,
+                                "Expected at least stage 1 (planning) to complete")
+        self.assertEqual(hr.goal, "Write a hello world program")
+
+    # ── /agents endpoints ──────────────────────────────────────────────────
+
+    def test_agents_list_endpoint_200(self):
+        response = client.get("/agents")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("agents", payload)
+        self.assertIsInstance(payload["agents"], list)
+        self.assertGreater(len(payload["agents"]), 0)
+
+    def test_agents_get_by_id_200(self):
+        response = client.get("/agents/architect")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["id"], "architect")
+        self.assertIn("name", payload)
+        self.assertIn("description", payload)
+
+    def test_agents_get_unknown_404(self):
+        response = client.get("/agents/definitely_not_a_real_agent")
+        self.assertEqual(response.status_code, 404)
+
+    def test_agents_classify_endpoint_returns_correct_agent(self):
+        response = client.post("/agents/classify", json={"task": "audit for SQL injection vulnerabilities"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("agent_id", payload)
+        self.assertEqual(payload["agent_id"], "security_auditor",
+                         f"Expected security_auditor, got {payload.get('agent_id')}")
+        self.assertIn("match_score", payload)
+
+    def test_agents_classify_missing_task_returns_error(self):
+        response = client.post("/agents/classify", json={})
+        self.assertIn(response.status_code, (400, 422))
+
+    def test_hierarchical_missing_goal_returns_422(self):
+        response = client.post("/orchestrate/hierarchical", json={})
+        self.assertEqual(response.status_code, 422)
+
+    def test_hierarchical_trace_retrieve_404_on_unknown(self):
+        response = client.get("/orchestrate/hierarchical/nonexistent_trace_000")
+        self.assertEqual(response.status_code, 404)
+
+    # ── Auto Ollama model selection ────────────────────────────────────────
+
+    def test_get_best_ollama_model_returns_string(self):
+        from src.agent import get_best_ollama_model
+        # Without a running Ollama instance this must not raise — just return a fallback string
+        result = get_best_ollama_model("coding")
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0, "Model name must be non-empty")
+
+    def test_get_best_ollama_model_all_task_types(self):
+        from src.agent import get_best_ollama_model, OLLAMA_MODEL_PREFERENCES
+        for task_type in OLLAMA_MODEL_PREFERENCES:
+            result = get_best_ollama_model(task_type)
+            self.assertIsInstance(result, str, f"Expected str for task_type={task_type}")
+
+    def test_ollama_model_preferences_coverage(self):
+        from src.agent import OLLAMA_MODEL_PREFERENCES
+        expected_types = {"coding", "reasoning", "research", "creative", "data", "general"}
+        for t in expected_types:
+            self.assertIn(t, OLLAMA_MODEL_PREFERENCES, f"Missing task type: {t}")
+            self.assertGreater(len(OLLAMA_MODEL_PREFERENCES[t]), 3,
+                               f"Expected at least 4 model options for task type: {t}")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Sprint G: simulate tool, agent marketplace, agent-to-agent bus
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSprintG(unittest.TestCase):
+    """Sprint G: swarm prediction (simulate tool), agent marketplace,
+    and agent-to-agent message bus."""
+
+    # ── SimulationEngine unit tests ────────────────────────────────────────
+
+    def _make_persona_llm(self):
+        """Returns a deterministic mock LLM function that returns valid JSON
+        for all simulation prompts."""
+        import json as _json
+
+        call_count = {"n": 0}
+
+        def _llm(messages):
+            call_count["n"] += 1
+            last_msg = messages[-1]["content"] if messages else ""
+            # Persona generation prompt → return a JSON list of personas
+            if "JSON array" in last_msg and "persona" in last_msg.lower():
+                return _json.dumps([
+                    {"id": "p1", "name": "Alice", "role": "Optimist",
+                     "viewpoint": "AI will empower engineers."},
+                    {"id": "p2", "name": "Bob",   "role": "Sceptic",
+                     "viewpoint": "AI will require deep retraining."},
+                    {"id": "p3", "name": "Carol", "role": "Pragmatist",
+                     "viewpoint": "Impact will be domain-specific."},
+                ])
+            # Round synthesis prompt → return round summary JSON
+            if "round_num" in last_msg or "summarise" in last_msg.lower():
+                return _json.dumps({
+                    "round_num": 1, "interactions": [],
+                    "consensus_shift": 0.1, "key_points": ["point A"],
+                })
+            # Final synthesis prompt → return prediction JSON
+            if "synthesis" in last_msg.lower() or "predict" in last_msg.lower():
+                return _json.dumps({
+                    "prediction": "Mixed impact expected.",
+                    "confidence": 0.72,
+                    "key_drivers": ["automation", "tooling"],
+                    "minority_views": ["total replacement"],
+                    "report": "# Report\n\nMixed impact.",
+                })
+            # Per-persona statement
+            return "I maintain my position based on current evidence."
+
+        return _llm
+
+    def test_simulation_engine_run_returns_result(self):
+        from src.simulation import SimulationEngine
+        engine = SimulationEngine(self._make_persona_llm(), max_personas=3, max_rounds=1)
+        result = engine.run(
+            topic="Will AI replace software engineers by 2030?",
+            seed="Consider automation trends.",
+            n_personas=3,
+            n_rounds=1,
+        )
+        self.assertIsNotNone(result)
+        self.assertIsNotNone(result.sim_id)
+        self.assertEqual(result.topic, "Will AI replace software engineers by 2030?")
+
+    def test_simulation_result_has_personas(self):
+        from src.simulation import SimulationEngine
+        engine = SimulationEngine(self._make_persona_llm(), max_personas=3, max_rounds=1)
+        result = engine.run("Topic A", "seed context", n_personas=3, n_rounds=1)
+        self.assertGreater(len(result.personas), 0)
+        self.assertLessEqual(len(result.personas), 3)
+
+    def test_simulation_result_has_rounds(self):
+        from src.simulation import SimulationEngine
+        engine = SimulationEngine(self._make_persona_llm(), max_personas=3, max_rounds=2)
+        result = engine.run("Topic B", "", n_personas=3, n_rounds=2)
+        self.assertEqual(len(result.rounds), 2)
+
+    def test_simulation_result_to_dict_schema(self):
+        from src.simulation import SimulationEngine
+        engine = SimulationEngine(self._make_persona_llm(), max_personas=3, max_rounds=1)
+        result = engine.run("Topic C", "", n_personas=3, n_rounds=1)
+        d = result.to_dict()
+        required = {"sim_id", "topic", "n_personas", "n_rounds", "personas",
+                    "rounds", "prediction", "confidence", "minority_views",
+                    "report", "elapsed_sec"}
+        for key in required:
+            self.assertIn(key, d, f"Missing key '{key}' in SimulationResult.to_dict()")
+
+    def test_simulation_elapsed_sec_is_positive_float(self):
+        from src.simulation import SimulationEngine
+        engine = SimulationEngine(self._make_persona_llm(), max_personas=3, max_rounds=1)
+        result = engine.run("Topic D", "", n_personas=3, n_rounds=1)
+        self.assertIsInstance(result.elapsed_sec, float)
+        self.assertGreaterEqual(result.elapsed_sec, 0.0)
+
+    def test_parse_json_safe_strips_markdown_fences(self):
+        from src.simulation import _parse_json_safe
+        text = '```json\n{"key": "value"}\n```'
+        result = _parse_json_safe(text, {})
+        self.assertEqual(result, {"key": "value"})
+
+    def test_parse_json_safe_returns_fallback_on_bad_json(self):
+        from src.simulation import _parse_json_safe
+        result = _parse_json_safe("not valid json at all", {"fallback": True})
+        self.assertEqual(result, {"fallback": True})
+
+    def test_parse_json_safe_parses_plain_json(self):
+        from src.simulation import _parse_json_safe
+        result = _parse_json_safe('{"x": 1, "y": [2, 3]}', {})
+        self.assertEqual(result["x"], 1)
+        self.assertEqual(result["y"], [2, 3])
+
+    def test_persona_to_dict_schema(self):
+        from src.simulation import PersonaAgent
+        p = PersonaAgent(id="p1", name="Alice", viewpoint="optimistic", role="Futurist")
+        d = p.to_dict()
+        self.assertIn("id", d)
+        self.assertIn("name", d)
+        self.assertIn("viewpoint", d)
+        self.assertIn("role", d)
+        self.assertIn("memory", d)
+
+    def test_simulation_n_personas_capped_at_max(self):
+        from src.simulation import SimulationEngine
+        engine = SimulationEngine(self._make_persona_llm(), max_personas=3, max_rounds=1)
+        result = engine.run("Topic E", "", n_personas=99, n_rounds=1)
+        # Engine caps at max_personas
+        self.assertLessEqual(len(result.personas), 3)
+
+    # ── Agent bus unit tests ───────────────────────────────────────────────
+
+    def setUp(self):
+        # Give each test a fresh bus instance to avoid cross-test contamination
+        import importlib
+        import src.agent_bus as _bus_mod
+        importlib.reload(_bus_mod)
+        self._bus_mod = _bus_mod
+
+    def test_agent_bus_post_and_read(self):
+        msg = self._bus_mod.post_message("agent_a", "agent_b", "Hello B!")
+        self.assertIsNotNone(msg.msg_id)
+        self.assertEqual(msg.from_id, "agent_a")
+        self.assertEqual(msg.to_id, "agent_b")
+        msgs = self._bus_mod.read_messages("agent_b")
+        self.assertEqual(len(msgs), 1)
+        self.assertEqual(msgs[0].content, "Hello B!")
+
+    def test_agent_bus_marks_read_on_read(self):
+        self._bus_mod.post_message("x", "y", "msg1")
+        msgs = self._bus_mod.read_messages("y", mark_read=True)
+        self.assertTrue(msgs[0].read)
+
+    def test_agent_bus_unread_count(self):
+        self._bus_mod.post_message("a", "b", "one")
+        self._bus_mod.post_message("a", "b", "two")
+        count = self._bus_mod.unread_count("b")
+        self.assertEqual(count, 2)
+
+    def test_agent_bus_unread_count_drops_after_read(self):
+        self._bus_mod.post_message("a", "b", "one")
+        self._bus_mod.read_messages("b", mark_read=True)
+        count = self._bus_mod.unread_count("b")
+        self.assertEqual(count, 0)
+
+    def test_agent_bus_recent_log(self):
+        self._bus_mod.post_message("u", "v", "log me")
+        log = self._bus_mod.recent_log(limit=10)
+        self.assertGreater(len(log), 0)
+        self.assertTrue(any(m.content == "log me" for m in log))
+
+    def test_agent_bus_clear_inbox(self):
+        self._bus_mod.post_message("a", "b", "clear me")
+        deleted = self._bus_mod.clear_inbox("b")
+        self.assertEqual(deleted, 1)
+        msgs = self._bus_mod.read_messages("b")
+        self.assertEqual(len(msgs), 0)
+
+    def test_agent_bus_all_agents_includes_recipients(self):
+        self._bus_mod.post_message("sender", "target_agent", "hi")
+        agents = self._bus_mod.all_agents()
+        self.assertIn("target_agent", agents)
+
+    def test_agent_message_to_dict_schema(self):
+        msg = self._bus_mod.post_message("from_x", "to_y", "test content")
+        d = msg.to_dict()
+        for key in ("msg_id", "from_id", "to_id", "content", "ts", "read"):
+            self.assertIn(key, d, f"Missing key '{key}' in AgentMessage.to_dict()")
+
+    # ── Marketplace DB unit tests ──────────────────────────────────────────
+
+    def test_marketplace_save_and_load(self):
+        import uuid as _uuid
+        from src.db import save_marketplace_agent, load_marketplace_agents, delete_marketplace_agent
+        agent_id = f"test_agent_{_uuid.uuid4().hex[:8]}"
+        save_marketplace_agent(
+            agent_id=agent_id,
+            name="Test Agent",
+            icon="🧪",
+            description="A test agent",
+            system_prompt="You are a test agent.",
+            keywords=["test", "qa"],
+            preferred_providers=["ollama"],
+            temperature=0.5,
+            tier="standard",
+            source="imported",
+        )
+        agents = load_marketplace_agents(source="imported")
+        ids = [a["id"] for a in agents]
+        self.assertIn(agent_id, ids)
+        # Cleanup
+        delete_marketplace_agent(agent_id)
+
+    def test_marketplace_delete_returns_true_on_success(self):
+        import uuid as _uuid
+        from src.db import save_marketplace_agent, delete_marketplace_agent
+        agent_id = f"del_test_{_uuid.uuid4().hex[:8]}"
+        save_marketplace_agent(
+            agent_id=agent_id, name="Del Test", icon="🗑️",
+            description="", system_prompt="test.",
+            keywords=[], preferred_providers=[],
+            temperature=0.7, tier="standard", source="imported",
+        )
+        result = delete_marketplace_agent(agent_id)
+        self.assertTrue(result)
+
+    def test_marketplace_delete_returns_false_for_nonexistent(self):
+        from src.db import delete_marketplace_agent
+        result = delete_marketplace_agent("definitely_does_not_exist_xyz_123")
+        self.assertFalse(result)
+
+    def test_marketplace_agent_data_roundtrip(self):
+        import uuid as _uuid
+        from src.db import save_marketplace_agent, load_marketplace_agents, delete_marketplace_agent
+        agent_id = f"roundtrip_{_uuid.uuid4().hex[:8]}"
+        save_marketplace_agent(
+            agent_id=agent_id,
+            name="Roundtrip Agent",
+            icon="🔄",
+            description="Roundtrip test.",
+            system_prompt="You are a roundtrip test agent.",
+            keywords=["rt", "test"],
+            preferred_providers=["nexus_ai"],
+            temperature=0.42,
+            tier="advanced",
+            source="imported",
+        )
+        agents = load_marketplace_agents(source="imported")
+        found = next((a for a in agents if a["id"] == agent_id), None)
+        self.assertIsNotNone(found)
+        self.assertEqual(found["name"], "Roundtrip Agent")
+        self.assertEqual(found["temperature"], 0.42)
+        self.assertIn("rt", found["keywords"])
+        delete_marketplace_agent(agent_id)
+
+    # ── Marketplace HTTP endpoint tests ────────────────────────────────────
+
+    def test_marketplace_list_endpoint_200(self):
+        response = client.get("/marketplace/agents")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("agents", payload)
+        self.assertIn("total", payload)
+        self.assertIsInstance(payload["agents"], list)
+        # Built-in agents must always be present
+        self.assertGreater(payload["total"], 0)
+
+    def test_marketplace_import_agent_201(self):
+        import uuid as _uuid
+        agent_id = f"http_test_{_uuid.uuid4().hex[:8]}"
+        response = client.post("/marketplace/agents", json={
+            "id":            agent_id,
+            "name":          "HTTP Test Agent",
+            "system_prompt": "You are a test agent.",
+            "icon":          "🧪",
+            "keywords":      ["http", "test"],
+        })
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertEqual(payload["id"], agent_id)
+        self.assertEqual(payload["status"], "imported")
+        # Cleanup
+        client.delete(f"/marketplace/agents/{agent_id}")
+
+    def test_marketplace_import_missing_id_returns_422(self):
+        response = client.post("/marketplace/agents", json={
+            "name":          "No ID Agent",
+            "system_prompt": "test",
+        })
+        self.assertIn(response.status_code, (400, 422))
+
+    def test_marketplace_import_missing_system_prompt_returns_422(self):
+        response = client.post("/marketplace/agents", json={
+            "id":   "no_prompt_agent",
+            "name": "No Prompt Agent",
+        })
+        self.assertIn(response.status_code, (400, 422))
+
+    def test_marketplace_delete_endpoint_200(self):
+        import uuid as _uuid
+        agent_id = f"del_http_{_uuid.uuid4().hex[:8]}"
+        # Import first
+        client.post("/marketplace/agents", json={
+            "id":            agent_id,
+            "name":          "Delete Me",
+            "system_prompt": "test",
+        })
+        response = client.delete(f"/marketplace/agents/{agent_id}")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "deleted")
+
+    def test_marketplace_delete_nonexistent_returns_404(self):
+        response = client.delete("/marketplace/agents/ghost_agent_zzz_000")
+        self.assertEqual(response.status_code, 404)
+
+    # ── Agent bus HTTP endpoint tests ──────────────────────────────────────
+
+    def test_bus_post_message_201(self):
+        response = client.post("/agents/bus", json={
+            "from_id": "test_planner",
+            "to_id":   "test_executor",
+            "content": "Proceed with task.",
+        })
+        self.assertEqual(response.status_code, 201)
+        payload = response.json()
+        self.assertIn("msg_id", payload)
+        self.assertEqual(payload["from_id"], "test_planner")
+        self.assertEqual(payload["to_id"],   "test_executor")
+
+    def test_bus_post_missing_fields_returns_422(self):
+        response = client.post("/agents/bus", json={"from_id": "agent_a"})
+        self.assertIn(response.status_code, (400, 422))
+
+    def test_bus_read_inbox_200(self):
+        # Post a message first
+        client.post("/agents/bus", json={
+            "from_id": "sender_g",
+            "to_id":   "inbox_agent_g",
+            "content": "You have mail.",
+        })
+        response = client.get("/agents/bus/inbox_agent_g")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("messages", payload)
+        self.assertIn("unread_count", payload)
+        self.assertIsInstance(payload["messages"], list)
+
+    def test_bus_global_log_200(self):
+        response = client.get("/agents/bus/log")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("messages", payload)
+        self.assertIn("active_agents", payload)
+
+    # ── /simulate HTTP endpoint ────────────────────────────────────────────
+
+    def test_simulate_missing_topic_returns_422(self):
+        response = client.post("/simulate", json={"n_personas": 3})
+        self.assertIn(response.status_code, (400, 422))
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_simulate_endpoint_returns_result(self, mock_call):
+        import json as _json
+        call_count = {"n": 0}
+
+        def _llm_side(msgs, task=""):
+            call_count["n"] += 1
+            last = msgs[-1]["content"] if msgs else ""
+            if "JSON array" in last:
+                resp = _json.dumps([
+                    {"id": "p1", "name": "Alice",
+                     "role": "Analyst", "viewpoint": "Mixed impact."},
+                    {"id": "p2", "name": "Bob",
+                     "role": "Sceptic", "viewpoint": "Overhyped."},
+                ])
+                return {"action": "respond", "content": resp}, "mock"
+            if "synthesis" in last.lower() or "predict" in last.lower():
+                resp = _json.dumps({
+                    "prediction": "Moderate change.",
+                    "confidence": 0.65,
+                    "key_drivers": ["automation"],
+                    "minority_views": [],
+                    "report": "# Report\nModerate change.",
+                })
+                return {"action": "respond", "content": resp}, "mock"
+            return {"action": "respond",
+                    "content": "I hold my position."}, "mock"
+
+        mock_call.side_effect = _llm_side
+
+        response = client.post("/simulate", json={
+            "topic":       "Will AI replace engineers by 2030?",
+            "n_personas":  2,
+            "n_rounds":    1,
+        })
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("sim_id",     payload)
+        self.assertIn("prediction", payload)
+        self.assertIn("personas",   payload)
+        self.assertIn("rounds",     payload)
 

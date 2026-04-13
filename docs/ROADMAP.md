@@ -155,8 +155,8 @@
 
 ### Model expansion
 
-- [ ] Add 20+ more Ollama/cloud models by default (Qwen2.5-72B, DeepSeek-R1-70B, Llama-4 variants, Gemma-3, etc.)
-- [ ] Auto-select best Ollama model based on task type (coding vs reasoning vs creative)
+- [x] Add 20+ more Ollama/cloud models by default (Qwen2.5-72B, DeepSeek-R1-70B, Llama-4 variants, Gemma-3, etc.) (Sprint F)
+- [x] Auto-select best Ollama model based on task type (coding vs reasoning vs creative) (Sprint F)
 - [x] Model benchmark dashboard — auto-benchmark new Ollama pulls (Sprint D)
 
 ### Memory & context
@@ -175,19 +175,19 @@
 
 ## 🤖 Phase 2 — Multi-Agent Empire (Next 4–8 weeks)
 
-- [ ] **Hierarchical orchestration** — Planner → Executor → Reviewer → Verifier
-- [ ] **Specialist agent library** (out-of-the-box):
+- [x] **Hierarchical orchestration** — Planner → Executor → Reviewer → Verifier (Sprint F)
+- [x] **Specialist agent library** (out-of-the-box) (Sprint F):
   - Architect Agent
   - Security Auditor Agent
   - UI/UX Designer Agent
   - Data Scientist Agent
-  - Legal/Compliance Agent
   - Product Manager Agent
   - Debugger Agent
-  - Documentation Agent
-- [ ] **Dynamic agent spawning** based on task complexity and type
-- [ ] **Agent marketplace** — JSON-defined agents that users can import/share
-- [ ] **Agent-to-agent communication** — shared workspace + message passing
+  - Documentation Writer Agent
+  - Code Reviewer Agent
+- [x] **Dynamic agent spawning** based on task complexity and type (Sprint G)
+- [x] **Agent marketplace** — JSON-defined agents that users can import/share (Sprint G)
+- [x] **Agent-to-agent communication** — shared workspace + message passing (Sprint G)
 - [ ] **Swarm View UI** — watch the agent empire work in real-time
 
 ---
@@ -288,6 +288,38 @@ Rule: borrow patterns and interfaces, not lock-in. Nexus AI remains self-hosted 
 - Avoid:
   - exposing provider complexity in the default UX path
   - coupling roadmap claims to unverified prototypes
+
+### Source E: MiroFish (github.com/666ghj/MiroFish) — inspiration only, no code import
+
+**What MiroFish is:** A swarm intelligence simulation engine that spawns hundreds of
+persona-agents from seed material (news articles, policy drafts, documents), runs
+configurable rounds of social evolution between them, and produces a structured
+prediction report.
+
+**License:** AGPL-3.0 — no code is imported. All implementations are original.
+
+**Patterns we borrow:**
+- `simulate` tool concept — seed a topic, generate N persona-agents with distinct
+  viewpoints, run debate rounds, synthesise a prediction/consensus report
+- GraphRAG seed extraction — chunk seed material into a knowledge graph before agent
+  instantiation (will use our existing RAG system)
+- Dual-platform parallel simulation — run persona agents across multiple providers
+  simultaneously (maps to our existing ensemble infrastructure)
+- ReportAgent pattern — a dedicated synthesis agent that queries the simulation state
+  and produces a structured report (maps to our `HierarchicalOrchestrator` Reviewer stage)
+- Dynamic temporal memory updates — each persona accumulates memory across simulation
+  rounds (maps to our Chroma vector store per-agent scoped writes)
+
+**What we do NOT adopt:**
+- Zep Cloud dependency (we use our own Chroma + SQLite memory)
+- Vue frontend (we keep the existing SSE-first chat UI)
+- The full thousands-of-agents scale (our `simulate` tool targets 3–12 personas for
+  practical latency on self-hosted hardware)
+
+**Roadmap items derived from MiroFish:**
+- `simulate` tool (Phase 2, Sprint G) — complete
+- Swarm View UI (Phase 2, remaining) — shows active personas + round progress
+- Long-term memory graph (Phase 4) — per-persona knowledge graph with temporal edges
 
 Execution artifact for this section: `EXTERNAL_BORROW_MATRIX.md` (concrete borrow matrix + sprint-ready implementation tickets).
 

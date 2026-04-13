@@ -7,13 +7,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
-- Sprint E: Persistent vector store filtering by date, tags, and persona
-- Sprint E: Per-message feedback (👍👎) stored as training signal with export endpoint
-- Sprint E: Streaming token counter — `token_count` SSE event with live in/out token totals
-- Sprint E: Live confidence + reasoning trace SSE events (`confidence`, `trace`)
-- Sprint E: `GET /memory/search` — filtered semantic memory search endpoint
-- Sprint E: `POST /feedback/{chat_id}/{message_idx}` — store per-message reaction
-- Sprint E: `GET /feedback/export` — export all feedback as training data JSON
+- Sprint G: `simulate` tool — lightweight swarm prediction engine (inspired by MiroFish)
+- Sprint G: Dynamic agent spawning based on task type and complexity
+- Sprint G: Agent marketplace — JSON-defined agents importable/exportable via API
+- Sprint G: Agent-to-agent message passing via shared workspace
+
+---
+
+## [0.6.0] - 2026-04-13 — Sprint F: Hierarchical Orchestration + Specialist Agents
+
+### Added
+- `src/autonomy.py`: `ReviewerAgent`, `VerifierAgent` stages in `HierarchicalOrchestrator`
+- `src/autonomy.py`: Full Planner → Executor → Reviewer → Verifier pipeline
+- `src/agents/`: Specialist agent registry — Architect, Security Auditor, UI/UX Designer, Data Scientist, Product Manager, Debugger, Documentation Writer, Code Reviewer
+- `src/agent.py`: `OLLAMA_MODEL_REGISTRY` — 15+ models mapped to task types (coding, reasoning, creative, vision)
+- `src/agent.py`: `get_best_ollama_model(task_type)` — auto-selects the best locally available Ollama model
+- `src/agent.py`: Ollama `_call_single` uses auto-selected model when `_selected_model` is set
+- `src/api/routes.py`: `GET /agents` — list all registered specialist agents
+- `src/api/routes.py`: `POST /orchestrate/hierarchical` — run full hierarchical orchestration pipeline
+- `tests/test_v1_contracts.py`: `TestSprintF` — 23 new tests (94 total)
+
+---
+
+## [0.5.0] - 2026-04-13 — Sprint E: Filtered Memory, Feedback, SSE Signals
+
+### Added
+- `src/memory.py`: `get_semantic_memory_filtered()` — date/tags/persona filters on Chroma + SQLite fallback; `persona` stored in Chroma metadata
+- `src/db.py`: `message_feedback` table + `save_feedback`, `load_feedback_export`, `get_feedback_stats`
+- `src/api/routes.py`: `GET /memory/search` — filtered semantic memory search with query params
+- `src/api/routes.py`: `POST /feedback/{chat_id}/{message_idx}` — store per-message 👍👎 reaction
+- `src/api/routes.py`: `GET /feedback/export` — export all feedback as training data JSON
+- `src/api/routes.py`: `GET /feedback/stats` — aggregate thumbs-up/down counts
+- `src/agent.py`: `_trace_steps` accumulator for reasoning steps
+- `src/agent.py`: `confidence`, `trace`, `token_count` SSE events emitted before `done`
+- `CHANGELOG.md`, `docs/ROADMAP.md`: Sprint A–E history and roadmap checkboxes updated
+- `tests/test_v1_contracts.py`: `TestSprintE` — 18 new tests (71 total)
 
 ---
 

@@ -249,6 +249,81 @@ def _score_complexity(task: str) -> str:
     if _MED_RE.search(task): return "medium"
     return "low"
 
+# ── Ollama model registry (Phase 1: auto-select best model by task type) ─────
+# Maps task-type → ordered list of preferred Ollama model names.
+# The first model found locally wins; falls back to the configured default.
+OLLAMA_MODEL_PREFERENCES: Dict[str, List[str]] = {
+    "coding": [
+        "qwen2.5-coder:32b", "qwen2.5-coder:14b", "qwen2.5-coder:7b",
+        "deepseek-coder-v2:16b", "deepseek-coder:6.7b",
+        "codellama:34b", "codellama:13b", "codellama:7b",
+        "starcoder2:15b", "starcoder2:7b",
+        "glm-5.1:cloud",
+    ],
+    "reasoning": [
+        "deepseek-r1:70b", "deepseek-r1:32b", "deepseek-r1:14b", "deepseek-r1:7b",
+        "qwq:32b", "llama3.3:70b", "llama3.1:70b",
+        "mistral-nemo:12b", "phi4:14b",
+        "glm-5.1:cloud",
+    ],
+    "research": [
+        "llama3.3:70b", "llama3.1:70b", "qwen2.5:72b", "gemma3:27b",
+        "mistral-nemo:12b", "phi4:14b",
+        "glm-5.1:cloud",
+    ],
+    "creative": [
+        "llama3.1:70b", "mistral:7b", "gemma3:27b", "phi4:14b",
+        "glm-5.1:cloud",
+    ],
+    "data": [
+        "deepseek-r1:32b", "qwen2.5:72b", "llama3.1:70b",
+        "codellama:34b",
+        "glm-5.1:cloud",
+    ],
+    "general": [
+        "llama3.3:70b", "llama3.1:70b", "qwen2.5:72b", "gemma3:27b",
+        "mistral-nemo:12b", "phi4:14b",
+        "glm-5.1:cloud",
+    ],
+}
+
+# Additional cloud-model aliases usable when a provider sends a specific model name
+EXTENDED_MODEL_ALIASES: Dict[str, str] = {
+    # Ollama pull name → canonical ID used in routing
+    "qwen2.5-coder:32b":      "qwen2.5-coder-32b",
+    "deepseek-r1:70b":        "deepseek-r1-70b",
+    "llama3.3:70b":           "llama-3.3-70b",
+    "gemma3:27b":             "gemma-3-27b",
+    "phi4:14b":               "phi-4-14b",
+    "mistral-nemo:12b":       "mistral-nemo-12b",
+}
+
+
+def get_best_ollama_model(task_type: str) -> str:
+    """Return the best locally-available Ollama model for *task_type*.
+
+    Queries the local Ollama API to discover pulled models, then selects the
+    highest-priority match from OLLAMA_MODEL_PREFERENCES.  Falls back to the
+    configured default if nothing is found.
+    """
+    preference_list = OLLAMA_MODEL_PREFERENCES.get(task_type, OLLAMA_MODEL_PREFERENCES["general"])
+    ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/")
+    try:
+        import requests as _req
+        resp = _req.get(f"{ollama_base}/models", timeout=3)
+        if resp.status_code == 200:
+            data = resp.json()
+            # OpenAI-compat: {"data": [{"id": "model:tag"}, ...]}
+            available = {m["id"].lower() for m in data.get("data", [])}
+            for preferred in preference_list:
+                if preferred.lower() in available:
+                    return preferred
+    except Exception:
+        pass
+    # Return first preference as optimistic default (it may still work via cloud pull)
+    return PROVIDERS["ollama"]["default_model"]
+
+
 _cooldowns: Dict[str, float] = {}
 def _is_rate_limited(pid): return time.time() < _cooldowns.get(pid, 0)
 def _mark_rate_limited(pid):
@@ -293,6 +368,17 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
             preferred = [pid for pid in PROVIDER_SPECIALIZATIONS[spec] if pid in avail]
             rest = [pid for pid in ordered if pid not in preferred]
             ordered = preferred + rest
+
+    # Auto-select best local Ollama model for the detected task type
+    if pref == "auto" and "ollama" in avail:
+        spec = spec if "spec" in dir() else _task_specialization(task)
+        # Map from MoE specialization names to OLLAMA_MODEL_PREFERENCES keys
+        _type_map = {"coding": "coding", "research": "research",
+                     "creative": "creative", "reasoning": "reasoning"}
+        otype = _type_map.get(spec or "", "general")
+        best_model = get_best_ollama_model(otype)
+        # Temporarily override Ollama default_model for this call cycle
+        PROVIDERS["ollama"]["_selected_model"] = best_model
 
     return ordered
 
@@ -421,6 +507,8 @@ Available actions:
   { "action": "youtube",      "url": "https://youtube.com/watch?v=..." }
   { "action": "read_pdf",     "path": "document.pdf" }
   { "action": "diff",         "original": "old text", "modified": "new text", "filename": "app.py" }
+  { "action": "simulate",     "topic": "Will interest rates drop in 2026?", "seed": "optional context", "n_personas": 5, "n_rounds": 3 }  ← swarm prediction via persona debate
+  { "action": "agent_message", "from": "planner", "to": "architect", "content": "Proceed with module split." }  ← agent-to-agent message
 
 Rules:
 - clarify ONLY for new project creation where architecture choices matter. 2-4 questions max.
@@ -910,10 +998,12 @@ def _messages_token_estimate(messages: List[Dict]) -> int:
 def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
     import requests
     api_key = os.getenv(cfg["env_key"],"") or ("llm7" if cfg.get("keyless") else "")
+    # Use auto-selected Ollama model when available, otherwise fall back normally
+    model = _config["model"] or cfg.get("_selected_model") or cfg["default_model"]
     resp = requests.post(
         cfg["base_url"].rstrip("/")+"/chat/completions",
         headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"},
-        json={"model":_config["model"] or cfg["default_model"],
+        json={"model": model,
               "messages":[{"role":"system","content":get_system_prompt()}]+messages,
               "temperature":_config["temperature"],"max_tokens":4096},
         timeout=90)
@@ -1060,6 +1150,7 @@ TOOL_ICONS = {
     "query_db":"🗄️","generate_image":"🎨","youtube":"▶️","read_pdf":"📑","diff":"±",
     "youtube_transcript":"▶️","read_page":"🌐","api_call":"🔌","sub_agent":"🤖",
     "orchestrate_goal":"🧩","decompose_goal":"🧭","select_model":"🧠",
+    "simulate":"🧬","agent_message":"📨",
     "rag_ingest":"📚","rag_query":"🔎","rag_status":"📊",
 }
 
@@ -1422,6 +1513,68 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             yield {"type": "tool", "icon": "🧭", "action": "decompose_goal",
                    "label": goal[:120], "result": output,
                    "file_path": None, "file_content": None, "artifact": False}
+            messages.append({"role": "assistant", "content": json.dumps(action)})
+            messages.append({"role": "user", "content": f"Tool result:\n{output}\n\nContinue."})
+            continue
+
+        if kind == "simulate":
+            from .simulation import SimulationEngine
+            topic      = action.get("topic", "")
+            seed       = action.get("seed", "")
+            n_personas = max(2, min(int(action.get("n_personas", 5)), 8))
+            n_rounds   = max(1, min(int(action.get("n_rounds", 3)), 5))
+
+            def _sim_llm(msgs: List[Dict]) -> str:
+                try:
+                    res, _ = call_llm_with_fallback(msgs, "simulation")
+                    if isinstance(res, dict):
+                        if res.get("action") == "respond":
+                            return res.get("content", "")
+                        return json.dumps(res)
+                    return str(res)
+                except Exception as _se:
+                    return f"error: {_se}"
+
+            _sim_id = f"sim_{int(time.time()*1000)}"
+            yield {
+                "type": "tool", "id": _sim_id, "parent_id": None, "status": "running",
+                "icon": "🧬", "action": "simulate", "tool_name": "simulate",
+                "label": topic[:120], "result": "", "input": action,
+                "metadata": {"n_personas": n_personas, "n_rounds": n_rounds},
+                "file_path": None, "file_content": None, "artifact": False,
+            }
+            sim_dict: dict = {}
+            try:
+                engine = SimulationEngine(_sim_llm, max_personas=8, max_rounds=5)
+                sim_result = engine.run(topic, seed, n_personas, n_rounds)
+                output     = sim_result.report
+                sim_dict   = sim_result.to_dict()
+            except Exception as _sim_err:
+                output = f"Simulation failed: {_sim_err}"
+            yield {"type": "simulation", "id": _sim_id, "result": sim_dict}
+            yield {
+                "type": "tool", "id": _sim_id, "parent_id": None, "status": "done",
+                "icon": "🧬", "action": "simulate", "tool_name": "simulate",
+                "label": topic[:120], "result": output[:600], "input": action,
+                "metadata": {"n_personas": n_personas, "n_rounds": n_rounds},
+                "file_path": None, "file_content": None, "artifact": False,
+            }
+            messages.append({"role": "assistant", "content": json.dumps(action)})
+            messages.append({"role": "user", "content": f"Simulation complete.\n{output}\n\nContinue."})
+            continue
+
+        if kind == "agent_message":
+            from .agent_bus import post_message as _bus_post
+            from_id  = action.get("from", "agent")
+            to_id    = action.get("to", "broadcast")
+            content  = action.get("content", "")
+            _msg = _bus_post(from_id, to_id, content)
+            output = f"Message sent to '{to_id}' (id={_msg.msg_id})"
+            yield {
+                "type": "tool", "icon": "📨", "action": "agent_message", "tool_name": "agent_message",
+                "label": f"→ {to_id}: {content[:80]}", "result": output,
+                "file_path": None, "file_content": None, "artifact": False,
+            }
             messages.append({"role": "assistant", "content": json.dumps(action)})
             messages.append({"role": "user", "content": f"Tool result:\n{output}\n\nContinue."})
             continue
