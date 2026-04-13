@@ -20,7 +20,7 @@ from ..personas import list_personas, set_persona, get_active_persona_name, get_
 from ..memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory, delete_all as delete_all_memory, get_all as get_all_memory)
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
 from ..safety import GuardrailViolation, check_user_task, scrub_pii
-from ..safety_pipeline import SAFETY_POLICY_PROFILES, get_safety_policy, screen_input
+from ..safety_pipeline import SAFETY_POLICY_PROFILES, get_safety_policy, screen_input, explain_prompt_injection
 from ..knowledge_graph import (
     kg_store as _kg_store,
     kg_query as _kg_query,
@@ -300,6 +300,7 @@ async def prompt_injection_scan(request: Request):
         return _api_error("text is required", "validation_error", 422)
 
     profile = str(data.get("policy_profile") or _config.get("safety_profile", "standard") or "standard")
+    explain_mode = bool(data.get("explain", False))
     verdict = screen_input(text, allow_destructive=False, policy_profile=profile)
     prompt_issues = [issue.to_dict() for issue in verdict.issues if issue.code == "prompt_injection"]
     patterns = [issue.get("pattern") for issue in prompt_issues if issue.get("pattern")]
@@ -323,7 +324,11 @@ async def prompt_injection_scan(request: Request):
             for issue in prompt_issues
         ],
         "matches": patterns,
+        "explain_mode": explain_mode,
     }
+
+    if explain_mode:
+        payload["explain"] = explain_prompt_injection(text)
 
     if detected:
         _push_safety_event("block", {
@@ -665,11 +670,51 @@ def list_safety_profiles():
     }
 
 
+_SEVERITY_ORDER = {
+    "none": 0,
+    "low": 1,
+    "medium": 2,
+    "high": 3,
+    "critical": 4,
+}
+
+
+def _event_severity(event: dict) -> str:
+    verdict = event.get("verdict") or {}
+    issue_levels = []
+    for issue in verdict.get("issues", []) or []:
+        level = str(issue.get("severity") or issue.get("threat") or "").lower().strip()
+        if level in _SEVERITY_ORDER:
+            issue_levels.append(level)
+
+    if issue_levels:
+        return max(issue_levels, key=lambda lvl: _SEVERITY_ORDER.get(lvl, 0))
+
+    event_type = str(event.get("type") or "")
+    if event_type == "block":
+        return "high"
+    if event_type == "pii_scrub":
+        return "medium"
+    if event_type == "profile_change":
+        return "low"
+    return "none"
+
+
 @app.get("/safety/audit")
-def get_safety_audit(limit: int = 200, session_id: str = "", event_type: str = ""):
+def get_safety_audit(
+    limit: int = 200,
+    session_id: str = "",
+    event_type: str = "",
+    severity: str = "",
+):
     limit = max(1, min(limit, 1000))
     session_id = (session_id or "").strip()
     event_type = (event_type or "").strip()
+    severity = (severity or "").strip().lower()
+    if severity and severity not in _SEVERITY_ORDER:
+        allowed = ", ".join(_SEVERITY_ORDER.keys())
+        return _api_error(f"severity must be one of: {allowed}", "validation_error", 422)
+
     filtered: list = list(safety_log)
     if session_id:
         filtered = [
@@ -679,13 +724,29 @@ def get_safety_audit(limit: int = 200, session_id: str = "", event_type: str = "
         ]
     if event_type:
         filtered = [event for event in filtered if event.get("type") == event_type]
-    events = filtered[-limit:]
+
+    events_with_severity = []
+    for event in filtered:
+        level = _event_severity(event)
+        entry = dict(event)
+        entry["severity"] = level
+        events_with_severity.append(entry)
+
+    if severity:
+        threshold = _SEVERITY_ORDER[severity]
+        events_with_severity = [
+            event for event in events_with_severity
+            if _SEVERITY_ORDER.get(event.get("severity", "none"), 0) >= threshold
+        ]
+
+    events = events_with_severity[-limit:]
     return {
         "events": events,
-        "total": len(filtered),
+        "total": len(events_with_severity),
         "session_id": session_id or None,
         "event_type": event_type or None,
-        "filtered": bool(session_id or event_type),
+        "severity": severity or None,
+        "filtered": bool(session_id or event_type or severity),
     }
 
 @app.get("/personas")
@@ -1768,6 +1829,65 @@ def architecture_hierarchy():
         providers=get_providers_list(),
         specialist_agents=list_agents(),
     )
+
+
+@app.post("/architecture/blueprints")
+async def create_architecture_blueprint(request: Request):
+    from ..agent import get_providers_list
+    from ..agents import list_agents
+    from ..architecture import build_runtime_hierarchy
+    from ..db import save_architecture_blueprint
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    name = str(body.get("name") or "default").strip() or "default"
+    notes = str(body.get("notes") or "").strip()
+    use_runtime = bool(body.get("use_runtime", True))
+
+    snapshot = body.get("snapshot") if isinstance(body.get("snapshot"), dict) else None
+    if snapshot is None and use_runtime:
+        snapshot = build_runtime_hierarchy(
+            providers=get_providers_list(),
+            specialist_agents=list_agents(),
+        )
+
+    if snapshot is None:
+        return _api_error("snapshot is required when use_runtime=false", "validation_error", 422)
+
+    created = save_architecture_blueprint(name=name, snapshot=snapshot, notes=notes)
+    return {"blueprint": created}
+
+
+@app.get("/architecture/blueprints")
+def list_architecture_blueprints(name: str = "", limit: int = 50):
+    from ..db import list_architecture_blueprints as db_list_architecture_blueprints
+
+    items = db_list_architecture_blueprints(name=name, limit=limit)
+    return {"blueprints": items, "total": len(items)}
+
+
+@app.get("/architecture/blueprints/{name}")
+def get_architecture_blueprint(name: str, version: int = 0):
+    from ..db import load_architecture_blueprint
+
+    data = load_architecture_blueprint(name=name, version=version if version > 0 else None)
+    if not data:
+        return _api_error(f"architecture blueprint '{name}' not found", "not_found", 404)
+    return data
+
+
+@app.get("/architecture/registry/{name}")
+def get_architecture_registry(name: str, version: int = 0):
+    from ..db import load_architecture_registry
+
+    data = load_architecture_registry(name=name, version=version if version > 0 else None)
+    if not data:
+        return _api_error(f"architecture registry '{name}' not found", "not_found", 404)
+    return data
 
 
 @app.get("/agents/{agent_id}")
