@@ -5,6 +5,12 @@ unit converter, regex tester, base64, JSON formatter, color info.
 import os, re, json, math, base64 as b64lib
 from datetime import datetime
 from .model_router import ModelRouter
+from .scheduler import (
+    schedule_job,
+    list_jobs,
+    cancel_job,
+    job_to_dict,
+)
 
 # ── CALCULATOR ────────────────────────────────────────────────────────────────
 _SAFE_NAMES = {k: v for k, v in math.__dict__.items() if not k.startswith('_')}
@@ -336,6 +342,22 @@ def dispatch_builtin(action: dict) -> dict | None:
         r = tool_query_db(action.get("connection_string", ""), action.get("query", ""))
         return _tool_trace(action, r, {
             "connection_string": action.get("connection_string", ""), "query": action.get("query", "")})
+    if kind == "cron_schedule":
+        r = tool_cron_schedule(
+            action.get("name", "background-task"),
+            action.get("task", ""),
+            action.get("schedule", "5m"),
+        )
+        return _tool_trace(action, r, {
+            "name": action.get("name", "background-task"),
+            "schedule": action.get("schedule", "5m"),
+        })
+    if kind == "cron_list":
+        r = tool_cron_list()
+        return _tool_trace(action, r)
+    if kind == "cron_cancel":
+        r = tool_cron_cancel(action.get("job_id", ""))
+        return _tool_trace(action, r, {"job_id": action.get("job_id", "")})
     return None
 
 
@@ -734,6 +756,51 @@ def tool_inspect_db(connection_string: str) -> str:
             return "❌ Unsupported connection string. Use sqlite:///path.db or postgresql://..."
     except Exception as e:
         return f"❌ Schema inspection failed: {e}"
+
+
+# ── BACKGROUND SCHEDULER TOOLS ───────────────────────────────────────────────
+def tool_cron_schedule(name: str, task: str, schedule: str) -> str:
+    """Create an autonomous background job.
+
+    schedule supports intervals (30s/5m/2h/1d) or basic 5-field cron.
+    """
+    if not (task or "").strip():
+        return "❌ task is required."
+    try:
+        job = schedule_job((name or "background-task").strip(), task.strip(), (schedule or "5m").strip())
+        j = job_to_dict(job)
+        return (
+            f"✅ Scheduled **{j['name']}** (id `{j['id']}`)\n"
+            f"- task: {j['task'][:160]}\n"
+            f"- schedule: `{j['schedule']}`\n"
+            f"- next_run: `{j['next_run']}`"
+        )
+    except Exception as e:
+        return f"❌ Failed to schedule job: {e}"
+
+
+def tool_cron_list() -> str:
+    """List all background jobs with status and timing."""
+    jobs = [job_to_dict(j) for j in list_jobs()]
+    if not jobs:
+        return "No scheduled jobs."
+    lines = ["# Scheduled jobs"]
+    for j in jobs:
+        lines.append(
+            f"- `{j['id']}` **{j['name']}** · {j['status']} · `{j['schedule']}` "
+            f"(runs: {j['run_count']}, next: {j['next_run'] or 'n/a'})"
+        )
+    return "\n".join(lines)
+
+
+def tool_cron_cancel(job_id: str) -> str:
+    """Cancel a scheduled background job by id."""
+    jid = (job_id or "").strip()
+    if not jid:
+        return "❌ job_id is required."
+    if cancel_job(jid):
+        return f"✅ Cancelled job `{jid}`."
+    return f"❌ Job not found: `{jid}`"
 
 
 # ── COST ESTIMATOR ────────────────────────────────────────────────────────────

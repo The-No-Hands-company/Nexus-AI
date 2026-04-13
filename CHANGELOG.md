@@ -11,6 +11,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Sprint G: Dynamic agent spawning based on task type and complexity
 - Sprint G: Agent marketplace — JSON-defined agents importable/exportable via API
 - Sprint G: Agent-to-agent message passing via shared workspace
+- Sprint H: Vision-aware Ollama routing + `file_diff` SSE + DB `inspect_db` tool + Swarm View panel/API
+- Sprint I: Autonomous scheduler (`cron_schedule`/`cron_list`/`cron_cancel`), `/scheduler/jobs` API, command palette (Cmd+K), and `/safety/pii-scan`
 
 ---
 

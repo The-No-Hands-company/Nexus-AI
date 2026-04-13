@@ -417,6 +417,33 @@
       padding:6px 0; border-bottom:1px solid var(--border); font-size:.82rem; }
     .shortcut-row:last-child { border-bottom:none; }
 
+    /* command palette */
+    #command-palette {
+      display:none; position:fixed; inset:0; z-index:65;
+      background:rgba(0,0,0,.62); backdrop-filter:blur(6px);
+      align-items:flex-start; justify-content:center; padding-top:12vh;
+    }
+    #command-palette.open { display:flex; }
+    .cmd-box {
+      width:min(640px,92vw); background:var(--surface);
+      border:1px solid var(--border); border-radius:14px;
+      box-shadow:0 16px 52px rgba(0,0,0,.45); overflow:hidden;
+    }
+    .cmd-input {
+      width:100%; border:none; outline:none; padding:14px 16px;
+      background:transparent; color:var(--text); font-size:.92rem;
+      border-bottom:1px solid var(--border);
+    }
+    .cmd-results { max-height:360px; overflow-y:auto; }
+    .cmd-item {
+      display:flex; align-items:center; justify-content:space-between;
+      gap:8px; padding:9px 12px; border-bottom:1px solid var(--border);
+      cursor:pointer; font-size:.82rem;
+    }
+    .cmd-item:last-child { border-bottom:none; }
+    .cmd-item:hover, .cmd-item.active { background:var(--surface2); }
+    .cmd-tag { font-size:.65rem; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+
 
     /* ── USAGE DASHBOARD ── */
     .usage-grid {
@@ -892,6 +919,7 @@
   <div class="overflow-menu-wrap">
     <button class="btn-icon" id="overflow-btn" onclick="toggleOverflow()" title="More">⋮</button>
     <div id="overflow-menu" class="overflow-menu" style="display:none">
+      <button onclick="openCommandPalette();toggleOverflow()">⌘ Command palette</button>
       <button onclick="toggleSearch();toggleOverflow()">🔍 Search chats</button>
       <button onclick="openProjectsModal();toggleOverflow()">🗂️ Projects</button>
       <button onclick="openCIModal();toggleOverflow()">📋 Custom instructions</button>
@@ -900,6 +928,7 @@
       <button onclick="openHealthModal();toggleOverflow()">🏥 Provider health</button>
       <button onclick="showTokenBar();toggleOverflow()">🔑 GitHub token</button>
       <button onclick="openPersonaEditor();toggleOverflow()">🎭 Persona editor</button>
+      <button onclick="openSchedulerPanel();toggleOverflow()">⏱ Scheduler</button>
       <button onclick="openSwarmPanel();toggleOverflow()">🧬 Swarm View</button>
     </div>
   </div>
@@ -1090,7 +1119,8 @@
 <div id="shortcuts-overlay" onclick="if(event.target===this)closeShortcuts()">
   <div class="shortcuts-box">
     <div style="font-size:.95rem;font-weight:700;margin-bottom:14px">⌨️ Keyboard Shortcuts</div>
-    <div class="shortcut-row"><span>New chat</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">K</kbd></span></div>
+    <div class="shortcut-row"><span>Command palette</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">K</kbd></span></div>
+    <div class="shortcut-row"><span>New chat</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">Shift</kbd> <kbd class="kbd">K</kbd></span></div>
     <div class="shortcut-row"><span>Toggle sidebar</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">/</kbd></span></div>
     <div class="shortcut-row"><span>Stop generation</span><span><kbd class="kbd">Esc</kbd></span></div>
     <div class="shortcut-row"><span>Focus input</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">L</kbd></span></div>
@@ -1099,6 +1129,14 @@
     <div style="margin-top:14px;text-align:right">
       <button class="btn-primary" onclick="closeShortcuts()">Close</button>
     </div>
+  </div>
+</div>
+
+<!-- Command palette -->
+<div id="command-palette" onclick="if(event.target===this)closeCommandPalette()">
+  <div class="cmd-box">
+    <input id="cmd-input" class="cmd-input" placeholder="Type a command, tool, persona, or chat title..." autocomplete="off" />
+    <div id="cmd-results" class="cmd-results"></div>
   </div>
 </div>
 
@@ -1220,6 +1258,21 @@
       <span id="swarm-count">0 events</span>
       <button onclick="clearSwarmFeed()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:.65rem;">Clear</button>
     </div>
+  </div>
+
+  <!-- Scheduler panel -->
+  <div id="scheduler-panel" style="position:fixed;bottom:80px;right:370px;width:420px;max-height:430px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:40;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+      <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">⏱ Background Scheduler</span>
+      <button class="panel-btn" onclick="closeSchedulerPanel()" title="Close">✕</button>
+    </div>
+    <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr 88px;gap:8px;">
+      <input id="sch-task" placeholder="Task (e.g. sync docs to repo)" style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+      <input id="sch-schedule" placeholder="5m" value="5m" style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+      <input id="sch-name" placeholder="Job name" style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);grid-column:1/2;" />
+      <button onclick="createSchedulerJob()" class="btn-primary" style="height:36px;">Add</button>
+    </div>
+    <div id="scheduler-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:80px;"></div>
   </div>
 </div>
 
@@ -2091,7 +2144,8 @@ applyTheme();
 // ── KEYBOARD SHORTCUTS ─────────────────────────────────────────────────────────
 document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
-  if (mod && e.key === 'k') { e.preventDefault(); newChat(); }
+  if (mod && e.key === 'k' && !e.shiftKey) { e.preventDefault(); openCommandPalette(); }
+  if (mod && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); newChat(); }
   if (mod && e.key === '/') { e.preventDefault(); toggleSidebar(); }
   if (mod && e.key === 'f') { e.preventDefault(); toggleSearch(); }
   if (e.key === 'Escape') {
@@ -2218,14 +2272,80 @@ async function deleteCustomPersona(id) {
 document.addEventListener('keydown', e => {
   const mod = e.metaKey || e.ctrlKey;
   if (e.key === '?' && !e.target.matches('input,textarea')) { openShortcuts(); return; }
-  if (e.key === 'Escape') { stopStream(); closeShortcuts(); return; }
-  if (mod && e.key === 'k') { e.preventDefault(); newChat(); return; }
+  if (e.key === 'Escape') { stopStream(); closeShortcuts(); closeCommandPalette(); return; }
+  if (mod && e.key === 'k' && !e.shiftKey) { e.preventDefault(); openCommandPalette(); return; }
+  if (mod && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); newChat(); return; }
   if (mod && e.key === '/') { e.preventDefault(); toggleSidebar(); return; }
   if (mod && e.key === 'l') { e.preventDefault(); ta.focus(); ta.select(); return; }
   if (mod && e.key === 's') { e.preventDefault(); autoSave(); return; }
 });
 function openShortcuts()  { document.getElementById('shortcuts-overlay').classList.add('open'); }
 function closeShortcuts() { document.getElementById('shortcuts-overlay').classList.remove('open'); }
+
+// ── COMMAND PALETTE ─────────────────────────────────────────────────────────
+let _cmdIdx = 0;
+let _cmdItems = [];
+function _commandPool() {
+  const chats = [...document.querySelectorAll('.chat-item .chat-item-title')].map(el => {
+    const raw = (el.parentElement?.getAttribute('onclick') || '');
+    const m = raw.match(/loadChat\('([^']+)'\)/);
+    const cid = m ? m[1] : '';
+    return { label: `Open chat: ${el.textContent.trim()}`, tag: 'chat', run: () => cid && loadChat(cid) };
+  });
+  return [
+    { label: 'New chat', tag: 'app', run: () => newChat() },
+    { label: 'Toggle sidebar', tag: 'app', run: () => toggleSidebar() },
+    { label: 'Open search', tag: 'app', run: () => toggleSearch() },
+    { label: 'Open scheduler', tag: 'panel', run: () => openSchedulerPanel() },
+    { label: 'Open swarm view', tag: 'panel', run: () => openSwarmPanel() },
+    { label: 'Open settings', tag: 'panel', run: () => openSettings() },
+    { label: 'Open usage dashboard', tag: 'panel', run: () => openUsageModal() },
+    ...chats,
+  ];
+}
+function openCommandPalette() {
+  const overlay = document.getElementById('command-palette');
+  const input = document.getElementById('cmd-input');
+  overlay.classList.add('open');
+  _cmdItems = _commandPool();
+  _cmdIdx = 0;
+  input.value = '';
+  renderCommandPalette('');
+  setTimeout(() => input.focus(), 0);
+}
+function closeCommandPalette() {
+  document.getElementById('command-palette').classList.remove('open');
+}
+function renderCommandPalette(q) {
+  const query = (q || '').trim().toLowerCase();
+  const results = _cmdItems.filter(x => !query || x.label.toLowerCase().includes(query)).slice(0, 24);
+  const root = document.getElementById('cmd-results');
+  if (!results.length) {
+    root.innerHTML = '<div class="cmd-item"><span>No matches</span><span class="cmd-tag">hint</span></div>';
+    return;
+  }
+  root.innerHTML = results.map((r, i) =>
+    `<div class="cmd-item ${i===_cmdIdx?'active':''}" data-cmd-idx="${i}"><span>${esc(r.label)}</span><span class="cmd-tag">${esc(r.tag)}</span></div>`
+  ).join('');
+  [...root.querySelectorAll('.cmd-item')].forEach(el => {
+    el.addEventListener('click', () => {
+      const idx = parseInt(el.getAttribute('data-cmd-idx') || '0', 10);
+      results[idx]?.run?.();
+      closeCommandPalette();
+    });
+  });
+  const input = document.getElementById('cmd-input');
+  input.onkeydown = (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); _cmdIdx = Math.min(_cmdIdx + 1, results.length - 1); renderCommandPalette(input.value); }
+    if (e.key === 'ArrowUp') { e.preventDefault(); _cmdIdx = Math.max(_cmdIdx - 1, 0); renderCommandPalette(input.value); }
+    if (e.key === 'Enter') { e.preventDefault(); results[_cmdIdx]?.run?.(); closeCommandPalette(); }
+    if (e.key === 'Escape') { e.preventDefault(); closeCommandPalette(); }
+  };
+}
+document.getElementById('cmd-input')?.addEventListener('input', (e) => {
+  _cmdIdx = 0;
+  renderCommandPalette(e.target.value || '');
+});
 
 
 // ── PINS ──────────────────────────────────────────────────────────────────────
@@ -2872,6 +2992,76 @@ async function _pollSwarm() {
     feed.scrollTop = feed.scrollHeight;
     countEl.textContent = d.total + ' event' + (d.total===1?'':'s');
   } catch {}
+}
+
+
+// ── Scheduler panel ─────────────────────────────────────────────────────────
+let _schedulerTimer = null;
+function openSchedulerPanel() {
+  document.getElementById('scheduler-panel').style.display = 'flex';
+  refreshSchedulerJobs();
+  if (_schedulerTimer) clearInterval(_schedulerTimer);
+  _schedulerTimer = setInterval(refreshSchedulerJobs, 4000);
+}
+function closeSchedulerPanel() {
+  document.getElementById('scheduler-panel').style.display = 'none';
+  if (_schedulerTimer) { clearInterval(_schedulerTimer); _schedulerTimer = null; }
+}
+
+async function refreshSchedulerJobs() {
+  const feed = document.getElementById('scheduler-feed');
+  try {
+    const r = await fetch('/scheduler/jobs');
+    const d = await r.json();
+    const jobs = d.jobs || [];
+    if (!jobs.length) {
+      feed.innerHTML = '<div style="color:var(--muted);font-size:.75rem;padding:6px 4px">No scheduled jobs yet.</div>';
+      return;
+    }
+    feed.innerHTML = jobs.map(j => `
+      <div style="border:1px solid var(--border);border-radius:8px;padding:8px 9px;background:var(--surface2)">
+        <div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:4px">
+          <strong style="font-size:.78rem">${esc(j.name)}</strong>
+          <span style="font-size:.66rem;color:var(--muted)">${esc(j.status)}</span>
+        </div>
+        <div style="font-size:.7rem;color:var(--muted);margin-bottom:2px">${esc(j.task || '')}</div>
+        <div style="font-size:.68rem;color:var(--muted);display:flex;justify-content:space-between;gap:8px">
+          <span>Every: ${esc(j.schedule || '-')}</span>
+          <span>Runs: ${j.run_count || 0}</span>
+        </div>
+        <div style="margin-top:6px;text-align:right">
+          <button class="panel-btn" onclick="cancelSchedulerJob('${j.id}')">Cancel</button>
+        </div>
+      </div>
+    `).join('');
+  } catch {
+    feed.innerHTML = '<div style="color:var(--red);font-size:.75rem;padding:6px 4px">Failed to load jobs.</div>';
+  }
+}
+
+async function createSchedulerJob() {
+  const task = document.getElementById('sch-task').value.trim();
+  const schedule = document.getElementById('sch-schedule').value.trim() || '5m';
+  const name = (document.getElementById('sch-name').value.trim() || 'background-task');
+  if (!task) { alert('Task is required'); return; }
+  const r = await fetch('/scheduler/jobs', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({name, task, schedule})
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({error:'Failed to create job'}));
+    alert(d.error || 'Failed to create job');
+    return;
+  }
+  document.getElementById('sch-task').value = '';
+  document.getElementById('sch-name').value = '';
+  await refreshSchedulerJobs();
+}
+
+async function cancelSchedulerJob(jobId) {
+  await fetch(`/scheduler/jobs/${encodeURIComponent(jobId)}/cancel`, {method:'POST'});
+  await refreshSchedulerJobs();
 }
 
 

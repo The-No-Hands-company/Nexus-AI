@@ -551,6 +551,9 @@ Available actions:
   { "action": "diff",       "original": "old text", "modified": "new text", "filename": "app.py" }
   { "action": "query_db",   "connection_string": "sqlite:///data.db", "query": "SELECT * FROM table LIMIT 10" }
   { "action": "inspect_db", "connection_string": "sqlite:///data.db" }  ← list all tables, columns and row counts
+    { "action": "cron_schedule", "name": "nightly-backup", "task": "Export all chats to markdown", "schedule": "1d" }
+    { "action": "cron_list" }    ← list active background jobs
+    { "action": "cron_cancel", "job_id": "abc12345" }
   { "action": "read_csv",   "path": "data.csv" }
   { "action": "write_csv",  "path": "output.csv", "data": [["col1","col2"],["a","b"]] }
   { "action": "api_call",   "method": "GET", "url": "https://api.example.com/data", "headers": {}, "body": null }
@@ -1216,6 +1219,7 @@ TOOL_ICONS = {
     "simulate":"🧬","agent_message":"📨",
     "rag_ingest":"📚","rag_query":"🔎","rag_status":"📊",
     "inspect_db":"🔬","file_diff":"±",
+    "cron_schedule":"⏱️","cron_list":"📆","cron_cancel":"⏹️",
 }
 
 # ── long-context compression ──────────────────────────────────────────────────
