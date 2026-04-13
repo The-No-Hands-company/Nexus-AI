@@ -232,16 +232,16 @@ Source safety rule:
 
 #### Sprint B
 
-- [ ] Add canonical safety types + centralized guardrail pipeline
-- [ ] Add context window manager with deterministic compression policy
-- [ ] Add replayable execution traces for multi-step tool runs
-- [ ] Add high-risk-only ensemble/consensus mode
+- [x] Add canonical safety types + centralized guardrail pipeline
+- [x] Add context window manager with deterministic compression policy
+- [x] Add replayable execution traces for multi-step tool runs
+- [x] Add high-risk-only ensemble/consensus mode
 
 #### Sprint C
 
 - [ ] Add generator-critic research flow with citation confidence
 - [ ] Add checkpointed long-run execution with resumability
-- [ ] Add optional HITL checkpoints (default off)
+- [x] Add optional HITL checkpoints (default off)
 - [ ] Keep default UX path unchanged
 
 ## A2. External Capability Synthesis (Legacy Carried Over)

@@ -1,0 +1,110 @@
+owner_team: identity-access
+sprint: 2026-Q2
+generated: '2026-04-13'
+signals_refreshed: '2026-04-13'
+policy: Complete all P0 tickets before pulling P1. Promote L2 state only when evidence_gate is satisfied.
+tickets:
+- ticket_id: SPR-IDENTITY_ACCESS-Q2-01
+  l0_capability: Tool Calling and External Action Reliability
+  l1_id: L1-04-04
+  l1_feature: Human confirmation before irreversible actions
+  l2_feature_id: NAI-AUTH-SECURITY-00001
+  l2_title: Authentication and authorization feature 001
+  priority: P0
+  value_score: 95
+  owner_team: identity-access
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/api/routes.py
+  - src/db.py
+  endpoint:
+  - /auth/*
+  - /me
+  test_id: tests.test_v1_contracts::NAI-AUTH-SECURITY-00001
+  benchmark_id: bench.auth::NAI-AUTH-SECURITY-00001
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  acceptance_criteria: Given NAI-AUTH-SECURITY-00001 (Authentication and authorization feature 001) is implemented for auth
+    security behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and
+    regression coverage requirements.
+  evidence_gate: approval + authz integration tests
+  competitor_signals: Operator confirmation design
+  source_urls:
+  - https://openai.com/index/introducing-operator/
+  done_definition:
+  - 'evidence_gate satisfied: approval + authz integration tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-AUTH-SECURITY-00001'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001'
+- ticket_id: SPR-IDENTITY_ACCESS-Q2-02
+  l0_capability: Enterprise and Team Governance
+  l1_id: L1-08-01
+  l1_feature: Team policies for tool and data access
+  l2_feature_id: NAI-AUTH-SECURITY-00002
+  l2_title: Authentication and authorization feature 002
+  priority: P0
+  value_score: 94
+  owner_team: identity-access
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/api/routes.py
+  - src/db.py
+  endpoint:
+  - /auth/*
+  - /me
+  test_id: tests.test_v1_contracts::NAI-AUTH-SECURITY-00002
+  benchmark_id: bench.auth::NAI-AUTH-SECURITY-00002
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-AUTH-SECURITY-00001
+  acceptance_criteria: Given NAI-AUTH-SECURITY-00002 (Authentication and authorization feature 002) is implemented for auth
+    security behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and
+    regression coverage requirements.
+  evidence_gate: policy enforcement tests
+  competitor_signals: Enterprise plans and controls across OpenAI/Anthropic/Microsoft
+  source_urls:
+  - https://openai.com/index/
+  - https://www.anthropic.com/news
+  - https://www.microsoft.com/en-us/microsoft-copilot/blog/
+  done_definition:
+  - 'evidence_gate satisfied: policy enforcement tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-AUTH-SECURITY-00002'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-AUTH-SECURITY-00001'
+- ticket_id: SPR-IDENTITY_ACCESS-Q2-03
+  l0_capability: Enterprise and Team Governance
+  l1_id: L1-08-02
+  l1_feature: Role-based access control and approvals
+  l2_feature_id: NAI-AUTH-SECURITY-00003
+  l2_title: Authentication and authorization feature 003
+  priority: P0
+  value_score: 91
+  owner_team: identity-access
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/api/routes.py
+  - src/db.py
+  endpoint:
+  - /auth/*
+  - /me
+  test_id: tests.test_v1_contracts::NAI-AUTH-SECURITY-00003
+  benchmark_id: bench.auth::NAI-AUTH-SECURITY-00003
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-AUTH-SECURITY-00002
+  acceptance_criteria: Given NAI-AUTH-SECURITY-00003 (Authentication and authorization feature 003) is implemented for auth
+    security behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and
+    regression coverage requirements.
+  evidence_gate: rbac matrix tests
+  competitor_signals: Operator confirmation + enterprise admin trends
+  source_urls:
+  - https://openai.com/index/introducing-operator/
+  - https://www.microsoft.com/en-us/microsoft-copilot/blog/
+  done_definition:
+  - 'evidence_gate satisfied: rbac matrix tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-AUTH-SECURITY-00003'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-AUTH-SECURITY-00002'

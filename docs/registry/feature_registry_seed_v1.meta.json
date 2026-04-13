@@ -1,0 +1,40 @@
+{
+  "registry": "docs/registry/feature_registry_seed_v1.csv",
+  "version": "v1",
+  "generated_at": "2026-04-13",
+  "total_features": 1000,
+  "schema": [
+    "feature_id",
+    "domain",
+    "feature_class",
+    "state",
+    "priority",
+    "title",
+    "source_doc",
+    "acceptance_criteria_ref",
+    "depends_on",
+    "evidence_status",
+    "owner",
+    "notes"
+  ],
+  "domain_counts": {
+    "CORE": 86,
+    "ROUTER": 57,
+    "SAFETY": 107,
+    "MEMORY": 71,
+    "TOOLS": 93,
+    "MULTIAGENT": 86,
+    "MULTIMODAL": 107,
+    "UX": 64,
+    "API": 50,
+    "AUTH": 29,
+    "OBS": 50,
+    "PERF": 43,
+    "DATA": 50,
+    "EVAL": 57,
+    "PLATFORM": 50
+  },
+  "state_counts": {
+    "proposed": 1000
+  }
+}

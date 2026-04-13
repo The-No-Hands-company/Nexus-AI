@@ -1,0 +1,40 @@
+owner_team: ux-product
+sprint: 2026-Q2
+generated: '2026-04-13'
+signals_refreshed: '2026-04-13'
+policy: Complete all P0 tickets before pulling P1. Promote L2 state only when evidence_gate is satisfied.
+tickets:
+- ticket_id: SPR-UX_PRODUCT-Q2-01
+  l0_capability: Collaborative Workspace and Artifacts
+  l1_id: L1-07-01
+  l1_feature: Side-by-side artifact workspace for outputs
+  l2_feature_id: NAI-UX-UX-00001
+  l2_title: User experience feature 001
+  priority: P1
+  value_score: 89
+  owner_team: ux-product
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - static/index.html
+  - src/app.py
+  endpoint:
+  - /
+  - /static/*
+  test_id: tests.test_v1_contracts::NAI-UX-UX-00001
+  benchmark_id: bench.ux::NAI-UX-UX-00001
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00001
+  - NAI-UX-RUNTIME-00001
+  acceptance_criteria: Given NAI-UX-UX-00001 (User experience feature 001) is implemented for ux ux behavior, when exercised
+    via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression coverage requirements.
+  evidence_gate: artifact pane UX tests
+  competitor_signals: Claude Sonnet 4.6 Claude Cowork + artifact workspace; coding workspace expectations
+  source_urls:
+  - https://www.anthropic.com/news/claude-sonnet-4-6
+  done_definition:
+  - 'evidence_gate satisfied: artifact pane UX tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-UX-UX-00001'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00001, NAI-UX-RUNTIME-00001'

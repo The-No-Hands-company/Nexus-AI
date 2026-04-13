@@ -1,0 +1,123 @@
+owner_team: routing-platform
+sprint: 2026-Q2
+generated: '2026-04-13'
+signals_refreshed: '2026-04-13'
+policy: Complete all P0 tickets before pulling P1. Promote L2 state only when evidence_gate is satisfied.
+tickets:
+- ticket_id: SPR-ROUTING_PLATFORM-Q2-01
+  l0_capability: Real-Time Search and Retrieval-Grounded Answers
+  l1_id: L1-06-01
+  l1_feature: Built-in web retrieval with grounding citations
+  l2_feature_id: NAI-ROUTER-RUNTIME-00002
+  l2_title: Routing and provider feature 002
+  priority: P0
+  value_score: 93
+  owner_team: routing-platform
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/agent.py
+  - src/model_router.py
+  - src/ensemble.py
+  endpoint:
+  - /settings
+  - /providers
+  - /health
+  test_id: tests.test_v1_contracts::NAI-ROUTER-RUNTIME-00002
+  benchmark_id: bench.router::NAI-ROUTER-RUNTIME-00002
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00001
+  - NAI-ROUTER-RUNTIME-00001
+  acceptance_criteria: Given NAI-ROUTER-RUNTIME-00002 (Routing and provider feature 002) is implemented for router runtime
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: grounding citation checks
+  competitor_signals: xAI realtime search; Copilot AI search; Gemini search tasks
+  source_urls:
+  - https://x.ai/blog
+  - https://www.microsoft.com/en-us/microsoft-copilot/blog/
+  - https://deepmind.google/technologies/gemini/
+  done_definition:
+  - 'evidence_gate satisfied: grounding citation checks'
+  - 'test_id passes: tests.test_v1_contracts::NAI-ROUTER-RUNTIME-00002'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00001, NAI-ROUTER-RUNTIME-00001'
+- ticket_id: SPR-ROUTING_PLATFORM-Q2-02
+  l0_capability: Cost Latency and Routing Intelligence
+  l1_id: L1-10-01
+  l1_feature: Dynamic model routing by task complexity
+  l2_feature_id: NAI-ROUTER-RUNTIME-00003
+  l2_title: Routing and provider feature 003
+  priority: P0
+  value_score: 93
+  owner_team: routing-platform
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/agent.py
+  - src/model_router.py
+  - src/ensemble.py
+  endpoint:
+  - /settings
+  - /providers
+  - /health
+  test_id: tests.test_v1_contracts::NAI-ROUTER-RUNTIME-00003
+  benchmark_id: bench.router::NAI-ROUTER-RUNTIME-00003
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00001
+  - NAI-ROUTER-RUNTIME-00002
+  acceptance_criteria: Given NAI-ROUTER-RUNTIME-00003 (Routing and provider feature 003) is implemented for router runtime
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: routing quality benchmark
+  competitor_signals: Gemini model family surfaces; GPT-5.3 Instant fast tier; Claude effort controls (low/med/high/max)
+  source_urls:
+  - https://deepmind.google/technologies/gemini/
+  - https://x.ai/blog
+  - https://openai.com/index/
+  - https://openai.com/gpt-5/
+  done_definition:
+  - 'evidence_gate satisfied: routing quality benchmark'
+  - 'test_id passes: tests.test_v1_contracts::NAI-ROUTER-RUNTIME-00003'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00001, NAI-ROUTER-RUNTIME-00002'
+- ticket_id: SPR-ROUTING_PLATFORM-Q2-03
+  l0_capability: Cost Latency and Routing Intelligence
+  l1_id: L1-10-02
+  l1_feature: Latency-aware fallback and cooldown behavior
+  l2_feature_id: NAI-ROUTER-RUNTIME-00004
+  l2_title: Routing and provider feature 004
+  priority: P1
+  value_score: 89
+  owner_team: routing-platform
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/agent.py
+  - src/model_router.py
+  - src/ensemble.py
+  endpoint:
+  - /settings
+  - /providers
+  - /health
+  test_id: tests.test_v1_contracts::NAI-ROUTER-RUNTIME-00004
+  benchmark_id: bench.router::NAI-ROUTER-RUNTIME-00004
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00001
+  - NAI-ROUTER-RUNTIME-00003
+  acceptance_criteria: Given NAI-ROUTER-RUNTIME-00004 (Routing and provider feature 004) is implemented for router runtime
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: p95/p99 fallback tests
+  competitor_signals: provider reliability and fallback pressure
+  source_urls:
+  - https://deepmind.google/technologies/gemini/
+  - https://www.anthropic.com/news
+  done_definition:
+  - 'evidence_gate satisfied: p95/p99 fallback tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-ROUTER-RUNTIME-00004'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00001, NAI-ROUTER-RUNTIME-00003'

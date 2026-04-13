@@ -1,0 +1,36 @@
+{
+  "registry_csv": "docs/registry/feature_registry_v2_2.csv",
+  "registry_jsonl": "docs/registry/feature_registry_v2_2.jsonl",
+  "version": "v2_2",
+  "generated_at": "2026-04-13",
+  "total_features": 1000,
+  "target_total": 1000,
+  "source_hint": "v2.1 baseline + thresholds",
+  "dependency_strategy": "contract-first",
+  "numeric_threshold_columns": [
+    "slo_target_p95_ms",
+    "slo_target_p99_ms",
+    "compat_level",
+    "safety_budget",
+    "coverage_min",
+    "reliability_error_budget",
+    "availability_target"
+  ],
+  "domain_counts": {
+    "CORE": 86,
+    "ROUTER": 57,
+    "SAFETY": 107,
+    "MEMORY": 71,
+    "TOOLS": 93,
+    "MULTIAGENT": 86,
+    "MULTIMODAL": 107,
+    "UX": 64,
+    "API": 50,
+    "AUTH": 29,
+    "OBS": 50,
+    "PERF": 43,
+    "DATA": 50,
+    "EVAL": 57,
+    "PLATFORM": 50
+  }
+}

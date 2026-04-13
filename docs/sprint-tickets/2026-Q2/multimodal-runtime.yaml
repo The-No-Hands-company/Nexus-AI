@@ -1,0 +1,42 @@
+owner_team: multimodal-runtime
+sprint: 2026-Q2
+generated: '2026-04-13'
+signals_refreshed: '2026-04-13'
+policy: Complete all P0 tickets before pulling P1. Promote L2 state only when evidence_gate is satisfied.
+tickets:
+- ticket_id: SPR-MULTIMODAL_RUNTIME-Q2-01
+  l0_capability: Native Multimodality
+  l1_id: L1-03-01
+  l1_feature: Image understanding with chart/table extraction
+  l2_feature_id: NAI-MULTIMODAL-RUNTIME-00001
+  l2_title: Multimodal capability feature 001
+  priority: P1
+  value_score: 89
+  owner_team: multimodal-runtime
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/tools_builtin.py
+  - src/rag/rag_system.py
+  - static/index.html
+  endpoint:
+  - /v1/chat/completions
+  - /agent/stream
+  test_id: tests.test_v1_contracts::NAI-MULTIMODAL-RUNTIME-00001
+  benchmark_id: bench.multimodal::NAI-MULTIMODAL-RUNTIME-00001
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00001
+  acceptance_criteria: Given NAI-MULTIMODAL-RUNTIME-00001 (Multimodal capability feature 001) is implemented for multimodal
+    runtime behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and
+    regression coverage requirements.
+  evidence_gate: multimodal eval set
+  competitor_signals: Claude Sonnet 4.6 computer use + vision; Gemini multimodal reasoning
+  source_urls:
+  - https://www.anthropic.com/news/claude-sonnet-4-6
+  - https://deepmind.google/technologies/gemini/
+  done_definition:
+  - 'evidence_gate satisfied: multimodal eval set'
+  - 'test_id passes: tests.test_v1_contracts::NAI-MULTIMODAL-RUNTIME-00001'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00001'

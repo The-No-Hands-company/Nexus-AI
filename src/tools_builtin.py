@@ -378,6 +378,33 @@ def dispatch_builtin(action: dict) -> dict | None:
     if kind == "kg_list":
         r = tool_kg_list(action.get("entity_type", None))
         return _tool_trace(action, r, {"entity_type": action.get("entity_type")})
+    if kind == "read_page":
+        r = tool_read_page(action.get("url", ""))
+        return _tool_trace(action, r, {"url": action.get("url", "")})
+    if kind == "api_call":
+        r = tool_api_call(action.get("method", "GET"), action.get("url", ""),
+                          action.get("headers"), action.get("body"))
+        return _tool_trace(action, r, {"method": action.get("method", "GET"),
+                                       "url": action.get("url", "")})
+    if kind in ("youtube_transcript", "youtube"):
+        r = tool_youtube_transcript(action.get("url", ""))
+        return _tool_trace(action, r, {"url": action.get("url", "")})
+    if kind == "generate_image":
+        g = tool_generate_image(action.get("prompt", ""),
+                                 action.get("width", 1024), action.get("height", 1024))
+        r = f"![Generated image]({g['url']})\n\n*Prompt: {g['prompt']}*"
+        return _tool_trace(action, r, {"prompt": action.get("prompt", "")})
+    if kind == "diff":
+        r = tool_diff(action.get("original", ""), action.get("modified", ""),
+                      action.get("filename", "file"))
+        return _tool_trace(action, r, {"filename": action.get("filename", "file")})
+    if kind == "read_csv":
+        r = tool_read_csv(action.get("path", ""), action.get("workdir", "/tmp"))
+        return _tool_trace(action, r, {"path": action.get("path", "")})
+    if kind == "write_csv":
+        r = tool_write_csv(action.get("path", ""), action.get("data", []),
+                           action.get("workdir", "/tmp"))
+        return _tool_trace(action, r, {"path": action.get("path", "")})
     return None
 
 

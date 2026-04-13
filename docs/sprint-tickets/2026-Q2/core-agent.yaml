@@ -1,0 +1,80 @@
+owner_team: core-agent
+sprint: 2026-Q2
+generated: '2026-04-13'
+signals_refreshed: '2026-04-13'
+policy: Complete all P0 tickets before pulling P1. Promote L2 state only when evidence_gate is satisfied.
+tickets:
+- ticket_id: SPR-CORE_AGENT-Q2-01
+  l0_capability: Agentic Coding and Dev Workflow Automation
+  l1_id: L1-02-01
+  l1_feature: Repo-aware coding agent with edit-run-verify loops
+  l2_feature_id: NAI-CORE-RUNTIME-00002
+  l2_title: Core orchestration feature 002
+  priority: P0
+  value_score: 93
+  owner_team: core-agent
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/agent.py
+  - src/app.py
+  endpoint:
+  - /agent
+  - /agent/stream
+  test_id: tests.test_v1_contracts::NAI-CORE-RUNTIME-00002
+  benchmark_id: bench.core::NAI-CORE-RUNTIME-00002
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00001
+  - NAI-CORE-RUNTIME-00001
+  acceptance_criteria: Given NAI-CORE-RUNTIME-00002 (Core orchestration feature 002) is implemented for core runtime behavior,
+    when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression coverage
+    requirements.
+  evidence_gate: coding task benchmark + contract tests
+  competitor_signals: Claude Opus 4.6 agent teams; Claude Sonnet 4.6 coding; GPT-5.3-Codex agentic coding; Google Gemini coding
+  source_urls:
+  - https://www.anthropic.com/news/claude-sonnet-4-6
+  - https://deepmind.google/technologies/gemini/
+  - https://www.anthropic.com/news/claude-opus-4-6
+  - https://openai.com/index/introducing-gpt-5-3-codex/
+  done_definition:
+  - 'evidence_gate satisfied: coding task benchmark + contract tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-CORE-RUNTIME-00002'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00001, NAI-CORE-RUNTIME-00001'
+- ticket_id: SPR-CORE_AGENT-Q2-02
+  l0_capability: Autonomous Task Execution and Browser/Computer Use
+  l1_id: L1-01-02
+  l1_feature: Multi-step task planning and resumable execution
+  l2_feature_id: NAI-CORE-RUNTIME-00001
+  l2_title: Core orchestration feature 001
+  priority: P0
+  value_score: 92
+  owner_team: core-agent
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/agent.py
+  - src/app.py
+  endpoint:
+  - /agent
+  - /agent/stream
+  test_id: tests.test_v1_contracts::NAI-CORE-RUNTIME-00001
+  benchmark_id: bench.core::NAI-CORE-RUNTIME-00001
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00001
+  acceptance_criteria: Given NAI-CORE-RUNTIME-00001 (Core orchestration feature 001) is implemented for core runtime behavior,
+    when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression coverage
+    requirements.
+  evidence_gate: trace replay tests + failure resume benchmark
+  competitor_signals: OpenAI Operator; Claude Opus 4.6 long-horizon agentic workflows; Claude Sonnet 4.6 planning
+  source_urls:
+  - https://openai.com/index/introducing-operator/
+  - https://www.anthropic.com/news/claude-sonnet-4-6
+  - https://www.anthropic.com/news/claude-opus-4-6
+  done_definition:
+  - 'evidence_gate satisfied: trace replay tests + failure resume benchmark'
+  - 'test_id passes: tests.test_v1_contracts::NAI-CORE-RUNTIME-00001'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00001'
