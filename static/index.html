@@ -557,6 +557,16 @@
     .pill-providers:hover{background:color-mix(in srgb,var(--accent)22%,transparent)}
     .pill-providers .dot{width:6px;height:6px;border-radius:50%;background:var(--teal);
       animation:breathe 2.5s ease-in-out infinite}
+    /* safety profile badge */
+    .pill-safety{background:color-mix(in srgb,var(--teal)10%,transparent);
+      color:var(--teal);border:1px solid color-mix(in srgb,var(--teal)25%,transparent);
+      cursor:default;user-select:none}
+    .pill-safety[data-scope=session]{border-style:dashed;box-shadow:0 0 0 1px color-mix(in srgb,var(--accent)18%,transparent) inset}
+    .pill-safety[data-profile=strict]{color:#f87171;border-color:color-mix(in srgb,#f87171 30%,transparent);background:color-mix(in srgb,#f87171 8%,transparent)}
+    .pill-safety[data-profile=sandbox]{color:#fb923c;border-color:color-mix(in srgb,#fb923c 30%,transparent);background:color-mix(in srgb,#fb923c 8%,transparent)}
+    .pill-safety[data-profile=research]{color:#a78bfa;border-color:color-mix(in srgb,#a78bfa 30%,transparent);background:color-mix(in srgb,#a78bfa 8%,transparent)}
+    .pill-safety .safety-icon{font-size:.65rem}
+    .pill-safety .safety-scope{font-size:.58rem;opacity:.7;text-transform:uppercase;letter-spacing:.04em}
     @keyframes breathe{0%,100%{opacity:1}50%{opacity:.35}}
     .btn-icon{width:34px;height:34px;border-radius:9px;background:none;
       border:1px solid var(--border);color:var(--muted);cursor:pointer;
@@ -845,12 +855,30 @@
     #attach-btn:hover{color:var(--text);border-color:var(--accent)}
     #file-input{display:none}
     .input-hint{text-align:center;font-size:.63rem;color:var(--muted);margin-top:4px}
+    /* per-session safety selector row */
+    .session-safety-row{display:flex;align-items:center;gap:6px;padding:3px 4px 0;
+      font-size:.63rem;color:var(--muted)}
+    .session-safety-row select{font-size:.63rem;background:var(--surface2);
+      color:var(--text);border:1px solid var(--border);border-radius:6px;
+      padding:1px 4px;cursor:pointer}
+    .session-safety-row select:focus{outline:none;border-color:var(--teal)}
+    /* safety audit modal */
+    #audit-modal .audit-list{max-height:400px;overflow-y:auto;display:flex;flex-direction:column;gap:4px}
+    .audit-event{font-size:.72rem;padding:5px 8px;border-radius:6px;
+      background:var(--surface2);border-left:3px solid var(--border)}
+    .audit-event.block{border-color:var(--red)}
+    .audit-event.profile_change{border-color:var(--teal)}
+    .audit-event.pii_scrub{border-color:var(--amber)}
+    .audit-event .ae-time{color:var(--muted);font-size:.64rem}
+    .audit-event .ae-type{font-weight:700;text-transform:uppercase;font-size:.6rem;padding:1px 5px;
+      border-radius:4px;background:var(--surface3,var(--surface));margin-right:4px}
 
     /* mobile sidebar overlay */
     #sidebar-overlay{display:none;position:fixed;inset:0;z-index:15;background:rgba(0,0,0,.5)}
     @media(max-width:700px){#sidebar-overlay.active{display:block}}
     @media(max-width:480px){
       .pill-providers span{display:none}.pill-providers{padding:4px 8px}
+      .pill-safety span{display:none}.pill-safety{padding:4px 8px}
       #welcome h2{font-size:1.25rem}.bubble{font-size:.84rem}}
   </style>
 </head>
@@ -914,6 +942,9 @@
   <div class="logo">Claude <em>Alt</em></div>
   <div class="header-spacer"></div>
   <div id="autosave-dot" title="Auto-saving…"></div>
+  <button class="pill pill-safety" id="safety-pill" title="Active safety profile — click Settings to change" onclick="openSettings()">
+    <span class="safety-icon">🛡</span><span id="safety-label">standard</span><span class="safety-scope" id="safety-scope">global</span>
+  </button>
   <button class="pill pill-providers" id="provider-pill" onclick="toggleDrawer()">
     <div class="dot"></div>
     <span id="provider-label">Loading…</span>
@@ -931,6 +962,7 @@
       <button onclick="openMemoryModal();toggleOverflow()">🧠 Memory</button>
       <button onclick="openUsageModal();toggleOverflow()">📊 Usage</button>
       <button onclick="openHealthModal();toggleOverflow()">🏥 Provider health</button>
+      <button onclick="openSafetyAudit();toggleOverflow()">🛡 Safety audit log</button>
       <button onclick="showTokenBar();toggleOverflow()">🔑 GitHub token</button>
       <button onclick="openPersonaEditor();toggleOverflow()">🎭 Persona editor</button>
       <button onclick="openSchedulerPanel();toggleOverflow()">⏱ Scheduler</button>
@@ -1122,6 +1154,29 @@
   </div>
 </div>
 
+<div class="modal-overlay" id="audit-modal" onclick="if(event.target===this)closeAuditModal()">
+  <div class="modal-box" style="max-width:640px">
+    <div class="modal-header">
+      <h2>🛡 Safety Audit Log</h2>
+      <button class="modal-x" onclick="closeAuditModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="font-size:.72rem;color:var(--muted)">Filter:</span>
+        <select id="audit-filter" onchange="renderAuditList()" style="font-size:.72rem;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 6px">
+          <option value="">All events</option>
+          <option value="block">Blocks only</option>
+          <option value="profile_change">Profile changes</option>
+          <option value="pii_scrub">PII scrubs</option>
+        </select>
+        <button onclick="loadAuditLog()" style="font-size:.72rem;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:2px 8px;cursor:pointer">↻ Refresh</button>
+        <span id="audit-count" style="font-size:.65rem;color:var(--muted);margin-left:auto"></span>
+      </div>
+      <div class="audit-list" id="audit-list"><span style="color:var(--muted);font-size:.76rem">Loading…</span></div>
+    </div>
+  </div>
+</div>
+
 <div id="app">
 <!-- Keyboard shortcuts overlay -->
 <div id="shortcuts-overlay" onclick="if(event.target===this)closeShortcuts()">
@@ -1236,6 +1291,12 @@
         </button>
       </div>
       <div class="input-hint">Enter · Shift+Enter newline · 🎤 voice · 📎 attach · <button style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:.62rem;padding:0" onclick="openShortcuts()">⌨️ shortcuts</button></div>
+      <div class="session-safety-row">
+        🛡 Session safety:
+        <select id="session-safety-sel" title="Override safety profile for this session only">
+          <option value="">— global default —</option>
+        </select>
+      </div>
       <div class="token-bar-msg" id="token-bar-msg">
         <span class="tok-in" id="tok-in"></span>
         <span class="tok-out" id="tok-out"></span>
@@ -1499,6 +1560,7 @@ async function init(){
   if(sd.has_memory) showMemoryBadge();
   window._providerCache = pd.providers||[];
   updateProviderUI(pd.providers||[]);
+  updateSafetyBadge(safety.active||cfg.safety_profile||'standard','global');
   populateSettings(cfg, pd.providers||[], {
     safety_profile:safety.active||cfg.safety_profile||'standard',
     available_profiles:Object.keys(safety.profiles||{}),
@@ -1506,7 +1568,10 @@ async function init(){
     policy:(safety.profiles||{})[safety.active||cfg.safety_profile||'standard']||{},
   });
   setInterval(refreshProviders, 15000);
-  await Promise.all([loadChatList(), loadMemoryCount(), loadPersonas(), loadPrefs()]);
+  const profileNames = Object.keys(safety.profiles||{});
+  if(!profileNames.length) profileNames.push('standard','strict','sandbox','research');
+  await Promise.all([loadChatList(), loadMemoryCount(), loadPersonas(), loadPrefs(),
+                     initSessionSafetySelector(profileNames)]);
   setupDrop();
   setupVoice();
 }
@@ -1681,6 +1746,7 @@ async function loadChat(cid){
       addBubble('agent',renderMd(m.content));
     }
   }
+  await refreshSessionSafetyUI();
   triggerAutoSave(500);
   closeSidebar();loadChatList();
 }
@@ -1713,6 +1779,20 @@ async function clearMemory(){
 }
 
 // ── SETTINGS ───────────────────────────────────────────────────────────────────
+function updateSafetyBadge(profile, scope='global'){
+  const pill=document.getElementById('safety-pill');
+  const label=document.getElementById('safety-label');
+  const scopeEl=document.getElementById('safety-scope');
+  if(!pill||!label||!scopeEl) return;
+  const p=profile||'standard';
+  const s=scope||'global';
+  label.textContent=p;
+  scopeEl.textContent=s;
+  pill.setAttribute('data-profile',p);
+  pill.setAttribute('data-scope',s);
+  pill.title=`Safety profile: ${p} (${s}) — click Settings to change`;
+}
+
 function describeSafetyProfile(name, policy={}){
   const destructive = policy.allow_destructive_input ? 'allows sandbox destructive tasks' : 'blocks destructive tasks';
   const highStakes = policy.deny_high_stakes ? 'still blocks high-stakes workflows' : 'permits high-stakes workflows';
@@ -1739,10 +1819,12 @@ function populateSettings(cfg,providers,safetySettings={}){
     .map(name=>`<option value="${name}">${name.charAt(0).toUpperCase()+name.slice(1)}</option>`)
     .join('');
   safetySel.value=cfg.safety_profile||safetySettings.safety_profile||'standard';
+  updateSafetyBadge(safetySel.value);
   const updateHint=()=>{
     const active=safetySel.value;
     const fallbackPolicy=active===safetySettings.safety_profile ? (safetySettings.policy||{}) : {};
     safetyHint.textContent=describeSafetyProfile(active, profileMap[active]||fallbackPolicy);
+    updateSafetyBadge(active);
   };
   safetySel.onchange=updateHint;
   updateHint();
@@ -1775,9 +1857,11 @@ async function saveSettings(){
       temperature:parseFloat(document.getElementById('s-temp').value),
       safety_profile:document.getElementById('s-safety-profile').value
     })}).then(r=>r.json());
+  const savedProfile=resp.safety_profile||'standard';
   document.getElementById('settings-status').textContent=
-    `Saved — ${resp.provider}${resp.model?' / '+resp.model:''} / temp ${resp.temperature} / ${resp.safety_profile||'standard'} safety`;
+    `Saved — ${resp.provider}${resp.model?' / '+resp.model:''} / temp ${resp.temperature} / ${savedProfile} safety`;
   await loadSettingsModal();
+  await refreshSessionSafetyUI();
   await refreshProviders();
 }
 
@@ -2235,6 +2319,7 @@ async function newChat(){
   attachedFiles=[];renderFileChips();clearMessages();
   document.getElementById('welcome').style.display='flex';
   // autosave handles this
+  await refreshSessionSafetyUI();
   showTyping(false);if(drawerOpen)toggleDrawer();closeSidebar();ta.focus();
 }
 
@@ -2581,6 +2666,86 @@ function fmtNum(n) {
   return n;
 }
 
+
+// ── SAFETY AUDIT LOG ──────────────────────────────────────────────────────────
+let _auditEvents = [];
+async function openSafetyAudit() {
+  document.getElementById('audit-modal').classList.add('open');
+  await loadAuditLog();
+}
+function closeAuditModal() { document.getElementById('audit-modal').classList.remove('open'); }
+
+async function loadAuditLog() {
+  const data = await fetch('/safety/audit?limit=500').then(r=>r.json()).catch(()=>({events:[],total:0}));
+  _auditEvents = data.events||[];
+  document.getElementById('audit-count').textContent = `${_auditEvents.length} of ${data.total||0} events`;
+  renderAuditList();
+}
+
+function renderAuditList() {
+  const filter = document.getElementById('audit-filter').value;
+  const list   = document.getElementById('audit-list');
+  const events = filter ? _auditEvents.filter(e=>e.type===filter) : _auditEvents;
+  if(!events.length){
+    list.innerHTML='<span style="color:var(--muted);font-size:.76rem">No events yet.</span>';
+    return;
+  }
+  list.innerHTML = [...events].reverse().map(e=>{
+    const d = new Date(e.ts*1000);
+    const time = d.toLocaleTimeString()+' '+d.toLocaleDateString();
+    let detail = '';
+    if(e.type==='block'){
+      const reason = e.verdict?.issues?.[0]?.reason || e.verdict?.reason || e.verdict?.action || 'blocked';
+      detail = `<b>${e.tool||'input'}</b> — ${reason} <span style="color:var(--muted)">[${e.profile||'?'}]</span>`;
+      if(e.scope) detail += ` <span style="color:var(--muted)">(${esc(e.scope)})</span>`;
+      if(e.label) detail += `<div style="color:var(--muted);margin-top:2px;font-size:.64rem">${esc(e.label.slice(0,120))}</div>`;
+    } else if(e.type==='profile_change'){
+      if(e.scope==='session')
+        detail = `Session <code>${esc(e.session_id||'?')}</code> → <b>${e.profile||'?'}</b>${e.overridden?'':' (cleared to global)'}`;
+      else
+        detail = `Global profile changed: <b>${e.from||'?'}</b> → <b>${e.to||'?'}</b>`;
+    } else if(e.type==='pii_scrub'){
+      detail = `${e.count||'?'} item(s) scrubbed` + (e.scope?` <span style="color:var(--muted)">(${esc(e.scope)})</span>`:'');
+      if(e.label) detail += `<div style="color:var(--muted);margin-top:2px;font-size:.64rem">${esc(e.label.slice(0,120))}</div>`;
+    } else {
+      detail = JSON.stringify(e).slice(0,120);
+    }
+    return `<div class="audit-event ${e.type}">
+      <span class="ae-type">${e.type}</span>
+      ${detail}
+      <div class="ae-time">${time}</div>
+    </div>`;
+  }).join('');
+}
+
+// ── SESSION SAFETY OVERRIDE ────────────────────────────────────────────────────
+async function refreshSessionSafetyUI() {
+  if(!sid) return;
+  const sel = document.getElementById('session-safety-sel');
+  const d = await fetch(`/session/${sid}/safety`).then(r=>r.json()).catch(()=>null);
+  if(!d) return;
+  if(sel) sel.value = d.session_profile||'';
+  updateSafetyBadge(d.effective_profile||d.global_profile||'standard', d.session_profile ? 'session' : 'global');
+}
+
+async function initSessionSafetySelector(profiles) {
+  const sel = document.getElementById('session-safety-sel');
+  if(!sel) return;
+  // populate options (keep the "global default" blank option)
+  sel.innerHTML = '<option value="">— global default —</option>'
+    + profiles.map(p=>`<option value="${p}">${p.charAt(0).toUpperCase()+p.slice(1)}</option>`).join('');
+  await refreshSessionSafetyUI();
+  sel.onchange = async () => {
+    const profile = sel.value || null;
+    const resp = await fetch(`/session/${sid}/safety`,{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({safety_profile: profile})});
+    const data = await resp.json().catch(()=>null);
+    // reflect effective profile in header badge
+    const effective = data?.effective_profile || profile || 'standard';
+    updateSafetyBadge(effective, data?.session_profile ? 'session' : 'global');
+  };
+}
 
 // ── PROVIDER HEALTH ────────────────────────────────────────────────────────────
 async function openHealthModal() {

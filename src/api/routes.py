@@ -5,7 +5,7 @@ from fastapi import Request, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from pydantic import ValidationError
 from ..app import app
-from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY)
+from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event)
 from ..approvals import list_tool_approvals, decide_tool_approval
 from ..scheduler import (
     schedule_job,
@@ -256,6 +256,22 @@ async def safety_check(request: Request):
         }
         for issue in payload["issues"]
     ]
+    if not verdict.allowed:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "input_guardrail",
+            "label": text[:120],
+            "profile": profile,
+            "verdict": payload,
+        })
+    elif payload.get("pii_matches"):
+        _push_safety_event("pii_scrub", {
+            "scope": "input",
+            "profile": profile,
+            "count": len(payload.get("pii_matches") or []),
+            "label": text[:120],
+            "findings": payload.get("pii_matches") or [],
+        })
     return payload
 
 
@@ -265,7 +281,15 @@ async def pii_scan(request: Request):
     text = (data.get("text") or "")
     if not text.strip():
         return _api_error("text is required", "validation_error", 422)
-    return scrub_pii(text)
+    result = scrub_pii(text)
+    if result.get("total_findings", 0) > 0:
+        _push_safety_event("pii_scrub", {
+            "scope": "scan",
+            "count": result.get("total_findings", 0),
+            "label": text[:120],
+            "findings": result.get("findings") or [],
+        })
+    return result
 
 
 # ── Scheduler API ─────────────────────────────────────────────────────────────
@@ -538,11 +562,16 @@ def get_settings(): return get_config()
 @app.post("/settings")
 async def post_settings(request: Request):
     data = await request.json()
-    return update_config(provider=data.get("provider"),
-                         model=data.get("model"),
-                         temperature=data.get("temperature"),
-                         persona=data.get("persona"),
-                         safety_profile=data.get("safety_profile"))
+    prev_profile = _config.get("safety_profile", "standard")
+    result = update_config(provider=data.get("provider"),
+                           model=data.get("model"),
+                           temperature=data.get("temperature"),
+                           persona=data.get("persona"),
+                           safety_profile=data.get("safety_profile"))
+    new_profile = _config.get("safety_profile", "standard")
+    if data.get("safety_profile") and new_profile != prev_profile:
+        _push_safety_event("profile_change", {"scope": "global", "from": prev_profile, "to": new_profile})
+    return result
 
 
 @app.get("/settings/safety")
@@ -562,7 +591,10 @@ async def update_safety_settings(request: Request):
     if profile not in SAFETY_POLICY_PROFILES:
         allowed = ", ".join(sorted(SAFETY_POLICY_PROFILES.keys()))
         return _api_error(f"safety_profile must be one of: {allowed}", "validation_error", 422)
+    prev = _config.get("safety_profile", "standard")
     update_config(safety_profile=profile)
+    if profile != prev:
+        _push_safety_event("profile_change", {"scope": "global", "from": prev, "to": profile})
     return {
         "safety_profile": _config.get("safety_profile", "standard"),
         "policy": get_safety_policy(_config.get("safety_profile", "standard")),
@@ -579,6 +611,13 @@ def list_safety_profiles():
             for name in sorted(SAFETY_POLICY_PROFILES.keys())
         },
     }
+
+
+@app.get("/safety/audit")
+def get_safety_audit(limit: int = 200):
+    limit = max(1, min(limit, 1000))
+    events = safety_log[-limit:]
+    return {"events": events, "total": len(safety_log)}
 
 @app.get("/personas")
 def list_personas():
@@ -902,6 +941,41 @@ async def set_token(sid: str, request: Request):
     token = data.get("token","").strip()
     if token: set_session_token(sid, token)
     return {"set": bool(token)}
+
+
+# ── per-session safety profile override ──────────────────────────────────────
+@app.get("/session/{sid}/safety")
+def get_session_safety(sid: str):
+    from ..agent import get_session_state
+    session_profile = get_session_state(sid).get("safety_profile") if sid else None
+    effective = get_session_safety_profile(sid)
+    return {
+        "session_id": sid,
+        "session_profile": session_profile,   # None = not overridden
+        "effective_profile": effective,
+        "global_profile": _config.get("safety_profile", "standard"),
+        "available_profiles": list(SAFETY_POLICY_PROFILES.keys()),
+    }
+
+@app.post("/session/{sid}/safety")
+async def set_session_safety(sid: str, request: Request):
+    data    = await request.json()
+    profile = data.get("safety_profile")
+    allowed = list(SAFETY_POLICY_PROFILES.keys())
+    if profile is not None:
+        profile = str(profile).lower().strip()
+        if profile not in allowed:
+            return _api_error(f"safety_profile must be one of: {allowed}", "validation_error", 422)
+    set_session_safety_profile(sid, profile)  # None clears the override
+    effective = get_session_safety_profile(sid)
+    _push_safety_event("profile_change", {"scope": "session", "session_id": sid,
+                                          "profile": effective, "overridden": profile is not None})
+    return {
+        "session_id": sid,
+        "session_profile": profile,
+        "effective_profile": effective,
+        "global_profile": _config.get("safety_profile", "standard"),
+    }
 
 
 # ── chat history ──────────────────────────────────────────────────────────────
@@ -1342,8 +1416,16 @@ async def agent_post(request: Request):
         return _api_error("task is required", "validation_error", 422)
 
     try:
-        task = check_user_task(task)
+        task = check_user_task(task, policy_profile=get_session_safety_profile(sid or ""))
     except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "agent_task",
+            "label": task[:120],
+            "session": sid,
+            "profile": get_session_safety_profile(sid or ""),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
         return _api_error(exc.reason, exc.code, 422)
 
     history = sessions.get(sid,[]) if sid else []
@@ -1364,8 +1446,16 @@ async def agent_stream(request: Request):
         return _api_error("task is required", "validation_error", 422)
 
     try:
-        task = check_user_task(task)
+        task = check_user_task(task, policy_profile=get_session_safety_profile(sid or ""))
     except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "agent_stream",
+            "label": task[:120],
+            "session": sid,
+            "profile": get_session_safety_profile(sid or ""),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
         return _api_error(exc.reason, exc.code, 422)
 
     execution_traces[trace_id] = []
@@ -1504,6 +1594,12 @@ async def memory_search(
       date_to   — unix timestamp upper bound
       tags      — comma-separated tag substrings
       persona   — exact persona name filter
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "webhook_trigger",
+            "label": task[:120],
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
     """
     from ..memory import get_semantic_memory_filtered
     tag_list = [t.strip() for t in tags.split(",") if t.strip()] if tags else None
@@ -1617,9 +1713,18 @@ async def run_specialist_agent(agent_id: str, request: Request):
     if agent is None:
         return _api_error(f"Agent '{agent_id}' not found", "not_found", 404)
 
+    session_id = str(body.get("session_id") or "")
     try:
-        check_user_task(task)
+        check_user_task(task, policy_profile=get_session_safety_profile(session_id))
     except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": f"specialist:{agent_id}",
+            "label": task[:120],
+            "session": session_id or None,
+            "profile": get_session_safety_profile(session_id),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
         return _api_error(exc.reason, exc.code, 422)
 
     messages = [

@@ -8,6 +8,7 @@ from src.app import app
 from src.safety_pipeline import screen_input, screen_output, screen_tool_action
 from src.safety import check_text_against_guardrail, check_user_task, GuardrailViolation
 from src.context_window import ContextWindowManager
+from src.agent import safety_log
 from src.ensemble import (
     score_task_risk,
     is_high_risk,
@@ -324,6 +325,111 @@ class TestSafetySettings(unittest.TestCase):
         payload = response.json()
         self.assertFalse(payload["allowed"])
         self.assertEqual(payload["policy_profile"], "standard")
+
+
+class TestSessionSafety(unittest.TestCase):
+    """Per-session safety profile override endpoints."""
+
+    def setUp(self):
+        # Create a fresh session to test against
+        resp = client.post("/session")
+        self.sid = resp.json()["session_id"]
+
+    def tearDown(self):
+        client.delete(f"/session/{self.sid}")
+        client.post("/settings/safety", json={"safety_profile": "standard"})
+
+    def test_get_session_safety_returns_global_when_unset(self):
+        resp = client.get(f"/session/{self.sid}/safety")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIsNone(data["session_profile"])
+        self.assertEqual(data["effective_profile"], "standard")
+
+    def test_set_session_safety_overrides_global(self):
+        resp = client.post(f"/session/{self.sid}/safety",
+                           json={"safety_profile": "sandbox"})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data["session_profile"], "sandbox")
+        self.assertEqual(data["effective_profile"], "sandbox")
+
+    def test_session_safety_does_not_affect_global(self):
+        client.post(f"/session/{self.sid}/safety", json={"safety_profile": "strict"})
+        global_resp = client.get("/settings/safety")
+        self.assertEqual(global_resp.json()["safety_profile"], "standard")
+
+    def test_clear_session_safety_reverts_to_global(self):
+        client.post(f"/session/{self.sid}/safety", json={"safety_profile": "strict"})
+        clear_resp = client.post(f"/session/{self.sid}/safety",
+                                 json={"safety_profile": None})
+        self.assertEqual(clear_resp.status_code, 200)
+        data = clear_resp.json()
+        self.assertIsNone(data["session_profile"])
+        self.assertEqual(data["effective_profile"], "standard")
+
+    def test_invalid_profile_rejected(self):
+        resp = client.post(f"/session/{self.sid}/safety",
+                           json={"safety_profile": "ultra-secret"})
+        self.assertEqual(resp.status_code, 422)
+
+
+class TestSafetyAuditLog(unittest.TestCase):
+    """GET /safety/audit endpoint."""
+
+    def setUp(self):
+        safety_log.clear()
+
+    def tearDown(self):
+        client.post("/settings/safety", json={"safety_profile": "standard"})
+        safety_log.clear()
+
+    def test_audit_endpoint_returns_list(self):
+        resp = client.get("/safety/audit")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("events", data)
+        self.assertIn("total", data)
+        self.assertIsInstance(data["events"], list)
+
+    def test_profile_change_appears_in_audit_log(self):
+        client.post("/settings/safety", json={"safety_profile": "sandbox"})
+        resp = client.get("/safety/audit")
+        events = resp.json()["events"]
+        change_events = [e for e in events if e.get("type") == "profile_change"]
+        self.assertTrue(len(change_events) > 0)
+        last = change_events[-1]
+        self.assertEqual(last["to"], "sandbox")
+
+    def test_audit_limit_param_respected(self):
+        resp = client.get("/safety/audit?limit=1")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertLessEqual(len(data["events"]), 1)
+
+    def test_blocked_input_guardrail_appears_in_audit_log(self):
+        response = client.post(
+            "/safety/check",
+            json={"text": "Please run rm -rf /var/data", "policy_profile": "standard"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["allowed"])
+
+        audit = client.get("/safety/audit").json()["events"]
+        block_events = [e for e in audit if e.get("type") == "block"]
+        self.assertTrue(block_events)
+        self.assertEqual(block_events[-1]["scope"], "input")
+        self.assertEqual(block_events[-1]["tool"], "input_guardrail")
+
+    def test_pii_scan_appears_in_audit_log(self):
+        response = client.post("/safety/pii-scan", json={"text": "email me at test@example.com"})
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(response.json()["total_findings"], 0)
+
+        audit = client.get("/safety/audit").json()["events"]
+        pii_events = [e for e in audit if e.get("type") == "pii_scrub"]
+        self.assertTrue(pii_events)
+        self.assertEqual(pii_events[-1]["scope"], "scan")
 
 
 class TestContextWindowManager(unittest.TestCase):
