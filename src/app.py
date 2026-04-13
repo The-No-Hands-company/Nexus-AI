@@ -1,6 +1,7 @@
 import os, uuid, json, asyncio, threading, time
 import secrets, hashlib
 import jwt as _jwt
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
@@ -28,7 +29,15 @@ from .memory import (add_memory, get_memory_context, summarize_history, get_sema
                     delete_all as delete_all_memory, get_all as get_all_memory)
 from .autonomy import Orchestrator, PlanningSystem, classify_subtask
 
-app = FastAPI(title="Nexus AI")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Centralized startup lifecycle: scheduler integration + cloud background loops.
+    from .api import routes as api_routes
+    api_routes.startup_event()
+    yield
+
+
+app = FastAPI(title="Nexus AI", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Allow Nexus Cloud portal to embed this app in an iframe.
