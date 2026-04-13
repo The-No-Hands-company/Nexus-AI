@@ -55,6 +55,14 @@ Open [http://localhost:8000](http://localhost:8000)
 3. Add environment variables (see [Environment Variables](#environment-variables))
 4. Deploy — done
 
+### Optional RAG extras
+
+Production deploys use `requirements.txt` (lean/default). If you want semantic vector extras, install:
+
+```bash
+pip install -r requirements.rag.txt
+```
+
 ---
 
 ## Environment Variables
