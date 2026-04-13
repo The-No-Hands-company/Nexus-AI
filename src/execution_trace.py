@@ -18,7 +18,7 @@ import json
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = os.getenv("DB_PATH", "/tmp/nexus_ai.db")
@@ -58,7 +58,7 @@ init_trace_tables()
 
 
 def _now() -> str:
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def save_checkpoint(

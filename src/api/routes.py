@@ -1,6 +1,6 @@
 import os, uuid, json, asyncio, threading, time, hmac, secrets, hashlib
 import jwt as _jwt
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import Request, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from pydantic import ValidationError
@@ -883,7 +883,7 @@ async def save_chat(request: Request):
     history = sessions.get(sid,[]) if sid else data.get("messages",[])
     # Explicit title always wins (rename case); otherwise auto-generate
     title   = data.get("title") or (chats[cid]["title"] if cid in chats else None) or _auto_title(history)
-    now     = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     cid     = data.get("chat_id") or str(uuid.uuid4())
     created = chats[cid]["created_at"] if cid in chats else now
     chats[cid] = {"id":cid,"title":title[:80],
@@ -929,8 +929,11 @@ def share_chat(cid: str):
     chat = chats.get(cid)
     if not chat: return {"error":"Not found"}
     share_id = str(uuid.uuid4())[:8]
-    share_data = {"title":chat["title"],"messages":chat["messages"],
-                   "created_at":datetime.utcnow().isoformat()}
+    share_data = {
+        "title": chat["title"],
+        "messages": chat["messages"],
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
     shares[share_id] = share_data
     db_save_share(share_id, chat["title"],
                   share_data["created_at"], chat["messages"])
@@ -971,7 +974,7 @@ def list_projects():
 async def create_project(request: Request):
     data = await request.json()
     pid  = data.get("id") or str(uuid.uuid4())
-    now  = datetime.utcnow().isoformat()
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     proj = {
         "id":           pid,
         "name":         data.get("name","New Project")[:80],
@@ -1078,7 +1081,7 @@ async def update_project_context(pid: str, request: Request):
         "summary": data.get("summary", ""),
         "instructions": data.get("instructions", proj.get("instructions", "")),
         "files": data.get("files", []),
-        "last_session": datetime.utcnow().isoformat(),
+        "last_session": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "_ts": time.time(),
     }
     return {"updated": pid}
