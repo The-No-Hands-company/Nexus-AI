@@ -5,7 +5,7 @@ from fastapi import Request, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from pydantic import ValidationError
 from ..app import app
-from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS)
+from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY)
 from ..gist_backup import restore_from_gist
 from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref)
 from ..personas import list_personas, set_persona, get_active_persona_name, get_persona
@@ -193,6 +193,15 @@ def system_resources():
 
 @app.get("/providers")
 def providers(): return {"providers":get_providers_list()}
+
+
+# ── Swarm View ────────────────────────────────────────────────────────────────
+
+@app.get("/swarm/activity")
+def swarm_activity(limit: int = 50):
+    """Return the most recent swarm activity events (capped at _MAX_ACTIVITY)."""
+    limit = max(1, min(limit, _MAX_ACTIVITY))
+    return {"events": activity_log[-limit:], "total": len(activity_log)}
 
 
 @app.post("/safety/check")

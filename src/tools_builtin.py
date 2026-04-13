@@ -329,6 +329,13 @@ def dispatch_builtin(action: dict) -> dict | None:
     if kind == "rag_status":
         r = tool_rag_status()
         return _tool_trace(action, r)
+    if kind == "inspect_db":
+        r = tool_inspect_db(action.get("connection_string", ""))
+        return _tool_trace(action, r, {"connection_string": action.get("connection_string", "")})
+    if kind == "query_db":
+        r = tool_query_db(action.get("connection_string", ""), action.get("query", ""))
+        return _tool_trace(action, r, {
+            "connection_string": action.get("connection_string", ""), "query": action.get("query", "")})
     return None
 
 
@@ -642,6 +649,91 @@ def tool_query_db(connection_string: str, query: str) -> str:
             return "❌ Only SQLite (sqlite:///path.db) supported currently."
     except Exception as e:
         return f"❌ Query failed: {e}"
+
+
+def tool_inspect_db(connection_string: str) -> str:
+    """Introspect a database schema — list tables, columns, types, and row counts.
+
+    Supports:
+      sqlite:///path/to/file.db  or  /path/to/file.db
+      postgresql://user:pass@host/dbname  (requires psycopg2)  # pragma: allowlist secret
+    """
+    cs = (connection_string or "").strip()
+    if not cs:
+        return "❌ connection_string is required."
+    try:
+        if cs.startswith("sqlite:///") or cs.endswith(".db"):
+            import sqlite3
+            path = cs.replace("sqlite:///", "")
+            conn = sqlite3.connect(path)
+            c    = conn.cursor()
+            tables = [r[0] for r in c.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+            ).fetchall()]
+            if not tables:
+                conn.close()
+                return "No tables found."
+            lines = [f"**SQLite schema** — `{path}`\n"]
+            for tbl in tables:
+                try:
+                    cnt = c.execute(f"SELECT COUNT(*) FROM \"{tbl}\"").fetchone()[0]
+                except Exception:
+                    cnt = "?"
+                lines.append(f"### {tbl} ({cnt} rows)")
+                cols_info = c.execute(f"PRAGMA table_info(\"{tbl}\")").fetchall()
+                for col in cols_info:
+                    pk = " 🔑" if col[5] else ""
+                    nn = " NOT NULL" if col[3] else ""
+                    dv = f" DEFAULT {col[4]}" if col[4] is not None else ""
+                    lines.append(f"  - **{col[1]}** `{col[2]}`{nn}{dv}{pk}")
+                lines.append("")
+            conn.close()
+            return "\n".join(lines)
+
+        elif cs.startswith("postgresql://") or cs.startswith("postgres://"):
+            try:
+                import psycopg2
+                import psycopg2.extras
+            except ImportError:
+                return "❌ psycopg2 not installed. Run: pip install psycopg2-binary"
+            conn = psycopg2.connect(cs)
+            cur  = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cur.execute("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                ORDER BY table_name
+            """)
+            tables = [r["table_name"] for r in cur.fetchall()]
+            if not tables:
+                conn.close()
+                return "No public tables found."
+            lines = [f"**PostgreSQL schema** — `{cs.split('@')[-1]}`\n"]
+            for tbl in tables:
+                try:
+                    cur.execute(f'SELECT COUNT(*) FROM "{tbl}"')
+                    cnt = cur.fetchone()[0]
+                except Exception:
+                    cnt = "?"
+                lines.append(f"### {tbl} ({cnt} rows)")
+                cur.execute("""
+                    SELECT column_name, data_type, is_nullable, column_default
+                    FROM information_schema.columns
+                    WHERE table_schema='public' AND table_name=%s
+                    ORDER BY ordinal_position
+                """, (tbl,))
+                for col in cur.fetchall():
+                    nn = "" if col["is_nullable"] == "YES" else " NOT NULL"
+                    dv = f" DEFAULT {col['column_default']}" if col["column_default"] else ""
+                    lines.append(f"  - **{col['column_name']}** `{col['data_type']}`{nn}{dv}")
+                lines.append("")
+            conn.close()
+            return "\n".join(lines)
+
+        else:
+            return "❌ Unsupported connection string. Use sqlite:///path.db or postgresql://..."
+    except Exception as e:
+        return f"❌ Schema inspection failed: {e}"
 
 
 # ── COST ESTIMATOR ────────────────────────────────────────────────────────────

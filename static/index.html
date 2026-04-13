@@ -900,6 +900,7 @@
       <button onclick="openHealthModal();toggleOverflow()">🏥 Provider health</button>
       <button onclick="showTokenBar();toggleOverflow()">🔑 GitHub token</button>
       <button onclick="openPersonaEditor();toggleOverflow()">🎭 Persona editor</button>
+      <button onclick="openSwarmPanel();toggleOverflow()">🧬 Swarm View</button>
     </div>
   </div>
 </header>
@@ -1206,6 +1207,19 @@
       <button class="panel-btn" onclick="openArtifactExternal()" title="Open in new tab">↗</button>
     </div>
     <div class="artifact-panel-body" id="artifact-panel-body"></div>
+  </div>
+
+  <!-- Swarm View panel -->
+  <div id="swarm-panel" style="position:fixed;bottom:80px;right:18px;width:340px;max-height:360px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:40;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+      <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🧬 Swarm Activity</span>
+      <button class="panel-btn" onclick="closeSwarmPanel()" title="Close">✕</button>
+    </div>
+    <div id="swarm-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:4px;min-height:60px;"></div>
+    <div style="padding:6px 14px;border-top:1px solid var(--border);font-size:.65rem;color:var(--muted);display:flex;justify-content:space-between;">
+      <span id="swarm-count">0 events</span>
+      <button onclick="clearSwarmFeed()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:.65rem;">Clear</button>
+    </div>
   </div>
 </div>
 
@@ -1942,6 +1956,26 @@ async function send(){
           prompt.className='img-prompt';prompt.textContent=evt.prompt||'';
           imgWrap.appendChild(img);imgWrap.appendChild(prompt);
           agentBub.appendChild(imgWrap);scrollBottom();
+
+        } else if(evt.type==='file_diff'){
+          const diffCard=document.createElement('div');
+          diffCard.style.cssText='margin:6px 0;border:1px solid var(--border);border-radius:8px;overflow:hidden;font-size:12px;font-family:monospace;';
+          const diffHdr=document.createElement('div');
+          diffHdr.style.cssText='padding:6px 10px;background:var(--surface2);display:flex;align-items:center;gap:8px;';
+          diffHdr.innerHTML=`<span>± ${esc(evt.path)}</span>${evt.truncated?'<span style="color:var(--muted);font-size:11px;">(truncated)</span>':''}`;
+          const diffBody=document.createElement('div');
+          diffBody.style.cssText='display:grid;grid-template-columns:1fr 1fr;max-height:280px;overflow:auto;';
+          const before=document.createElement('pre');
+          before.style.cssText='margin:0;padding:8px;background:rgba(255,80,80,0.06);border-right:1px solid var(--border);overflow:auto;white-space:pre-wrap;word-break:break-all;';
+          before.textContent=evt.before||'';
+          const after=document.createElement('pre');
+          after.style.cssText='margin:0;padding:8px;background:rgba(80,200,120,0.06);overflow:auto;white-space:pre-wrap;word-break:break-all;';
+          after.textContent=evt.after||'';
+          diffBody.appendChild(before); diffBody.appendChild(after);
+          diffCard.appendChild(diffHdr); diffCard.appendChild(diffBody);
+          if(!toolContainer){toolContainer=document.createElement('div');toolContainer.className='tool-container';agentBub.appendChild(toolContainer);}
+          toolContainer.appendChild(diffCard);
+          scrollBottom();
 
         } else if(evt.type==='fallback'){
           const tag=document.createElement('div');tag.className='fallback-tag';
@@ -2783,6 +2817,61 @@ function extractSources(toolResult) {
   const m = toolResult.match(/\[SOURCES_JSON\](.*?)\[\/SOURCES_JSON\]/s);
   if (!m) return null;
   try { return JSON.parse(m[1]); } catch { return null; }
+}
+
+// ── Swarm View ────────────────────────────────────────────────────────────────
+let _swarmTimer = null;
+const SWARM_ACTION_COLORS = {
+  write_file:'#4a9', read_file:'#69b', run_command:'#d96',
+  web_search:'#79d', query_db:'#a8a', inspect_db:'#a8a',
+  commit_push:'#5b5', clone_repo:'#5b5', sub_agent:'#b75',
+};
+
+function openSwarmPanel() {
+  document.getElementById('swarm-panel').style.display='flex';
+  _startSwarmPolling();
+}
+function closeSwarmPanel() {
+  document.getElementById('swarm-panel').style.display='none';
+  _stopSwarmPolling();
+}
+function clearSwarmFeed() {
+  document.getElementById('swarm-feed').innerHTML='';
+  document.getElementById('swarm-count').textContent='0 events';
+}
+
+function _startSwarmPolling() {
+  if (_swarmTimer) return;
+  _pollSwarm();
+  _swarmTimer = setInterval(_pollSwarm, 2000);
+}
+function _stopSwarmPolling() {
+  if (_swarmTimer) { clearInterval(_swarmTimer); _swarmTimer=null; }
+}
+
+let _lastSwarmTotal = 0;
+async function _pollSwarm() {
+  try {
+    const r = await fetch('/swarm/activity?limit=60');
+    if (!r.ok) return;
+    const d = await r.json();
+    const feed = document.getElementById('swarm-feed');
+    const countEl = document.getElementById('swarm-count');
+    if (d.total === _lastSwarmTotal) return;
+    // Only render new events
+    const newEvents = d.events.slice(Math.max(0, d.events.length - (d.total - _lastSwarmTotal)));
+    _lastSwarmTotal = d.total;
+    for (const ev of newEvents) {
+      const row = document.createElement('div');
+      const clr = SWARM_ACTION_COLORS[ev.action] || '#888';
+      const ts = ev.ts ? new Date(ev.ts*1000).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit',second:'2-digit'}) : '';
+      row.style.cssText = `display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:6px;background:var(--surface2);font-size:.72rem;`;
+      row.innerHTML = `<span style="color:${clr};font-weight:700;min-width:90px;">${esc(ev.action||'?')}</span><span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(ev.label||'')}</span><span style="color:var(--muted);font-size:.65rem;">${ts}</span>`;
+      feed.appendChild(row);
+    }
+    feed.scrollTop = feed.scrollHeight;
+    countEl.textContent = d.total + ' event' + (d.total===1?'':'s');
+  } catch {}
 }
 
 
