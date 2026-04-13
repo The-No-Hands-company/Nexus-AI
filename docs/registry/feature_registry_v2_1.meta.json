@@ -1,0 +1,35 @@
+{
+  "registry_csv": "docs/registry/feature_registry_v2_1.csv",
+  "registry_jsonl": "docs/registry/feature_registry_v2_1.jsonl",
+  "version": "v2.1",
+  "generated_at": "2026-04-13",
+  "total_features": 1000,
+  "source_registry": "docs/registry/feature_registry_v2.csv",
+  "dependency_strategy": "contract-first",
+  "acceptance_template_strategy": {
+    "SAFETY": "strict policy determinism + auditability",
+    "PERF": "latency SLO language (p95/p99 + error budget)",
+    "API-CONTRACT": "schema compatibility and typed error stability",
+    "AUTH": "authorization boundary enforcement",
+    "MULTIMODAL": "grounded modality handling + safety filtering",
+    "TOOLS": "bounded side effects + traceability",
+    "MEMORY": "retrieval relevance and deterministic conflict resolution"
+  },
+  "domain_counts": {
+    "CORE": 86,
+    "ROUTER": 57,
+    "SAFETY": 107,
+    "MEMORY": 71,
+    "TOOLS": 93,
+    "MULTIAGENT": 86,
+    "MULTIMODAL": 107,
+    "UX": 64,
+    "API": 50,
+    "AUTH": 29,
+    "OBS": 50,
+    "PERF": 43,
+    "DATA": 50,
+    "EVAL": 57,
+    "PLATFORM": 50
+  }
+}

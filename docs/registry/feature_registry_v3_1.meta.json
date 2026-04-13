@@ -1,0 +1,19 @@
+{
+  "version": "v3_1",
+  "generated_at": "2026-04-13",
+  "total_features": 50000,
+  "target_total": 50000,
+  "source_registry": "/run/media/zajferx/Data/dev/The-No-hands-Company/projects/Active/Nexus-Systems/Nexus-AI/docs/registry/feature_registry_v2_6.csv",
+  "operational_columns": [
+    "module_path",
+    "endpoint",
+    "ui_surface",
+    "test_id",
+    "benchmark_id",
+    "owner_team",
+    "evidence_ref",
+    "mapping_mode",
+    "evidence_status"
+  ],
+  "state_model": "specified baseline with operational linkage seeds"
+}

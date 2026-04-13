@@ -6,6 +6,7 @@ from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSO
 from pydantic import ValidationError
 from ..app import app
 from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY)
+from ..approvals import list_tool_approvals, decide_tool_approval
 from ..scheduler import (
     schedule_job,
     list_jobs,
@@ -19,6 +20,7 @@ from ..personas import list_personas, set_persona, get_active_persona_name, get_
 from ..memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory, delete_all as delete_all_memory, get_all as get_all_memory)
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
 from ..safety import GuardrailViolation, check_user_task, scrub_pii
+from ..safety_pipeline import SAFETY_POLICY_PROFILES, get_safety_policy, screen_input
 from ..knowledge_graph import (
     kg_store as _kg_store,
     kg_query as _kg_query,
@@ -188,7 +190,7 @@ async def webhook_trigger(request: Request):
     if not task:
         return JSONResponse({"error": "task field is required"}, status_code=400)
     try:
-        task = check_user_task(task)
+        task = check_user_task(task, policy_profile=_config.get("safety_profile", "standard"))
     except GuardrailViolation as exc:
         return _api_error(exc.reason, exc.code, 422)
     repo = body.get("repo", "")
@@ -239,22 +241,22 @@ async def safety_check(request: Request):
     if not text:
         return _api_error("text is required", "validation_error", 422)
     allow_destructive = bool(data.get("allow_destructive", False))
-    from ..safety import check_text_against_guardrail
-    decision = check_text_against_guardrail(text, allow_destructive=allow_destructive)
-    return {
-        "allowed": decision.allowed,
-        "issues": [
-            {
-                "code": issue.code,
-                "reason": issue.reason,
-                "detail": issue.detail,
-                "severity": issue.severity,
-                "pattern": issue.pattern,
-            }
-            for issue in decision.issues
-        ],
-        "masked_text": decision.masked_text,
-    }
+    profile = str(data.get("policy_profile") or _config.get("safety_profile", "standard") or "standard")
+    verdict = screen_input(text, allow_destructive=allow_destructive, policy_profile=profile)
+    payload = verdict.to_dict()
+    payload["policy_profile"] = profile
+    payload["policy"] = get_safety_policy(profile)
+    payload["issues"] = [
+        {
+            "code": issue["code"],
+            "reason": issue["reason"],
+            "detail": issue["detail"],
+            "severity": issue["threat"],
+            "pattern": issue["pattern"],
+        }
+        for issue in payload["issues"]
+    ]
+    return payload
 
 
 @app.post("/safety/pii-scan")
@@ -539,7 +541,44 @@ async def post_settings(request: Request):
     return update_config(provider=data.get("provider"),
                          model=data.get("model"),
                          temperature=data.get("temperature"),
-                         persona=data.get("persona"))
+                         persona=data.get("persona"),
+                         safety_profile=data.get("safety_profile"))
+
+
+@app.get("/settings/safety")
+def get_safety_settings():
+    profile = _config.get("safety_profile", "standard")
+    return {
+        "safety_profile": profile,
+        "policy": get_safety_policy(profile),
+        "available_profiles": sorted(SAFETY_POLICY_PROFILES.keys()),
+    }
+
+
+@app.post("/settings/safety")
+async def update_safety_settings(request: Request):
+    data = await request.json()
+    profile = str(data.get("safety_profile", "standard")).lower().strip()
+    if profile not in SAFETY_POLICY_PROFILES:
+        allowed = ", ".join(sorted(SAFETY_POLICY_PROFILES.keys()))
+        return _api_error(f"safety_profile must be one of: {allowed}", "validation_error", 422)
+    update_config(safety_profile=profile)
+    return {
+        "safety_profile": _config.get("safety_profile", "standard"),
+        "policy": get_safety_policy(_config.get("safety_profile", "standard")),
+        "available_profiles": sorted(SAFETY_POLICY_PROFILES.keys()),
+    }
+
+
+@app.get("/safety/profiles")
+def list_safety_profiles():
+    return {
+        "active": _config.get("safety_profile", "standard"),
+        "profiles": {
+            name: get_safety_policy(name)
+            for name in sorted(SAFETY_POLICY_PROFILES.keys())
+        },
+    }
 
 @app.get("/personas")
 def list_personas():
@@ -2108,6 +2147,42 @@ async def update_ensemble_settings(request: Request):
         "ensemble_threshold": _config.get("ensemble_threshold", 0.4),
         "ensemble_enabled":   get_ensemble_enabled(),
     }
+
+
+@app.get("/settings/hitl")
+def get_hitl_settings():
+    return {
+        "hitl_approval_mode": _config.get("hitl_approval_mode", "off"),
+    }
+
+
+@app.post("/settings/hitl")
+async def update_hitl_settings(request: Request):
+    data = await request.json()
+    mode = str(data.get("hitl_approval_mode", "off")).lower().strip()
+    if mode not in ("off", "warn", "block"):
+        return _api_error("hitl_approval_mode must be one of: off, warn, block", "validation_error", 422)
+    update_config(hitl_approval_mode=mode)
+    return {"hitl_approval_mode": _config.get("hitl_approval_mode", "off")}
+
+
+@app.get("/approvals")
+def get_approvals(session_id: str = ""):
+    return {
+        "items": list_tool_approvals(session_id),
+        "total": len(list_tool_approvals(session_id)),
+    }
+
+
+@app.post("/approvals/{approval_id}")
+async def resolve_approval(approval_id: str, request: Request):
+    data = await request.json()
+    approved = bool(data.get("approved", False))
+    note = str(data.get("note", ""))
+    resolved = decide_tool_approval(approval_id, approved=approved, note=note)
+    if not resolved:
+        return _api_error("approval not found", "not_found", 404)
+    return resolved
 
 
 def startup_event() -> None:

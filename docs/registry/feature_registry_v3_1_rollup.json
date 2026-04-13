@@ -1,0 +1,510 @@
+{
+  "version": "v3_1",
+  "total_features": 50000,
+  "state_counts": {
+    "specified": 50000
+  },
+  "mapping_mode_counts": {
+    "templated_operational_seed": 50000
+  },
+  "evidence_status_counts": {
+    "planned": 50000
+  },
+  "domain_summary": {
+    "CORE": {
+      "count": 4285,
+      "state_counts": {
+        "specified": 4285
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 4285
+      },
+      "evidence_status_counts": {
+        "planned": 4285
+      },
+      "linkage_coverage": {
+        "module_path": 4285,
+        "endpoint": 4285,
+        "ui_surface": 4285,
+        "test_id": 4285,
+        "benchmark_id": 4285,
+        "owner_team": 4285,
+        "evidence_ref": 4285
+      },
+      "owner_teams": [
+        "core-agent"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "ROUTER": {
+      "count": 2858,
+      "state_counts": {
+        "specified": 2858
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 2858
+      },
+      "evidence_status_counts": {
+        "planned": 2858
+      },
+      "linkage_coverage": {
+        "module_path": 2858,
+        "endpoint": 2858,
+        "ui_surface": 2858,
+        "test_id": 2858,
+        "benchmark_id": 2858,
+        "owner_team": 2858,
+        "evidence_ref": 2858
+      },
+      "owner_teams": [
+        "routing-platform"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "SAFETY": {
+      "count": 5358,
+      "state_counts": {
+        "specified": 5358
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 5358
+      },
+      "evidence_status_counts": {
+        "planned": 5358
+      },
+      "linkage_coverage": {
+        "module_path": 5358,
+        "endpoint": 5358,
+        "ui_surface": 5358,
+        "test_id": 5358,
+        "benchmark_id": 5358,
+        "owner_team": 5358,
+        "evidence_ref": 5358
+      },
+      "owner_teams": [
+        "safety-runtime"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "MEMORY": {
+      "count": 3572,
+      "state_counts": {
+        "specified": 3572
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 3572
+      },
+      "evidence_status_counts": {
+        "planned": 3572
+      },
+      "linkage_coverage": {
+        "module_path": 3572,
+        "endpoint": 3572,
+        "ui_surface": 3572,
+        "test_id": 3572,
+        "benchmark_id": 3572,
+        "owner_team": 3572,
+        "evidence_ref": 3572
+      },
+      "owner_teams": [
+        "memory-systems"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "TOOLS": {
+      "count": 4643,
+      "state_counts": {
+        "specified": 4643
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 4643
+      },
+      "evidence_status_counts": {
+        "planned": 4643
+      },
+      "linkage_coverage": {
+        "module_path": 4643,
+        "endpoint": 4643,
+        "ui_surface": 4643,
+        "test_id": 4643,
+        "benchmark_id": 4643,
+        "owner_team": 4643,
+        "evidence_ref": 4643
+      },
+      "owner_teams": [
+        "tooling-runtime"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "MULTIAGENT": {
+      "count": 4285,
+      "state_counts": {
+        "specified": 4285
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 4285
+      },
+      "evidence_status_counts": {
+        "planned": 4285
+      },
+      "linkage_coverage": {
+        "module_path": 4285,
+        "endpoint": 4285,
+        "ui_surface": 4285,
+        "test_id": 4285,
+        "benchmark_id": 4285,
+        "owner_team": 4285,
+        "evidence_ref": 4285
+      },
+      "owner_teams": [
+        "multiagent-runtime"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "MULTIMODAL": {
+      "count": 5357,
+      "state_counts": {
+        "specified": 5357
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 5357
+      },
+      "evidence_status_counts": {
+        "planned": 5357
+      },
+      "linkage_coverage": {
+        "module_path": 5357,
+        "endpoint": 5357,
+        "ui_surface": 5357,
+        "test_id": 5357,
+        "benchmark_id": 5357,
+        "owner_team": 5357,
+        "evidence_ref": 5357
+      },
+      "owner_teams": [
+        "multimodal-runtime"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "UX": {
+      "count": 3215,
+      "state_counts": {
+        "specified": 3215
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 3215
+      },
+      "evidence_status_counts": {
+        "planned": 3215
+      },
+      "linkage_coverage": {
+        "module_path": 3215,
+        "endpoint": 3215,
+        "ui_surface": 3215,
+        "test_id": 3215,
+        "benchmark_id": 3215,
+        "owner_team": 3215,
+        "evidence_ref": 3215
+      },
+      "owner_teams": [
+        "ux-product"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "API": {
+      "count": 2500,
+      "state_counts": {
+        "specified": 2500
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 2500
+      },
+      "evidence_status_counts": {
+        "planned": 2500
+      },
+      "linkage_coverage": {
+        "module_path": 2500,
+        "endpoint": 2500,
+        "ui_surface": 2500,
+        "test_id": 2500,
+        "benchmark_id": 2500,
+        "owner_team": 2500,
+        "evidence_ref": 2500
+      },
+      "owner_teams": [
+        "api-platform"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "AUTH": {
+      "count": 1427,
+      "state_counts": {
+        "specified": 1427
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 1427
+      },
+      "evidence_status_counts": {
+        "planned": 1427
+      },
+      "linkage_coverage": {
+        "module_path": 1427,
+        "endpoint": 1427,
+        "ui_surface": 1427,
+        "test_id": 1427,
+        "benchmark_id": 1427,
+        "owner_team": 1427,
+        "evidence_ref": 1427
+      },
+      "owner_teams": [
+        "identity-access"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "OBS": {
+      "count": 2500,
+      "state_counts": {
+        "specified": 2500
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 2500
+      },
+      "evidence_status_counts": {
+        "planned": 2500
+      },
+      "linkage_coverage": {
+        "module_path": 2500,
+        "endpoint": 2500,
+        "ui_surface": 2500,
+        "test_id": 2500,
+        "benchmark_id": 2500,
+        "owner_team": 2500,
+        "evidence_ref": 2500
+      },
+      "owner_teams": [
+        "observability"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "PERF": {
+      "count": 2143,
+      "state_counts": {
+        "specified": 2143
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 2143
+      },
+      "evidence_status_counts": {
+        "planned": 2143
+      },
+      "linkage_coverage": {
+        "module_path": 2143,
+        "endpoint": 2143,
+        "ui_surface": 2143,
+        "test_id": 2143,
+        "benchmark_id": 2143,
+        "owner_team": 2143,
+        "evidence_ref": 2143
+      },
+      "owner_teams": [
+        "performance-engineering"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "DATA": {
+      "count": 2500,
+      "state_counts": {
+        "specified": 2500
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 2500
+      },
+      "evidence_status_counts": {
+        "planned": 2500
+      },
+      "linkage_coverage": {
+        "module_path": 2500,
+        "endpoint": 2500,
+        "ui_surface": 2500,
+        "test_id": 2500,
+        "benchmark_id": 2500,
+        "owner_team": 2500,
+        "evidence_ref": 2500
+      },
+      "owner_teams": [
+        "data-runtime"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "EVAL": {
+      "count": 2857,
+      "state_counts": {
+        "specified": 2857
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 2857
+      },
+      "evidence_status_counts": {
+        "planned": 2857
+      },
+      "linkage_coverage": {
+        "module_path": 2857,
+        "endpoint": 2857,
+        "ui_surface": 2857,
+        "test_id": 2857,
+        "benchmark_id": 2857,
+        "owner_team": 2857,
+        "evidence_ref": 2857
+      },
+      "owner_teams": [
+        "eval-quality"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    },
+    "PLATFORM": {
+      "count": 2500,
+      "state_counts": {
+        "specified": 2500
+      },
+      "mapping_mode_counts": {
+        "templated_operational_seed": 2500
+      },
+      "evidence_status_counts": {
+        "planned": 2500
+      },
+      "linkage_coverage": {
+        "module_path": 2500,
+        "endpoint": 2500,
+        "ui_surface": 2500,
+        "test_id": 2500,
+        "benchmark_id": 2500,
+        "owner_team": 2500,
+        "evidence_ref": 2500
+      },
+      "owner_teams": [
+        "platform-selfhost"
+      ],
+      "linkage_coverage_pct": {
+        "module_path": 100.0,
+        "endpoint": 100.0,
+        "ui_surface": 100.0,
+        "test_id": 100.0,
+        "benchmark_id": 100.0,
+        "owner_team": 100.0,
+        "evidence_ref": 100.0
+      }
+    }
+  }
+}

@@ -4,6 +4,44 @@
 
 **Core Principle**: The user never thinks about models, limits, or routing. They choose a **mode/persona** (or create new ones) and prompt. Everything else is handled invisibly by the system.
 
+## Roadmap At Scale
+
+- For the feature-ontology, ID system, state model, and large-scale planning mechanics, see `docs/ROADMAP_SCALE_SYSTEM.md`.
+- For consistent feature counting by abstraction layer (L0-L3), see `docs/ROADMAP_LAYERED_FEATURE_MODEL.md`.
+- For competitor-derived L0/L1 seeds (OpenAI, Anthropic, Google/Gemini, xAI, Microsoft), see `docs/COMPETITOR_L0_L1_SEED_CATALOG_2026Q2.md`.
+- For current genuinely missing features after reconciliation, see `docs/ROADMAP_GENUINE_GAPS.md`.
+- Machine-readable seed registry (1,000 IDs): `docs/registry/feature_registry_seed_v1.csv`.
+- Machine-readable registry metadata/schema: `docs/registry/feature_registry_seed_v1.meta.json`.
+- Machine-readable v2 registry (CSV): `docs/registry/feature_registry_v2.csv`.
+- Machine-readable v2 registry (JSONL): `docs/registry/feature_registry_v2.jsonl`.
+- Machine-readable v2 metadata/schema: `docs/registry/feature_registry_v2.meta.json`.
+- Machine-readable v2.1 registry (CSV, preferred): `docs/registry/feature_registry_v2_1.csv`.
+- Machine-readable v2.1 registry (JSONL, preferred): `docs/registry/feature_registry_v2_1.jsonl`.
+- Machine-readable v2.1 metadata/schema: `docs/registry/feature_registry_v2_1.meta.json`.
+- Machine-readable v2.2 registry (CSV): `docs/registry/feature_registry_v2_2.csv`.
+- Machine-readable v2.2 registry (JSONL): `docs/registry/feature_registry_v2_2.jsonl`.
+- Machine-readable v2.2 metadata/schema: `docs/registry/feature_registry_v2_2.meta.json`.
+- Machine-readable v2.3 registry (2k features, CSV/JSONL + meta): `docs/registry/feature_registry_v2_3.csv`.
+- Machine-readable v2.4 registry (5k features, CSV/JSONL + meta): `docs/registry/feature_registry_v2_4.csv`.
+- Machine-readable v2.5 registry (14k features, CSV/JSONL + meta): `docs/registry/feature_registry_v2_5.csv`.
+- Machine-readable v2.6 registry (20k features, CSV/JSONL + meta, preferred for frontier-scale planning): `docs/registry/feature_registry_v2_6.csv`.
+- Operational v3 registry (20k features with module/endpoint/UI/test/benchmark ownership columns): `docs/registry/feature_registry_v3.csv`.
+- Operational v3 rollup/dashboard: `docs/registry/feature_registry_v3_rollup.json` and `docs/registry/feature_registry_v3_dashboard.md`.
+- Operational v3.1 registry (50k features with the same operational schema): `docs/registry/feature_registry_v3_1.csv`.
+- Operational v3.1 rollup/dashboard: `docs/registry/feature_registry_v3_1_rollup.json` and `docs/registry/feature_registry_v3_1_dashboard.md`.
+- Registry generator: `scripts/build_operational_registry.py`.
+- High-value L1-to-L2 mapped backlog (execution shortlist): `docs/registry/l1_to_l2_high_value_backlog_2026Q2.csv`.
+- 2026-Q2 execution cut (P0/P1 immediate): `docs/registry/l1_to_l2_execution_cut_2026Q2.csv`.
+- Owner execution board (by team queue): `docs/registry/l2_owner_execution_board_2026Q2.md`.
+- Sprint ticket board (per-owner YAML + summary): `docs/sprint-tickets/SPRINT_BOARD_2026Q2.md`.
+- Per-owner sprint ticket files (YAML, 10 owners): `docs/sprint-tickets/2026-Q2/`.
+
+Layer policy:
+
+- Product and announcement reporting should use L0/L1 counts.
+- Engineering execution and verification should use L2/L3 counts.
+- Never mix layers in one headline metric.
+
 ---
 
 ## Execution Guardrails (Must Follow)
@@ -299,6 +337,7 @@ prediction report.
 **License:** AGPL-3.0 — no code is imported. All implementations are original.
 
 **Patterns we borrow:**
+
 - `simulate` tool concept — seed a topic, generate N persona-agents with distinct
   viewpoints, run debate rounds, synthesise a prediction/consensus report
 - GraphRAG seed extraction — chunk seed material into a knowledge graph before agent
@@ -311,12 +350,14 @@ prediction report.
   rounds (maps to our Chroma vector store per-agent scoped writes)
 
 **What we do NOT adopt:**
+
 - Zep Cloud dependency (we use our own Chroma + SQLite memory)
 - Vue frontend (we keep the existing SSE-first chat UI)
 - The full thousands-of-agents scale (our `simulate` tool targets 3–12 personas for
   practical latency on self-hosted hardware)
 
 **Roadmap items derived from MiroFish:**
+
 - `simulate` tool (Phase 2, Sprint G) — complete
 - Swarm View UI (Phase 2, remaining) — shows active personas + round progress
 - Long-term memory graph (Phase 4) — per-persona knowledge graph with temporal edges
@@ -499,16 +540,16 @@ Execution artifact for this section: `EXTERNAL_BORROW_MATRIX.md` (concrete borro
 
 ### Sprint B — Safety and reliability runtime
 
-- [ ] Add canonical safety types + centralized guardrail pipeline
-- [ ] Add context window manager with deterministic truncation/compression policy
-- [ ] Add replayable execution traces for multi-step tool runs
-- [ ] Add ensemble/consensus mode only for high-risk tasks
+- [x] Add canonical safety types + centralized guardrail pipeline
+- [x] Add context window manager with deterministic truncation/compression policy
+- [x] Add replayable execution traces for multi-step tool runs
+- [x] Add ensemble/consensus mode only for high-risk tasks
 
 ### Sprint C — Research-quality outputs with zero-friction UX
 
 - [ ] Add generator-critic research flow with citation confidence scoring
 - [ ] Add checkpointed long-run task execution with resumability
-- [ ] Add optional HITL approval points for sensitive actions (default off)
+- [x] Add optional HITL approval points for sensitive actions (default off)
 - [ ] Keep default user path unchanged: prompt -> response, with complexity hidden
 
 ---

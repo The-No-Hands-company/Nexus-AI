@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from .safety_middleware import SafetyPipelineMiddleware
 from .agent import (run_agent_task, stream_agent_task, get_providers_list,
                    get_config, update_config, call_llm_with_fallback,
                    get_session_dir, set_session_token, _session_state,
@@ -38,6 +39,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Nexus AI", lifespan=lifespan)
+app.add_middleware(SafetyPipelineMiddleware)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Allow Nexus Cloud portal to embed this app in an iframe.

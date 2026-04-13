@@ -1,0 +1,302 @@
+owner_team: safety-runtime
+sprint: 2026-Q2
+generated: '2026-04-13'
+signals_refreshed: '2026-04-13'
+policy: Complete all P0 tickets before pulling P1. Promote L2 state only when evidence_gate is satisfied.
+tickets:
+- ticket_id: SPR-SAFETY_RUNTIME-Q2-01
+  l0_capability: Autonomous Task Execution and Browser/Computer Use
+  l1_id: L1-01-04
+  l1_feature: Sensitive action confirmation workflow
+  l2_feature_id: NAI-SAFETY-SECURITY-00001
+  l2_title: Safety and policy feature 001
+  priority: P0
+  value_score: 96
+  owner_team: safety-runtime
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/safety.py
+  - src/safety_pipeline.py
+  - src/safety_middleware.py
+  endpoint:
+  - /safety/check
+  - /safety/pii-scan
+  - /approvals/*
+  test_id: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00001
+  benchmark_id: bench.safety::NAI-SAFETY-SECURITY-00001
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  acceptance_criteria: Given NAI-SAFETY-SECURITY-00001 (Safety and policy feature 001) is implemented for safety security
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: approval-required integration tests
+  competitor_signals: OpenAI Operator confirmations/watch mode
+  source_urls:
+  - https://openai.com/index/introducing-operator/
+  done_definition:
+  - 'evidence_gate satisfied: approval-required integration tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00001'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001'
+- ticket_id: SPR-SAFETY_RUNTIME-Q2-02
+  l0_capability: Safety Oversight and Policy Enforcement
+  l1_id: L1-09-01
+  l1_feature: Multi-layer safety pipeline with monitor model
+  l2_feature_id: NAI-SAFETY-SECURITY-00005
+  l2_title: Safety and policy feature 005
+  priority: P0
+  value_score: 96
+  owner_team: safety-runtime
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/safety.py
+  - src/safety_pipeline.py
+  - src/safety_middleware.py
+  endpoint:
+  - /safety/check
+  - /safety/pii-scan
+  - /approvals/*
+  test_id: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00005
+  benchmark_id: bench.safety::NAI-SAFETY-SECURITY-00005
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00004
+  acceptance_criteria: Given NAI-SAFETY-SECURITY-00005 (Safety and policy feature 005) is implemented for safety security
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: safety pipeline end-to-end tests
+  competitor_signals: OpenAI monitor model and safeguards; Anthropic RSP framing
+  source_urls:
+  - https://openai.com/index/introducing-operator/
+  - https://www.anthropic.com/news
+  done_definition:
+  - 'evidence_gate satisfied: safety pipeline end-to-end tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00005'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00004'
+- ticket_id: SPR-SAFETY_RUNTIME-Q2-03
+  l0_capability: Real-Time Search and Retrieval-Grounded Answers
+  l1_id: L1-06-03
+  l1_feature: Hallucination guardrails for missing evidence
+  l2_feature_id: NAI-SAFETY-SECURITY-00004
+  l2_title: Safety and policy feature 004
+  priority: P0
+  value_score: 95
+  owner_team: safety-runtime
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/safety.py
+  - src/safety_pipeline.py
+  - src/safety_middleware.py
+  endpoint:
+  - /safety/check
+  - /safety/pii-scan
+  - /approvals/*
+  test_id: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00004
+  benchmark_id: bench.safety::NAI-SAFETY-SECURITY-00004
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00003
+  acceptance_criteria: Given NAI-SAFETY-SECURITY-00004 (Safety and policy feature 004) is implemented for safety security
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: evidence-required response tests
+  competitor_signals: Safety trust pressure across all competitors
+  source_urls:
+  - https://openai.com/index/
+  - https://www.anthropic.com/news
+  - https://www.microsoft.com/en-us/microsoft-copilot/blog/
+  done_definition:
+  - 'evidence_gate satisfied: evidence-required response tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00004'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00003'
+- ticket_id: SPR-SAFETY_RUNTIME-Q2-04
+  l0_capability: Safety Oversight and Policy Enforcement
+  l1_id: L1-09-02
+  l1_feature: Prompt-injection and adversarial content defenses
+  l2_feature_id: NAI-SAFETY-SECURITY-00006
+  l2_title: Safety and policy feature 006
+  priority: P0
+  value_score: 95
+  owner_team: safety-runtime
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/safety.py
+  - src/safety_pipeline.py
+  - src/safety_middleware.py
+  endpoint:
+  - /safety/check
+  - /safety/pii-scan
+  - /approvals/*
+  test_id: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00006
+  benchmark_id: bench.safety::NAI-SAFETY-SECURITY-00006
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00005
+  acceptance_criteria: Given NAI-SAFETY-SECURITY-00006 (Safety and policy feature 006) is implemented for safety security
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: adversarial eval suite
+  competitor_signals: Operator anti-prompt-injection safeguards
+  source_urls:
+  - https://openai.com/index/introducing-operator/
+  done_definition:
+  - 'evidence_gate satisfied: adversarial eval suite'
+  - 'test_id passes: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00006'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00005'
+- ticket_id: SPR-SAFETY_RUNTIME-Q2-05
+  l0_capability: Safety Oversight and Policy Enforcement
+  l1_id: L1-09-03
+  l1_feature: Action policy gating for high-stakes tasks
+  l2_feature_id: NAI-SAFETY-SECURITY-00007
+  l2_title: Safety and policy feature 007
+  priority: P0
+  value_score: 94
+  owner_team: safety-runtime
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/safety.py
+  - src/safety_pipeline.py
+  - src/safety_middleware.py
+  endpoint:
+  - /safety/check
+  - /safety/pii-scan
+  - /approvals/*
+  test_id: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00007
+  benchmark_id: bench.safety::NAI-SAFETY-SECURITY-00007
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00006
+  acceptance_criteria: Given NAI-SAFETY-SECURITY-00007 (Safety and policy feature 007) is implemented for safety security
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: high-stakes denylist tests
+  competitor_signals: Operator task limitations and watch mode
+  source_urls:
+  - https://openai.com/index/introducing-operator/
+  done_definition:
+  - 'evidence_gate satisfied: high-stakes denylist tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00007'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00006'
+- ticket_id: SPR-SAFETY_RUNTIME-Q2-06
+  l0_capability: Evaluation Benchmarking and Quality Operations
+  l1_id: L1-11-04
+  l1_feature: Safety benchmark tracking and release gating
+  l2_feature_id: NAI-SAFETY-SECURITY-00008
+  l2_title: Safety and policy feature 008
+  priority: P0
+  value_score: 94
+  owner_team: safety-runtime
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/safety.py
+  - src/safety_pipeline.py
+  - src/safety_middleware.py
+  endpoint:
+  - /safety/check
+  - /safety/pii-scan
+  - /approvals/*
+  test_id: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00008
+  benchmark_id: bench.safety::NAI-SAFETY-SECURITY-00008
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00007
+  acceptance_criteria: Given NAI-SAFETY-SECURITY-00008 (Safety and policy feature 008) is implemented for safety security
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: safety gate release tests
+  competitor_signals: Claude Opus 4.6 system card safety gate; OpenAI safety disclosures
+  source_urls:
+  - https://openai.com/index/
+  - https://www.anthropic.com/news
+  - https://www.anthropic.com/news/claude-opus-4-6
+  done_definition:
+  - 'evidence_gate satisfied: safety gate release tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00008'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00007'
+- ticket_id: SPR-SAFETY_RUNTIME-Q2-07
+  l0_capability: Tool Calling and External Action Reliability
+  l1_id: L1-04-02
+  l1_feature: Tool sandbox policy profiles by risk level
+  l2_feature_id: NAI-SAFETY-SECURITY-00002
+  l2_title: Safety and policy feature 002
+  priority: P0
+  value_score: 93
+  owner_team: safety-runtime
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/safety.py
+  - src/safety_pipeline.py
+  - src/safety_middleware.py
+  endpoint:
+  - /safety/check
+  - /safety/pii-scan
+  - /approvals/*
+  test_id: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00002
+  benchmark_id: bench.safety::NAI-SAFETY-SECURITY-00002
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00001
+  acceptance_criteria: Given NAI-SAFETY-SECURITY-00002 (Safety and policy feature 002) is implemented for safety security
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: policy matrix tests
+  competitor_signals: Claude Sonnet 4.6 safety system card; OpenAI policy layers
+  source_urls:
+  - https://openai.com/index/introducing-operator/
+  - https://www.anthropic.com/news/claude-sonnet-4-6
+  - https://www.anthropic.com/news/claude-opus-4-6
+  done_definition:
+  - 'evidence_gate satisfied: policy matrix tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00002'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00001'
+- ticket_id: SPR-SAFETY_RUNTIME-Q2-08
+  l0_capability: Memory and Long-Context Personalization
+  l1_id: L1-05-04
+  l1_feature: Memory privacy controls and retention policies
+  l2_feature_id: NAI-SAFETY-SECURITY-00003
+  l2_title: Safety and policy feature 003
+  priority: P0
+  value_score: 92
+  owner_team: safety-runtime
+  state: specified
+  target_window: 2026-Q2
+  module_path:
+  - src/safety.py
+  - src/safety_pipeline.py
+  - src/safety_middleware.py
+  endpoint:
+  - /safety/check
+  - /safety/pii-scan
+  - /approvals/*
+  test_id: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00003
+  benchmark_id: bench.safety::NAI-SAFETY-SECURITY-00003
+  depends_on:
+  - NAI-API-CONTRACT-00001
+  - NAI-SAFETY-SECURITY-00002
+  acceptance_criteria: Given NAI-SAFETY-SECURITY-00003 (Safety and policy feature 003) is implemented for safety security
+    behavior, when exercised via its linked runtime/API/UI path, then it meets expected output, error, policy, and regression
+    coverage requirements.
+  evidence_gate: privacy config tests
+  competitor_signals: Claude Sonnet 4.6 + Opus 4.6 safety evaluations; OpenAI privacy controls
+  source_urls:
+  - https://openai.com/index/introducing-operator/
+  - https://www.anthropic.com/news/claude-sonnet-4-6
+  - https://www.anthropic.com/news/claude-opus-4-6
+  done_definition:
+  - 'evidence_gate satisfied: privacy config tests'
+  - 'test_id passes: tests.test_v1_contracts::NAI-SAFETY-SECURITY-00003'
+  - 'state promoted to: verified'
+  - 'depends_on verified: NAI-API-CONTRACT-00001, NAI-SAFETY-SECURITY-00002'

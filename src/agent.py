@@ -1,4 +1,5 @@
 import os, re, json, glob, time, subprocess, threading, resource
+import uuid
 from functools import lru_cache
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Iterator, Optional
@@ -11,6 +12,10 @@ from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk, get_ense
 from .db import load_custom_instructions, log_usage, init_usage_table
 from .knowledge_graph import kg_to_context_string
 from .execution_trace import save_checkpoint as _save_checkpoint
+from .safety_pipeline import SAFETY_POLICY_PROFILES, describe_block, screen_output, screen_tool_action
+from .safety_types import SafetyAction
+from .approvals import pending_approvals, consume_approved_action
+from .memory import add_memory, summarize_history as _summarize_history, get_memory_context
 try:
     init_usage_table()
 except Exception:
@@ -24,10 +29,13 @@ _config: Dict[str, Any] = {
     "persona":            os.getenv("PERSONA", "general"),
     "ensemble_mode":      True,
     "ensemble_threshold": 0.4,
+    "hitl_approval_mode": os.getenv("HITL_APPROVAL_MODE", "off").lower(),
+    "safety_profile":     os.getenv("SAFETY_POLICY_PROFILE", "standard").lower(),
 }
 def get_config() -> Dict[str, Any]: return dict(_config)
 def update_config(provider=None, model=None, temperature=None, persona=None,
-                  ensemble_mode=None, ensemble_threshold=None):
+                  ensemble_mode=None, ensemble_threshold=None, hitl_approval_mode=None,
+                  safety_profile=None):
     if provider           is not None: _config["provider"]           = provider.lower()
     if model              is not None: _config["model"]              = model
     if temperature        is not None: _config["temperature"]        = float(temperature)
@@ -37,7 +45,70 @@ def update_config(provider=None, model=None, temperature=None, persona=None,
         set_ensemble_enabled(bool(ensemble_mode))
     if ensemble_threshold is not None:
         _config["ensemble_threshold"] = float(ensemble_threshold)
+    if hitl_approval_mode is not None:
+        mode = str(hitl_approval_mode).lower().strip()
+        _config["hitl_approval_mode"] = mode if mode in ("off", "warn", "block") else "off"
+    if safety_profile is not None:
+        profile = str(safety_profile).lower().strip()
+        _config["safety_profile"] = profile if profile in SAFETY_POLICY_PROFILES else "standard"
     return dict(_config)
+
+
+def _approval_action_signature(action: Dict[str, Any]) -> str:
+    normalized = dict(action or {})
+    normalized.pop("approval_id", None)
+    try:
+        return json.dumps(normalized, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        return str(normalized)
+
+
+def create_tool_approval(sid: str, action: Dict[str, Any]) -> str:
+    approval_id = f"appr_{uuid.uuid4().hex[:12]}"
+    pending_approvals[approval_id] = {
+        "id": approval_id,
+        "session_id": sid or "",
+        "action": dict(action or {}),
+        "signature": _approval_action_signature(action),
+        "status": "pending",
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+    }
+    return approval_id
+
+
+def list_tool_approvals(sid: str = "") -> List[Dict[str, Any]]:
+    items = list(pending_approvals.values())
+    if sid:
+        items = [item for item in items if item.get("session_id") == sid]
+    return sorted(items, key=lambda item: item.get("created_at", ""), reverse=True)
+
+
+def decide_tool_approval(approval_id: str, approved: bool, note: str = "") -> Optional[Dict[str, Any]]:
+    record = pending_approvals.get(approval_id)
+    if not record:
+        return None
+    record["status"] = "approved" if approved else "rejected"
+    record["note"] = note
+    record["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dict(record)
+
+
+def _consume_approved_action(approval_id: str, sid: str, action: Dict[str, Any]) -> bool:
+    if not approval_id:
+        return False
+    record = pending_approvals.get(approval_id)
+    if not record:
+        return False
+    if record.get("status") != "approved":
+        return False
+    if (record.get("session_id") or "") != (sid or ""):
+        return False
+    if record.get("signature") != _approval_action_signature(action):
+        return False
+    record["status"] = "consumed"
+    record["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return True
 
 # ── env ───────────────────────────────────────────────────────────────────────
 GH_TOKEN    = os.getenv("GH_TOKEN", "")
@@ -264,10 +335,82 @@ def _resource_tier(resources: Dict[str, Any]) -> str:
         return "low"
     return "normal"
 
+
+def _requires_hitl_checkpoint(kind: str, action: Dict[str, Any], threat: str) -> bool:
+    high_risk_tools = {"run_command", "delete_file", "commit_push", "create_repo"}
+    if kind in high_risk_tools:
+        return True
+    if threat in ("high", "critical"):
+        return True
+    return False
+
+
+_COMPLEXITY_STEP_RE = re.compile(
+    r"\b(first|second|third|then|after that|finally|next|step\s+\d+|steps?|rollback|monitoring)\b",
+    re.IGNORECASE,
+)
+_COMPLEXITY_SYSTEM_RE = re.compile(
+    r"\b(production|deploy|migration|database|schema|auth|security|billing|payments?|rollback|incident|monitoring|slo|sre)\b",
+    re.IGNORECASE,
+)
+_COMPLEXITY_SCOPE_RE = re.compile(
+    r"\b(end-to-end|full stack|entire|complete|architecture|architect|orchestrate|parallel|multi-step|cross-service)\b",
+    re.IGNORECASE,
+)
+
+
+def _build_complexity_profile(task: str) -> Dict[str, Any]:
+    source = task or ""
+    words = re.findall(r"\w+", source)
+    lines = len([line for line in source.splitlines() if line.strip()]) or (1 if source else 0)
+    specialization = _task_specialization(source)
+    score = 0
+    signals: List[str] = []
+
+    if len(words) >= 20:
+        score += 1
+        signals.append("long_prompt")
+    if len(source) >= 160:
+        score += 1
+        signals.append("dense_prompt")
+    if lines >= 3:
+        score += 1
+        signals.append("multi_line")
+    if len(_COMPLEXITY_STEP_RE.findall(source)) >= 2:
+        score += 2
+        signals.append("multi_step")
+    if _COMPLEXITY_SYSTEM_RE.search(source):
+        score += 2
+        signals.append("system_risk")
+    if _COMPLEXITY_SCOPE_RE.search(source):
+        score += 1
+        signals.append("broad_scope")
+    if specialization in ("coding", "reasoning") and len(source) >= 100:
+        score += 1
+        signals.append(f"{specialization}_depth")
+    if "```" in source or any(tok in source for tok in ("src/", ".py", ".ts", "{")):
+        score += 1
+        signals.append("artifact_context")
+
+    if score >= 5 or len(words) >= 80:
+        label = "high"
+    elif score >= 2:
+        label = "medium"
+    else:
+        label = "low"
+
+    return {
+        "label": label,
+        "score": score,
+        "word_count": len(words),
+        "line_count": lines,
+        "specialization": specialization,
+        "signals": signals,
+    }
+
+
 def _score_complexity(task: str) -> str:
-    if len(task) > 300 or _HIGH_RE.search(task): return "high"
-    if _MED_RE.search(task): return "medium"
-    return "low"
+    return _build_complexity_profile(task).get("label", "low")
 
 # ── Ollama model registry (Phase 1: auto-select best model by task type) ─────
 # Maps task-type → ordered list of preferred Ollama model names.
@@ -398,7 +541,8 @@ def _has_key(cfg): return cfg.get("keyless",False) or bool(os.getenv(cfg["env_ke
 def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[str]:
     pref = _config["provider"]
     avail = {pid for pid,cfg in PROVIDERS.items() if _has_key(cfg) and not _is_rate_limited(pid)}
-    complexity = _score_complexity(task)
+    complexity_profile = _build_complexity_profile(task)
+    complexity = complexity_profile["label"]
     resource_hint = _resource_tier(resources or get_system_resources())
 
     if resource_hint == "constrained":
@@ -422,7 +566,9 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
 
     # Mixture-of-Experts: boost specialist providers to front when task type detected
     if pref == "auto" and resource_hint != "constrained":
-        spec = _task_specialization(task)
+        spec = complexity_profile.get("specialization")
+        if not spec and complexity_profile.get("score", 0) >= 5:
+            spec = "reasoning"
         if spec:
             preferred = [pid for pid in PROVIDER_SPECIALIZATIONS[spec] if pid in avail]
             rest = [pid for pid in ordered if pid not in preferred]
@@ -430,7 +576,9 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
 
     # Auto-select best local Ollama model for the detected task type
     if pref == "auto" and "ollama" in avail:
-        spec = spec if "spec" in dir() else _task_specialization(task)
+        spec = complexity_profile.get("specialization")
+        if not spec and complexity_profile.get("label") == "high":
+            spec = "reasoning"
         # Map from MoE specialization names to OLLAMA_MODEL_PREFERENCES keys
         _type_map = {"coding": "coding", "research": "research",
                      "creative": "creative", "reasoning": "reasoning"}
@@ -580,6 +728,7 @@ Available actions:
   { "action": "list_files", "pattern": "**/*.py" }
   { "action": "delete_file","path": "old.txt" }
   { "action": "run_command","cmd": "pip install flask" }
+    { "action": "run_command","cmd": "pip install flask", "approval_id": "appr_xxx" }  -- optional for HITL approval mode
     { "action": "clone_repo",   "url": "https://github.com/user/repo", "dest_path": "/absolute/or/relative/path" }
   { "action": "create_repo",  "name": "my-project", "description": "...", "private": false, "org": "" }
   { "action": "commit_push","message": "feat: ...", "repo_url": "https://github.com/user/repo" }
@@ -1057,6 +1206,41 @@ def _is_bad_output(action: Dict[str, Any]) -> bool:
         return True
     return False
 
+# ── typed tool retry ──────────────────────────────────────────────────────────
+_RETRY_TOOL_KINDS: set = {
+    "web_search", "read_page", "api_call",
+    "youtube_transcript", "youtube",
+}
+
+def _classify_tool_error(exc: Exception) -> str:
+    """Classify an exception from a tool call into a retry category."""
+    msg = str(exc).lower()
+    if any(p in msg for p in ("rate limit", "rate_limit", "429", "too many requests", "quota")):
+        return "rate_limit"
+    if any(p in msg for p in ("timed out", "timeout", "read timeout", "connect timeout")):
+        return "timeout"
+    if any(p in msg for p in ("connection error", "connectionerror", "name or service", "network unreachable")):
+        return "connection"
+    return "other"
+
+_RETRY_DELAYS: Dict[str, float] = {
+    "rate_limit": 20.0,
+    "timeout":     5.0,
+    "connection":  3.0,
+    "other":       0.0,   # no retry
+}
+
+
+def _persist_conversation_memory(messages: List[Dict], sid: str = "", persona: Optional[str] = None) -> bool:
+    try:
+        summary = _summarize_history(messages, call_llm_with_fallback)
+        if not summary:
+            return False
+        add_memory(summary, tags=[sid or "anon"], persona=persona or get_active_persona_name())
+        return True
+    except Exception:
+        return False
+
 def _build_content(text: str, files: List[Dict]) -> Any:
     if not files: return text
     parts: List[Dict] = []
@@ -1428,6 +1612,13 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             {"role": "user",      "content": _kg_ctx},
             {"role": "assistant", "content": "Noted — I have reviewed the relevant knowledge graph context."},
         ] + messages
+    # Inject long-term memory context (semantic summaries of past conversations)
+    _mem_ctx = get_memory_context()
+    if _mem_ctx:
+        messages = [
+            {"role": "user",      "content": _mem_ctx},
+            {"role": "assistant", "content": "Noted — I have context from previous conversations."},
+        ] + messages
     messages.append({"role":"user","content":_build_content(clean_task, files or [])})
     input_token_estimate = _messages_token_estimate(messages)
 
@@ -1609,6 +1800,13 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     "total": input_token_estimate + output_tokens,
                 },
             }
+            _msgs_snapshot = list(messages)
+            _persona_snap = get_active_persona_name()
+            threading.Thread(
+                target=_persist_conversation_memory,
+                args=(_msgs_snapshot, sid, _persona_snap),
+                daemon=True,
+            ).start()
             return
 
         # Sub-agent: spawn a focused LLM call for a subtask
@@ -1771,6 +1969,70 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             continue
 
         # Built-in tools (no LLM needed)
+        tool_input_verdict = screen_tool_action(action, policy_profile=_config.get("safety_profile", "standard"))
+        if tool_input_verdict.action == SafetyAction.BLOCK:
+            result = describe_block(tool_input_verdict)
+            _tid = f"tool_{int(time.time()*1000)}"
+            _evt = {
+                "type": "tool", "id": _tid, "parent_id": None,
+                "status": "blocked", "icon": TOOL_ICONS.get(kind, "🔧"),
+                "action": kind, "tool_name": kind,
+                "label": str(action)[:120], "result": result,
+                "input": action, "metadata": {"safety": {"input": tool_input_verdict.to_dict()}},
+                "file_path": None, "file_content": None, "artifact": False,
+            }
+            yield _evt
+            _checkpoint_events.append({k: v for k, v in _evt.items() if k not in ("file_content", "workdir")})
+            _push_activity({"ts": time.time(), "action": kind, "label": str(action)[:120],
+                            "status": "blocked", "session": sid})
+            messages.append({"role":"assistant","content":json.dumps(action)})
+            messages.append({"role":"user","content":f"Tool result:\n{result}\n\nContinue."})
+            _step_idx += 1
+            if trace_id:
+                _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
+            continue
+
+        hitl_mode = str(_config.get("hitl_approval_mode", "off") or "off").lower()
+        if hitl_mode != "off" and _requires_hitl_checkpoint(kind, action, tool_input_verdict.threat.value):
+            approval_id = str(action.get("approval_id", "") or "").strip()
+            if not consume_approved_action(approval_id, sid, action):
+                new_approval_id = create_tool_approval(sid, action)
+                prompt = (
+                    f"⏸ Approval required for high-risk action '{kind}'. "
+                    f"Use approval_id '{new_approval_id}' via /approvals/{new_approval_id} before retrying."
+                )
+                yield {
+                    "type": "approval_required",
+                    "approval_id": new_approval_id,
+                    "action": kind,
+                    "mode": hitl_mode,
+                    "message": prompt,
+                }
+                _tid = f"tool_{int(time.time()*1000)}"
+                _evt = {
+                    "type": "tool", "id": _tid, "parent_id": None,
+                    "status": "pending_approval", "icon": TOOL_ICONS.get(kind, "🔧"),
+                    "action": kind, "tool_name": kind,
+                    "label": str(action)[:120], "result": prompt,
+                    "input": action,
+                    "metadata": {
+                        "approval_required": True,
+                        "approval_id": new_approval_id,
+                        "safety": {"input": tool_input_verdict.to_dict()},
+                    },
+                    "file_path": None, "file_content": None, "artifact": False,
+                }
+                yield _evt
+                _checkpoint_events.append({k: v for k, v in _evt.items() if k not in ("file_content", "workdir")})
+                _push_activity({"ts": time.time(), "action": kind, "label": str(action)[:120],
+                                "status": "pending_approval", "session": sid})
+                messages.append({"role":"assistant","content":json.dumps(action)})
+                messages.append({"role":"user","content":f"Tool result:\n{prompt}\n\nContinue."})
+                _step_idx += 1
+                if trace_id:
+                    _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
+                continue
+
         builtin_result = dispatch_builtin(action)
 
         icon  = TOOL_ICONS.get(kind, "🔧")
@@ -1783,6 +2045,13 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             result_str  = builtin_result.get("result", "") if isinstance(builtin_result, dict) else str(builtin_result)
             result_stat = builtin_result.get("status", "done") if isinstance(builtin_result, dict) else "done"
             result_meta = builtin_result.get("metadata", {}) if isinstance(builtin_result, dict) else {}
+            tool_output_verdict = screen_output(str(result_str))
+            result_str = tool_output_verdict.masked_text or str(result_str)
+            result_meta = dict(result_meta)
+            result_meta["safety"] = {
+                "input": tool_input_verdict.to_dict(),
+                "output": tool_output_verdict.to_dict(),
+            }
             _tid        = f"tool_{int(time.time()*1000)}"
             _evt = {
                 "type":"tool", "id":_tid, "parent_id":None,
@@ -1866,7 +2135,8 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             elif kind == "run_command":
                 result = tool_run_command(action.get("cmd",""), workdir)
             elif kind == "read_pdf":
-                action["workdir"] = workdir
+                from .tools_builtin import tool_read_pdf as _tool_read_pdf
+                result = _tool_read_pdf(action.get("path",""), workdir)
             elif kind == "create_repo":
                 result = tool_create_repo(
                     action.get("name","new-project"),
@@ -1914,18 +2184,39 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             else:
                 result = f"Unknown action: {kind}"
         except Exception as e:
-            try:
-                if kind == "write_file":   result = tool_write_file(action.get("path",""), action.get("content",""), workdir)
-                elif kind == "run_command": result = tool_run_command(action.get("cmd",""), workdir)
-                else: result = f"Tool failed: {e}"
-            except Exception as e2: result = f"Tool failed after retry: {e2}"
+            err_class   = _classify_tool_error(e)
+            retry_delay = _RETRY_DELAYS.get(err_class, 0.0)
+            if err_class != "other" and kind in _RETRY_TOOL_KINDS and retry_delay > 0:
+                print(f"⚠️ {kind} failed ({err_class}), retrying in {retry_delay:.0f}s…")
+                time.sleep(retry_delay)
+                try:
+                    if   kind == "web_search":
+                        result = tool_web_search(action.get("query", ""))
+                    else:
+                        # re-dispatch via dispatch_builtin (covers read_page, api_call, youtube_*)
+                        _br = dispatch_builtin(action)
+                        result = _br["result"] if _br else f"Tool failed after {err_class} retry: {e}"
+                except Exception as e2:
+                    result = f"Tool failed after {err_class} retry: {e2}"
+            else:
+                try:
+                    if   kind == "write_file":   result = tool_write_file(action.get("path",""), action.get("content",""), workdir)
+                    elif kind == "run_command":  result = tool_run_command(action.get("cmd",""), workdir)
+                    else:                        result = f"Tool failed: {e}"
+                except Exception as e2: result = f"Tool failed after retry: {e2}"
 
+        tool_output_verdict = screen_output(str(result))
+        result = tool_output_verdict.masked_text or str(result)
         _tid      = f"tool_{int(time.time()*1000)}"
         _tool_meta = {}
         if file_path:
             _tool_meta["file_path"] = file_path
         if kind in ("run_command", "clone_repo", "commit_push"):
             _tool_meta["workdir"] = workdir
+        _tool_meta["safety"] = {
+            "input": tool_input_verdict.to_dict(),
+            "output": tool_output_verdict.to_dict(),
+        }
         _evt = {"type":"tool", "id":_tid, "parent_id":None,
                "status":"done", "icon":icon, "action":kind, "tool_name":kind,
                "label":str(label)[:120], "result":str(result)[:600],
