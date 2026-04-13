@@ -621,22 +621,26 @@ def list_safety_profiles():
 
 
 @app.get("/safety/audit")
-def get_safety_audit(limit: int = 200, session_id: str = ""):
+def get_safety_audit(limit: int = 200, session_id: str = "", event_type: str = ""):
     limit = max(1, min(limit, 1000))
     session_id = (session_id or "").strip()
-    filtered = safety_log
+    event_type = (event_type or "").strip()
+    filtered: list = list(safety_log)
     if session_id:
         filtered = [
-            event for event in safety_log
+            event for event in filtered
             if str(event.get("session") or "") == session_id
             or str(event.get("session_id") or "") == session_id
         ]
+    if event_type:
+        filtered = [event for event in filtered if event.get("type") == event_type]
     events = filtered[-limit:]
     return {
         "events": events,
         "total": len(filtered),
         "session_id": session_id or None,
-        "filtered": bool(session_id),
+        "event_type": event_type or None,
+        "filtered": bool(session_id or event_type),
     }
 
 @app.get("/personas")

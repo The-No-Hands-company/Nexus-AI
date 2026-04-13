@@ -437,6 +437,44 @@ class TestSafetyAuditLog(unittest.TestCase):
         self.assertEqual(payload["total"], 0)
         self.assertEqual(payload["events"], [])
 
+    def test_audit_can_filter_by_event_type(self):
+        # Emit a block event and a profile_change event
+        client.post("/safety/check", json={"text": "Please run rm -rf /var/data", "policy_profile": "standard"})
+        client.post("/settings/safety", json={"safety_profile": "sandbox"})
+
+        response = client.get("/safety/audit?event_type=block")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["filtered"])
+        self.assertEqual(payload["event_type"], "block")
+        self.assertIsNone(payload["session_id"])
+        self.assertGreaterEqual(payload["total"], 1)
+        self.assertTrue(all(e.get("type") == "block" for e in payload["events"]))
+
+    def test_audit_event_type_filter_returns_empty_for_unknown_type(self):
+        response = client.get("/safety/audit?event_type=nonexistent_type")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["filtered"])
+        self.assertEqual(payload["event_type"], "nonexistent_type")
+        self.assertEqual(payload["total"], 0)
+        self.assertEqual(payload["events"], [])
+
+    def test_audit_combined_session_and_event_type_filter(self):
+        session_id = client.post("/session").json()["session_id"]
+        try:
+            client.post(f"/session/{session_id}/safety", json={"safety_profile": "sandbox"})
+            # Only profile_change events exist for this session — no blocks
+            response = client.get(f"/safety/audit?session_id={session_id}&event_type=block")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(payload["filtered"])
+            self.assertEqual(payload["session_id"], session_id)
+            self.assertEqual(payload["event_type"], "block")
+            self.assertEqual(payload["total"], 0)
+        finally:
+            client.delete(f"/session/{session_id}")
+
     def test_blocked_input_guardrail_appears_in_audit_log(self):
         response = client.post(
             "/safety/check",
