@@ -68,6 +68,27 @@ class TestV1Contracts(unittest.TestCase):
         self.assertIn(payload["type"], ("guardrail_violation", "prompt_injection"))
         self.assertIn("Potential prompt injection detected.", payload["error"])
 
+    def test_architecture_hierarchy_endpoint_returns_scaffold(self):
+        response = client.get("/architecture/hierarchy")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+
+        self.assertIn("system", payload)
+        self.assertIn("foundation_models", payload)
+        self.assertIn("agent_layer", payload)
+        self.assertIn("workflow_layer", payload)
+        self.assertIn("task_layer", payload)
+        self.assertIn("counts", payload)
+
+        self.assertGreaterEqual(payload["counts"]["foundation_models"], 1)
+        self.assertGreaterEqual(payload["counts"]["agents"], 1)
+        self.assertGreaterEqual(payload["counts"]["workflows"], 2)
+        self.assertGreaterEqual(payload["counts"]["tools"], 1)
+
+        workflow_ids = {w.get("id") for w in payload.get("workflow_layer", [])}
+        self.assertIn("single_agent_loop", workflow_ids)
+        self.assertIn("hierarchical_orchestrator", workflow_ids)
+
 
 class TestSafetyModule(unittest.TestCase):
     def test_safe_text_passes(self):
