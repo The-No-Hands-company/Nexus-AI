@@ -8,7 +8,7 @@ import os
 import json
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 try:
@@ -409,10 +409,9 @@ def init_pins_table() -> None:
     _conn().commit()
 
 def pin_chat(chat_id: str) -> None:
-    from datetime import datetime
     _conn().execute(
         "INSERT OR IGNORE INTO pinned_chats(chat_id, pinned_at) VALUES(?,?)",
-        (chat_id, datetime.utcnow().isoformat())
+        (chat_id, datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"))
     )
     _conn().commit()
     _schedule_push()
@@ -572,7 +571,12 @@ def create_user(username: str, password_hash: str, display_name: str = "") -> bo
     try:
         _conn().execute(
             "INSERT INTO users(username, password, created_at, display_name) VALUES (?, ?, ?, ?)",
-            (username, password_hash, datetime.utcnow().isoformat(), display_name or username)
+            (
+                username,
+                password_hash,
+                datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                display_name or username,
+            )
         )
         _conn().commit()
         return True

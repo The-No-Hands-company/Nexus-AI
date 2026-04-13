@@ -1,7 +1,7 @@
 import os, uuid, json, asyncio, threading, time
 import secrets, hashlib
 import jwt as _jwt
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -62,7 +62,7 @@ def _auto_title(history):
             t = m["content"]
             if not any(t.startswith(p) for p in ["Tool result:","Continue","[MEMORY","[GITHUB"]):
                 return t.strip()[:60]
-    return "Chat "+datetime.utcnow().strftime("%b %d")
+    return "Chat " + datetime.now(timezone.utc).strftime("%b %d")
 
 
 # ── static ────────────────────────────────────────────────────────────────────

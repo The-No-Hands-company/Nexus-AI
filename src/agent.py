@@ -1,6 +1,6 @@
 import os, re, json, glob, time, subprocess, threading, resource
 from functools import lru_cache
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Iterator, Optional
 from .tools_builtin import dispatch_builtin
 from .autonomy import Orchestrator, classify_subtask, PlanningSystem
@@ -244,7 +244,7 @@ def get_system_resources(max_age_seconds: int = 10) -> Dict[str, Any]:
         "cpu_count": cpu_count,
         "load_1m": load_1m,
         "cpu_load_ratio": cpu_load_ratio,
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     _RESOURCE_CACHE["ts"] = now
     _RESOURCE_CACHE["data"] = data
