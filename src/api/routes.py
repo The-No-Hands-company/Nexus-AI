@@ -292,6 +292,51 @@ async def pii_scan(request: Request):
     return result
 
 
+@app.post("/safety/prompt-injection")
+async def prompt_injection_scan(request: Request):
+    data = await request.json()
+    text = (data.get("text") or "")
+    if not text.strip():
+        return _api_error("text is required", "validation_error", 422)
+
+    profile = str(data.get("policy_profile") or _config.get("safety_profile", "standard") or "standard")
+    verdict = screen_input(text, allow_destructive=False, policy_profile=profile)
+    prompt_issues = [issue.to_dict() for issue in verdict.issues if issue.code == "prompt_injection"]
+    patterns = [issue.get("pattern") for issue in prompt_issues if issue.get("pattern")]
+    detected = bool(prompt_issues)
+
+    payload = {
+        "detected": detected,
+        "stage": "input",
+        "policy_profile": profile,
+        "policy": get_safety_policy(profile),
+        "action": "block" if detected else "allow",
+        "threat": (prompt_issues[0].get("threat") if prompt_issues else "none"),
+        "issues": [
+            {
+                "code": issue["code"],
+                "reason": issue["reason"],
+                "detail": issue["detail"],
+                "severity": issue["threat"],
+                "pattern": issue["pattern"],
+            }
+            for issue in prompt_issues
+        ],
+        "matches": patterns,
+    }
+
+    if detected:
+        _push_safety_event("block", {
+            "scope": "prompt_injection_scan",
+            "tool": "prompt_injection_scan",
+            "label": text[:120],
+            "profile": profile,
+            "verdict": payload,
+        })
+
+    return payload
+
+
 # ── Scheduler API ─────────────────────────────────────────────────────────────
 
 @app.get("/scheduler/jobs")

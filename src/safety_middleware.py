@@ -15,7 +15,7 @@ _TEXTUAL_RESPONSE_TYPES = (
     "text/event-stream",
     "text/markdown",
 )
-_REQUEST_EXEMPT_PATHS = {"/safety/check", "/safety/pii-scan"}
+_REQUEST_EXEMPT_PATHS = {"/safety/check", "/safety/pii-scan", "/safety/prompt-injection"}
 _RESPONSE_EXEMPT_PREFIXES = ("/static/",)
 
 
