@@ -126,6 +126,21 @@ def _push_activity(event: Dict) -> None:
     if len(activity_log) > _MAX_ACTIVITY:
         del activity_log[:-_MAX_ACTIVITY]
 
+# ── Safety audit log ─────────────────────────────────────────────────────────
+_MAX_SAFETY_LOG = 1000
+safety_log: List[Dict] = []
+
+def _push_safety_event(event_type: str, detail: Dict) -> None:
+    """Append a safety audit event.  event_type: 'block' | 'profile_change' | 'pii_scrub'."""
+    entry = {
+        "ts": time.time(),
+        "type": event_type,
+        **detail,
+    }
+    safety_log.append(entry)
+    if len(safety_log) > _MAX_SAFETY_LOG:
+        del safety_log[:-_MAX_SAFETY_LOG]
+
 # ── token extraction from user messages ───────────────────────────────────────
 _TOKEN_RE   = re.compile(r'gh[ps]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{80,}')
 _GITHUB_URL_RE = re.compile(r'https://github\.com/[\w\-\.]+/[\w\-\.]+')
@@ -148,10 +163,11 @@ _session_state: Dict[str, Dict] = {}
 def get_session_state(sid: str) -> Dict:
     if sid not in _session_state:
         _session_state[sid] = {
-            "dir":         f"/tmp/ca_session_{sid[:8]}",
-            "token":       GH_TOKEN,
-            "repos":       [],    # list of cloned repo URLs in this session
-            "active_repo": None,  # most recently cloned/worked-on repo URL
+            "dir":           f"/tmp/ca_session_{sid[:8]}",
+            "token":         GH_TOKEN,
+            "repos":         [],    # list of cloned repo URLs in this session
+            "active_repo":   None,  # most recently cloned/worked-on repo URL
+            "safety_profile": None, # None = inherit global _config["safety_profile"]
         }
         os.makedirs(_session_state[sid]["dir"], exist_ok=True)
     return _session_state[sid]
@@ -176,6 +192,15 @@ def get_session_token(sid: str) -> str:
 
 def get_session_dir(sid: str) -> str:
     return get_session_state(sid)["dir"]
+
+def get_session_safety_profile(sid: str) -> str:
+    """Return the effective safety profile for *sid*: session override if set, else global config."""
+    session_profile = get_session_state(sid).get("safety_profile") if sid else None
+    return session_profile or _config.get("safety_profile", "standard")
+
+def set_session_safety_profile(sid: str, profile: str) -> None:
+    """Set a per-session safety profile override.  Pass None to clear (revert to global)."""
+    get_session_state(sid)["safety_profile"] = profile
 
 # ── provider registry ─────────────────────────────────────────────────────────
 PROVIDERS: Dict[str, Dict] = {
@@ -1969,7 +1994,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             continue
 
         # Built-in tools (no LLM needed)
-        tool_input_verdict = screen_tool_action(action, policy_profile=_config.get("safety_profile", "standard"))
+        tool_input_verdict = screen_tool_action(action, policy_profile=get_session_safety_profile(sid))
         if tool_input_verdict.action == SafetyAction.BLOCK:
             result = describe_block(tool_input_verdict)
             _tid = f"tool_{int(time.time()*1000)}"
@@ -1985,6 +2010,11 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             _checkpoint_events.append({k: v for k, v in _evt.items() if k not in ("file_content", "workdir")})
             _push_activity({"ts": time.time(), "action": kind, "label": str(action)[:120],
                             "status": "blocked", "session": sid})
+            _push_safety_event("block", {
+                "tool": kind, "label": str(action)[:120], "session": sid,
+                "profile": get_session_safety_profile(sid),
+                "verdict": tool_input_verdict.to_dict(),
+            })
             messages.append({"role":"assistant","content":json.dumps(action)})
             messages.append({"role":"user","content":f"Tool result:\n{result}\n\nContinue."})
             _step_idx += 1

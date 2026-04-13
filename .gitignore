@@ -66,3 +66,10 @@ logs/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# Local development artefacts — not part of the distributable source
+# Feature registries, sprint tickets, and generation scripts are working-env
+# files only; they are not needed by other developers building Nexus-AI.
+docs/registry/
+docs/sprint-tickets/
+scripts/
