@@ -430,6 +430,13 @@ async def v1_chat_completions(request: Request):
     try:
         task = check_user_task(task)
     except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "v1_chat_completions",
+            "label": task[:120],
+            "profile": _config.get("safety_profile", "standard"),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
         return _api_error(exc.reason, exc.code, 422)
 
     task = _apply_response_format_hint(task, response_format or "")
@@ -839,6 +846,13 @@ async def autonomy_plan(request: Request):
     try:
         goal = check_user_task(goal)
     except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "autonomy_plan",
+            "label": goal[:120],
+            "profile": _config.get("safety_profile", "standard"),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
         return _api_error(exc.reason, exc.code, 422)
     try:
         max_subtasks = int(data.get("max_subtasks", 6))
@@ -874,6 +888,13 @@ async def autonomy_execute(request: Request):
     try:
         goal = check_user_task(goal)
     except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "autonomy_execute",
+            "label": goal[:120],
+            "profile": _config.get("safety_profile", "standard"),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
         return _api_error(exc.reason, exc.code, 422)
     strategy = data.get("strategy", "parallel")
     try:
@@ -1791,6 +1812,13 @@ async def hierarchical_orchestrate(request: Request):
     try:
         goal = check_user_task(goal)
     except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "orchestrate_hierarchical",
+            "label": goal[:120],
+            "profile": _config.get("safety_profile", "standard"),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
         return _api_error(exc.reason, exc.code, 422)
 
     max_subtasks = int(body.get("max_subtasks", 6))
@@ -1861,6 +1889,13 @@ async def run_simulation(request: Request):
     try:
         check_user_task(topic)
     except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "simulate",
+            "label": topic[:120],
+            "profile": _config.get("safety_profile", "standard"),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
         return _api_error(exc.reason, exc.code, 422)
 
     n_personas = max(2, min(int(body.get("n_personas", 5)), 8))

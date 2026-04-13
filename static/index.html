@@ -1168,8 +1168,10 @@
           <option value="block">Blocks only</option>
           <option value="profile_change">Profile changes</option>
           <option value="pii_scrub">PII scrubs</option>
+          <option value="session">Session-only events</option>
         </select>
         <button onclick="loadAuditLog()" style="font-size:.72rem;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:2px 8px;cursor:pointer">↻ Refresh</button>
+        <span id="audit-session-count" style="font-size:.65rem;color:var(--teal);padding:2px 6px;border:1px solid color-mix(in srgb,var(--teal)25%,transparent);border-radius:999px;background:color-mix(in srgb,var(--teal)10%,transparent)"></span>
         <span id="audit-count" style="font-size:.65rem;color:var(--muted);margin-left:auto"></span>
       </div>
       <div class="audit-list" id="audit-list"><span style="color:var(--muted);font-size:.76rem">Loading…</span></div>
@@ -2678,6 +2680,8 @@ function closeAuditModal() { document.getElementById('audit-modal').classList.re
 async function loadAuditLog() {
   const data = await fetch('/safety/audit?limit=500').then(r=>r.json()).catch(()=>({events:[],total:0}));
   _auditEvents = data.events||[];
+  const sessionEvents = _auditEvents.filter(e=>e.session || e.session_id).length;
+  document.getElementById('audit-session-count').textContent = `${sessionEvents} session events`;
   document.getElementById('audit-count').textContent = `${_auditEvents.length} of ${data.total||0} events`;
   renderAuditList();
 }
@@ -2685,7 +2689,9 @@ async function loadAuditLog() {
 function renderAuditList() {
   const filter = document.getElementById('audit-filter').value;
   const list   = document.getElementById('audit-list');
-  const events = filter ? _auditEvents.filter(e=>e.type===filter) : _auditEvents;
+  const events = filter === 'session'
+    ? _auditEvents.filter(e=>e.session || e.session_id)
+    : filter ? _auditEvents.filter(e=>e.type===filter) : _auditEvents;
   if(!events.length){
     list.innerHTML='<span style="color:var(--muted);font-size:.76rem">No events yet.</span>';
     return;
