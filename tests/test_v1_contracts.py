@@ -1706,3 +1706,116 @@ class TestSprintI(unittest.TestCase):
         self.assertIn("cron_cancel", TOOL_ICONS)
 
 
+class TestSprintJ(unittest.TestCase):
+    """Sprint J — knowledge graph, execution trace replay, ensemble toggle."""
+
+    # ── Knowledge graph direct ────────────────────────────────────────────
+
+    def test_kg_store_and_query(self):
+        import os; os.environ.setdefault("DB_PATH", "/tmp/test_nexus_sprintj.db")
+        from src.knowledge_graph import kg_store, kg_query, kg_delete
+        kg_delete("sprintj-test-entity")
+        result = kg_store("sprintj-test-entity", "concept", {"sprint": "J", "status": "active"})
+        self.assertIsInstance(result, str)
+        hits = kg_query("sprintj-test-entity", limit=5)
+        self.assertTrue(any(h["name"] == "sprintj-test-entity" for h in hits))
+        kg_delete("sprintj-test-entity")
+
+    def test_kg_tools_dispatch(self):
+        import os; os.environ.setdefault("DB_PATH", "/tmp/test_nexus_sprintj.db")
+        from src.tools_builtin import dispatch_builtin
+        from src.knowledge_graph import kg_delete
+        kg_delete("dispatch-test-entity")
+        r = dispatch_builtin({"action": "kg_store", "name": "dispatch-test-entity",
+                              "entity_type": "concept", "facts": {"key": "val"}, "relations": []})
+        self.assertIsNotNone(r)
+        self.assertIn("dispatch-test-entity", r.get("result", ""))
+        r2 = dispatch_builtin({"action": "kg_query", "query": "dispatch-test-entity", "limit": 5})
+        self.assertIsNotNone(r2)
+        r3 = dispatch_builtin({"action": "kg_list", "entity_type": None})
+        self.assertIsNotNone(r3)
+        kg_delete("dispatch-test-entity")
+
+    def test_tool_icons_contains_kg(self):
+        from src.agent import TOOL_ICONS
+        self.assertEqual(TOOL_ICONS.get("kg_store"), "🧠")
+        self.assertEqual(TOOL_ICONS.get("kg_query"), "🔭")
+        self.assertEqual(TOOL_ICONS.get("kg_list"), "🗂️")
+
+    def test_tools_description_contains_kg_actions(self):
+        from src.agent import TOOLS_DESCRIPTION
+        self.assertIn("kg_store", TOOLS_DESCRIPTION)
+        self.assertIn("kg_query", TOOLS_DESCRIPTION)
+        self.assertIn("kg_list", TOOLS_DESCRIPTION)
+
+    # ── KG HTTP endpoints ─────────────────────────────────────────────────
+
+    def test_kg_store_endpoint(self):
+        resp = client.post("/kg/store", json={"name": "http-test-ent", "entity_type": "concept",
+                                              "facts": {"via": "http"}, "relations": []})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertTrue(data.get("ok"))
+        self.assertEqual(data.get("name"), "http-test-ent")
+
+    def test_kg_query_endpoint(self):
+        client.post("/kg/store", json={"name": "query-test-ent", "entity_type": "project",
+                                       "facts": {"phase": "J"}, "relations": []})
+        resp = client.get("/kg/query?q=query-test-ent&limit=5")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("results", data)
+        self.assertIsInstance(data["results"], list)
+
+    def test_kg_entities_endpoint(self):
+        resp = client.get("/kg/entities?limit=50")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("entities", data)
+        self.assertIsInstance(data["entities"], list)
+
+    def test_kg_entity_get_endpoint(self):
+        client.post("/kg/store", json={"name": "get-test-ent", "entity_type": "person",
+                                       "facts": {"role": "tester"}, "relations": []})
+        resp = client.get("/kg/entities/get-test-ent")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data.get("name"), "get-test-ent")
+
+    # ── Trace endpoints ───────────────────────────────────────────────────
+
+    def test_trace_list_endpoint(self):
+        resp = client.get("/tasks?limit=10")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("traces", data)
+        self.assertIsInstance(data["traces"], list)
+
+    # ── Ensemble settings endpoints ───────────────────────────────────────
+
+    def test_ensemble_settings_get(self):
+        resp = client.get("/settings/ensemble")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("ensemble_mode", data)
+        self.assertIn("ensemble_threshold", data)
+        self.assertIn("ensemble_enabled", data)
+
+    def test_ensemble_settings_post_toggle(self):
+        # Disable
+        resp = client.post("/settings/ensemble", json={"ensemble_mode": False, "ensemble_threshold": 0.5})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertFalse(data["ensemble_mode"])
+        # Re-enable
+        resp2 = client.post("/settings/ensemble", json={"ensemble_mode": True, "ensemble_threshold": 0.4})
+        self.assertEqual(resp2.status_code, 200)
+        self.assertTrue(resp2.json()["ensemble_mode"])
+
+    def test_ensemble_threshold_respected(self):
+        # With threshold=1.0, no task should be considered high risk
+        self.assertFalse(is_high_risk("write a simple hello world script", threshold=1.0))
+        # With threshold=0.0, any task is high risk
+        self.assertTrue(is_high_risk("delete all production data", threshold=0.0))
+
+

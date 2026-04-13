@@ -11,6 +11,12 @@ from .scheduler import (
     cancel_job,
     job_to_dict,
 )
+from .knowledge_graph import (
+    kg_store as _kg_store,
+    kg_query as _kg_query,
+    kg_list_entities as _kg_list,
+    kg_get as _kg_get,
+)
 
 # ── CALCULATOR ────────────────────────────────────────────────────────────────
 _SAFE_NAMES = {k: v for k, v in math.__dict__.items() if not k.startswith('_')}
@@ -358,6 +364,20 @@ def dispatch_builtin(action: dict) -> dict | None:
     if kind == "cron_cancel":
         r = tool_cron_cancel(action.get("job_id", ""))
         return _tool_trace(action, r, {"job_id": action.get("job_id", "")})
+    if kind == "kg_store":
+        r = tool_kg_store(
+            action.get("name", ""),
+            action.get("entity_type", "concept"),
+            action.get("facts", {}),
+            action.get("relations", []),
+        )
+        return _tool_trace(action, r, {"name": action.get("name", "")})
+    if kind == "kg_query":
+        r = tool_kg_query(action.get("query", ""), int(action.get("limit", 10)))
+        return _tool_trace(action, r, {"query": action.get("query", "")})
+    if kind == "kg_list":
+        r = tool_kg_list(action.get("entity_type", None))
+        return _tool_trace(action, r, {"entity_type": action.get("entity_type")})
     return None
 
 
@@ -801,6 +821,51 @@ def tool_cron_cancel(job_id: str) -> str:
     if cancel_job(jid):
         return f"✅ Cancelled job `{jid}`."
     return f"❌ Job not found: `{jid}`"
+
+
+# ── KNOWLEDGE GRAPH TOOLS ───────────────────────────────────────────────────
+
+def tool_kg_store(name: str, entity_type: str = "concept",
+                  facts: dict | None = None, relations: list | None = None) -> str:
+    """Store or update an entity in the long-term knowledge graph."""
+    if not name or not name.strip():
+        return "❌ entity name is required."
+    eid = _kg_store(name.strip(), entity_type, facts or {}, relations or [])
+    rel_count = len(relations) if relations else 0
+    facts_count = len(facts) if facts else 0
+    return (f"✅ Stored [{entity_type}] **{name}** in knowledge graph "
+            f"(id={eid[:8]}, {facts_count} facts, {rel_count} relations)")
+
+
+def tool_kg_query(query: str, limit: int = 10) -> str:
+    """Search the knowledge graph for entities matching a query."""
+    if not query or not query.strip():
+        return "❌ query is required."
+    results = _kg_query(query.strip(), limit=limit)
+    if not results:
+        return f"No knowledge graph entries found for: {query}"
+    lines = [f"**{len(results)} KG result(s) for '{query}':**\n"]
+    for e in results:
+        facts = e.get("facts", {})
+        facts_str = ", ".join(f"{k}: {v}" for k, v in list(facts.items())[:5]) if facts else "—"
+        rels = e.get("relations", [])
+        rel_str = "; ".join(f"{r['relation']}→{r['entity']}" for r in rels[:3]) if rels else "—"
+        lines.append(f"• **[{e['type']}] {e['name']}**")
+        lines.append(f"  facts: {facts_str}")
+        lines.append(f"  links: {rel_str}")
+    return "\n".join(lines)
+
+
+def tool_kg_list(entity_type: str | None = None) -> str:
+    """List entities in the knowledge graph, optionally filtered by type."""
+    entities = _kg_list(entity_type=entity_type, limit=50)
+    if not entities:
+        filter_txt = f" of type '{entity_type}'" if entity_type else ""
+        return f"No knowledge graph entities{filter_txt} found."
+    lines = [f"**{len(entities)} KG entit{'y' if len(entities)==1 else 'ies'}:**\n"]
+    for e in entities:
+        lines.append(f"• [{e['type']}] **{e['name']}** (updated: {e['updated_at'][:10]})")
+    return "\n".join(lines)
 
 
 # ── COST ESTIMATOR ────────────────────────────────────────────────────────────

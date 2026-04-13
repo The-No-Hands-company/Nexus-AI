@@ -7,8 +7,10 @@ from .autonomy import Orchestrator, classify_subtask, PlanningSystem
 from .personas import build_system_prompt, get_active_persona_name, get_persona
 from .thinking import build_tot_prompt, parse_tot_response, build_critique_prompt, parse_critique_response, build_got_prompt, parse_got_response
 from .context_window import ContextWindowManager
-from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk
+from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk, get_ensemble_enabled, set_ensemble_enabled
 from .db import load_custom_instructions, log_usage, init_usage_table
+from .knowledge_graph import kg_to_context_string
+from .execution_trace import save_checkpoint as _save_checkpoint
 try:
     init_usage_table()
 except Exception:
@@ -16,17 +18,25 @@ except Exception:
 
 # ── runtime config ────────────────────────────────────────────────────────────
 _config: Dict[str, Any] = {
-    "provider":    os.getenv("PROVIDER", "auto").lower(),
-    "model":       os.getenv("LLM_MODEL", ""),
-    "temperature": float(os.getenv("LLM_TEMPERATURE", "0.2")),
-    "persona":     os.getenv("PERSONA", "general"),
+    "provider":           os.getenv("PROVIDER", "auto").lower(),
+    "model":              os.getenv("LLM_MODEL", ""),
+    "temperature":        float(os.getenv("LLM_TEMPERATURE", "0.2")),
+    "persona":            os.getenv("PERSONA", "general"),
+    "ensemble_mode":      True,
+    "ensemble_threshold": 0.4,
 }
 def get_config() -> Dict[str, Any]: return dict(_config)
-def update_config(provider=None, model=None, temperature=None, persona=None):
-    if provider    is not None: _config["provider"]    = provider.lower()
-    if model       is not None: _config["model"]       = model
-    if temperature is not None: _config["temperature"] = float(temperature)
-    if persona     is not None: _config["persona"]     = persona
+def update_config(provider=None, model=None, temperature=None, persona=None,
+                  ensemble_mode=None, ensemble_threshold=None):
+    if provider           is not None: _config["provider"]           = provider.lower()
+    if model              is not None: _config["model"]              = model
+    if temperature        is not None: _config["temperature"]        = float(temperature)
+    if persona            is not None: _config["persona"]            = persona
+    if ensemble_mode      is not None:
+        _config["ensemble_mode"] = bool(ensemble_mode)
+        set_ensemble_enabled(bool(ensemble_mode))
+    if ensemble_threshold is not None:
+        _config["ensemble_threshold"] = float(ensemble_threshold)
     return dict(_config)
 
 # ── env ───────────────────────────────────────────────────────────────────────
@@ -554,6 +564,9 @@ Available actions:
     { "action": "cron_schedule", "name": "nightly-backup", "task": "Export all chats to markdown", "schedule": "1d" }
     { "action": "cron_list" }    ← list active background jobs
     { "action": "cron_cancel", "job_id": "abc12345" }
+  { "action": "kg_store",  "name": "entity name", "entity_type": "person|project|concept", "facts": {"key": "value"}, "relations": [{"relation": "works_on", "to": "other entity"}] }  ← save to long-term knowledge graph
+  { "action": "kg_query",  "query": "search terms", "limit": 10 }  ← search knowledge graph
+  { "action": "kg_list",   "entity_type": "person" }  ← list all KG entities (optionally by type)
   { "action": "read_csv",   "path": "data.csv" }
   { "action": "write_csv",  "path": "output.csv", "data": [["col1","col2"],["a","b"]] }
   { "action": "api_call",   "method": "GET", "url": "https://api.example.com/data", "headers": {}, "body": null }
@@ -1147,7 +1160,8 @@ def call_llm_smart(
     risk = score_task_risk(effective_task)
     meta: Dict[str, Any] = {"ensemble": False, "risk_score": risk}
 
-    if is_high_risk(effective_task):
+    threshold = float(_config.get("ensemble_threshold", 0.4))
+    if _config.get("ensemble_mode", True) and is_high_risk(effective_task, threshold=threshold):
         print(f"🔴 High-risk task (score={risk:.2f}) — entering ensemble mode")
         try:
             result, pid, ens_meta = call_llm_ensemble(
@@ -1220,6 +1234,7 @@ TOOL_ICONS = {
     "rag_ingest":"📚","rag_query":"🔎","rag_status":"📊",
     "inspect_db":"🔬","file_diff":"±",
     "cron_schedule":"⏱️","cron_list":"📆","cron_cancel":"⏹️",
+    "kg_store":"🧠","kg_query":"🔭","kg_list":"🗂️",
 }
 
 # ── long-context compression ──────────────────────────────────────────────────
@@ -1265,7 +1280,7 @@ def _compress_history(history: List[Dict]) -> List[Dict]:
 
 # ── streaming agent ───────────────────────────────────────────────────────────
 def stream_agent_task(task: str, history: list, files: list | None = None,
-                      stop_evt=None, sid: str = "") -> Iterator[Dict[str, Any]]:
+                      stop_evt=None, sid: str = "", trace_id: str = "") -> Iterator[Dict[str, Any]]:
     def _stopped(): return stop_evt is not None and stop_evt.is_set()
 
     # Extract + store token from task; mask it before sending to LLM
@@ -1283,6 +1298,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
     # Accumulated reasoning trace — populated by think/think_deep steps
     _trace_steps: List[Dict[str, Any]] = []
+    # Checkpoint tracking
+    _step_idx: int = 0
+    _checkpoint_events: List[Dict[str, Any]] = []
 
     # Direct answer bypass
     direct = _try_direct(clean_task)
@@ -1320,6 +1338,13 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                       f"Now read key files, make improvements, commit and push.")
 
     messages: List[Dict] = CONTEXT_WINDOW.compress_history(list(history))
+    # Inject long-term knowledge graph context when relevant entities exist
+    _kg_ctx = kg_to_context_string(clean_task, limit=5)
+    if _kg_ctx:
+        messages = [
+            {"role": "user",      "content": _kg_ctx},
+            {"role": "assistant", "content": "Noted — I have reviewed the relevant knowledge graph context."},
+        ] + messages
     messages.append({"role":"user","content":_build_content(clean_task, files or [])})
     input_token_estimate = _messages_token_estimate(messages)
 
@@ -1670,10 +1695,14 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "file_path":None, "file_content":None, "artifact":False,
             }
             yield _evt
+            _checkpoint_events.append({k: v for k, v in _evt.items() if k not in ("file_content", "workdir")})
             _push_activity({"ts": time.time(), "action": kind, "label": str(label)[:120],
                             "status": result_stat, "session": sid})
             messages.append({"role":"assistant","content":json.dumps(action)})
             messages.append({"role":"user","content":f"Tool result:\n{result_str}\n\nContinue."})
+            _step_idx += 1
+            if trace_id:
+                _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
             continue
 
         # File-system tools (need workdir)
@@ -1780,10 +1809,14 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                "file_path":file_path, "file_content":file_content,
                "artifact":artifact, "workdir":workdir if artifact else None}
         yield _evt
+        _checkpoint_events.append({k: v for k, v in _evt.items() if k not in ("file_content", "workdir")})
         _push_activity({"ts": time.time(), "action": kind, "label": str(label)[:120],
                         "status": "done", "session": sid})
         messages.append({"role":"assistant","content":json.dumps(action)})
         messages.append({"role":"user","content":f"Tool result:\n{result}\n\nContinue."})
+        _step_idx += 1
+        if trace_id:
+            _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
 
     # Hit MAX_LOOP
     cfg = PROVIDERS.get(providers_used[-1] if providers_used else "",{})
