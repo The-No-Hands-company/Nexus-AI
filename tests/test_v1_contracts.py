@@ -1380,3 +1380,255 @@ class TestSprintG(unittest.TestCase):
         self.assertIn("personas",   payload)
         self.assertIn("rounds",     payload)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Sprint H: Vision routing, Diff viewer, DB introspection, Swarm View
+# ─────────────────────────────────────────────────────────────────────────────
+
+class TestSprintH(unittest.TestCase):
+
+    # ── DB schema introspection ───────────────────────────────────────────────
+
+    def test_inspect_db_in_dispatch_builtin(self):
+        """inspect_db action is handled by dispatch_builtin (no NameError)."""
+        from src.tools_builtin import dispatch_builtin
+        result = dispatch_builtin({"action": "inspect_db", "connection_string": "nonexistent.db"})
+        # Should return a trace dict, result may contain error text but must not raise
+        self.assertIsNotNone(result)
+        self.assertIsInstance(result, dict)
+
+    def test_inspect_db_unsupported_connection_string(self):
+        """Unsupported protocol returns a friendly error."""
+        from src.tools_builtin import tool_inspect_db
+        res = tool_inspect_db("mysql://root:pass@localhost/mydb")
+        self.assertIn("❌", res)
+
+    def test_inspect_db_empty_string_returns_error(self):
+        """Empty connection_string returns a friendly error."""
+        from src.tools_builtin import tool_inspect_db
+        res = tool_inspect_db("")
+        self.assertIn("❌", res)
+
+    def test_inspect_db_sqlite_empty(self):
+        """inspect_db on a fresh in-memory SQLite reports no tables."""
+        import tempfile, sqlite3, os
+        from src.tools_builtin import tool_inspect_db
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            conn = sqlite3.connect(path)
+            conn.close()
+            res = tool_inspect_db(f"sqlite:///{path}")
+            self.assertIn("No tables", res)
+        finally:
+            os.unlink(path)
+
+    def test_inspect_db_sqlite_with_table(self):
+        """inspect_db returns table name, column definitions, and row count."""
+        import tempfile, sqlite3, os
+        from src.tools_builtin import tool_inspect_db
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
+            conn.execute("INSERT INTO users VALUES (1, 'Alice')")
+            conn.commit()
+            conn.close()
+            res = tool_inspect_db(f"sqlite:///{path}")
+            self.assertIn("users", res)
+            self.assertIn("id", res)
+            self.assertIn("name", res)
+            self.assertIn("1 row", res)
+        finally:
+            os.unlink(path)
+
+    def test_query_db_in_dispatch_builtin(self):
+        """query_db action is handled by dispatch_builtin."""
+        import tempfile, sqlite3, os
+        from src.tools_builtin import dispatch_builtin
+        with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
+            path = f.name
+        try:
+            conn = sqlite3.connect(path)
+            conn.execute("CREATE TABLE t (id INTEGER, val TEXT)")
+            conn.execute("INSERT INTO t VALUES (1, 'hello')")
+            conn.commit()
+            conn.close()
+            result = dispatch_builtin({
+                "action": "query_db",
+                "connection_string": f"sqlite:///{path}",
+                "query": "SELECT * FROM t",
+            })
+            self.assertIsNotNone(result)
+            r = result.get("result", "")
+            self.assertIn("hello", r)
+        finally:
+            os.unlink(path)
+
+    # ── Vision routing ────────────────────────────────────────────────────────
+
+    def test_ollama_vision_models_not_empty(self):
+        """OLLAMA_VISION_MODELS list must contain at least one model."""
+        from src.agent import OLLAMA_VISION_MODELS
+        self.assertIsInstance(OLLAMA_VISION_MODELS, list)
+        self.assertGreater(len(OLLAMA_VISION_MODELS), 0)
+
+    def test_get_best_vision_model_returns_string(self):
+        """get_best_vision_model() always returns a non-empty string."""
+        from src.agent import get_best_vision_model
+        result = get_best_vision_model()
+        self.assertIsInstance(result, str)
+        self.assertGreater(len(result), 0)
+
+    def test_messages_have_images_true(self):
+        """_messages_have_images detects image_url parts."""
+        from src.agent import _messages_have_images
+        msgs = [
+            {"role": "user", "content": [
+                {"type": "text", "text": "What is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+            ]}
+        ]
+        self.assertTrue(_messages_have_images(msgs))
+
+    def test_messages_have_images_false_for_text(self):
+        """_messages_have_images returns False for plain text messages."""
+        from src.agent import _messages_have_images
+        msgs = [{"role": "user", "content": "Hello, world!"}]
+        self.assertFalse(_messages_have_images(msgs))
+
+    def test_messages_have_images_false_for_empty(self):
+        """_messages_have_images returns False for an empty list."""
+        from src.agent import _messages_have_images
+        self.assertFalse(_messages_have_images([]))
+
+    # ── Diff viewer helpers ───────────────────────────────────────────────────
+
+    def test_tool_write_file_creates_file(self):
+        """tool_write_file creates a new file and returns success message."""
+        import tempfile, os
+        from src.agent import tool_write_file
+        with tempfile.TemporaryDirectory() as d:
+            res = tool_write_file("hello.txt", "new content", d)
+            self.assertNotIn("❌", res)
+            self.assertTrue(os.path.exists(os.path.join(d, "hello.txt")))
+
+    def test_file_diff_event_emitted_on_overwrite(self):
+        """stream_agent_task emits a file_diff event when overwriting a file."""
+        import tempfile, os
+        from unittest.mock import patch
+        from src.agent import stream_agent_task
+
+        with tempfile.TemporaryDirectory() as d:
+            # Create existing file
+            with open(os.path.join(d, "app.py"), "w") as fh:
+                fh.write("old content")
+
+            actions = [
+                {"action": "write_file", "path": "app.py", "content": "new content"},
+                {"action": "respond", "content": "done", "confidence": 0.9},
+            ]
+            calls = iter(actions)
+
+            def _fake_llm(msgs, task="", *a, **kw):
+                try:
+                    return next(calls), "mock"
+                except StopIteration:
+                    return {"action": "respond", "content": "done", "confidence": 0.9}, "mock"
+
+            with patch("src.agent.call_llm_with_fallback", side_effect=_fake_llm), \
+                 patch("src.agent.get_session_dir", return_value=d):
+                events = list(stream_agent_task("rewrite app.py", history=[], sid="test-diff"))
+
+            diff_events = [e for e in events if e.get("type") == "file_diff"]
+            self.assertEqual(len(diff_events), 1)
+            self.assertEqual(diff_events[0]["path"], "app.py")
+            self.assertIn("old content", diff_events[0]["before"])
+            self.assertIn("new content", diff_events[0]["after"])
+
+    def test_file_diff_event_not_emitted_for_new_file(self):
+        """stream_agent_task does NOT emit file_diff when creating a new file."""
+        import tempfile
+        from unittest.mock import patch
+        from src.agent import stream_agent_task
+
+        with tempfile.TemporaryDirectory() as d:
+            actions = [
+                {"action": "write_file", "path": "brand_new.py", "content": "# new"},
+                {"action": "respond", "content": "done", "confidence": 0.9},
+            ]
+            calls = iter(actions)
+
+            def _fake_llm(msgs, task="", *a, **kw):
+                try:
+                    return next(calls), "mock"
+                except StopIteration:
+                    return {"action": "respond", "content": "done", "confidence": 0.9}, "mock"
+
+            with patch("src.agent.call_llm_with_fallback", side_effect=_fake_llm), \
+                 patch("src.agent.get_session_dir", return_value=d):
+                events = list(stream_agent_task("make brand_new.py", history=[], sid="test-newfile"))
+
+            diff_events = [e for e in events if e.get("type") == "file_diff"]
+            self.assertEqual(len(diff_events), 0)
+
+    # ── Swarm View endpoint ───────────────────────────────────────────────────
+
+    def test_swarm_activity_endpoint_200(self):
+        """GET /swarm/activity returns HTTP 200."""
+        response = client.get("/swarm/activity")
+        self.assertEqual(response.status_code, 200)
+
+    def test_swarm_activity_returns_events_and_total(self):
+        """GET /swarm/activity returns events list and total count."""
+        response = client.get("/swarm/activity")
+        payload = response.json()
+        self.assertIn("events", payload)
+        self.assertIn("total", payload)
+        self.assertIsInstance(payload["events"], list)
+        self.assertIsInstance(payload["total"], int)
+
+    def test_swarm_activity_limit_parameter(self):
+        """GET /swarm/activity?limit=5 respects the limit."""
+        # Seed 10 events
+        from src.agent import activity_log, _push_activity
+        for i in range(10):
+            _push_activity({"ts": 0, "action": "test", "label": str(i), "status": "done", "session": "t"})
+        response = client.get("/swarm/activity?limit=5")
+        payload = response.json()
+        self.assertLessEqual(len(payload["events"]), 5)
+
+    def test_swarm_activity_log_populated_by_push(self):
+        """_push_activity adds events to activity_log."""
+        from src.agent import activity_log, _push_activity
+        activity_log.clear()
+        _push_activity({"ts": 0, "action": "ping", "label": "test", "status": "done", "session": None})
+        self.assertEqual(len(activity_log), 1)
+
+    def test_swarm_activity_log_cap(self):
+        """activity_log does not exceed _MAX_ACTIVITY entries."""
+        from src.agent import _MAX_ACTIVITY, _push_activity, activity_log
+        activity_log.clear()
+        for i in range(_MAX_ACTIVITY + 50):
+            _push_activity({"ts": 0, "action": "x", "label": str(i), "status": "done", "session": None})
+        self.assertLessEqual(len(activity_log), _MAX_ACTIVITY)
+
+    # ── TOOLS_DESCRIPTION includes inspect_db ────────────────────────────────
+
+    def test_tools_description_contains_inspect_db(self):
+        """TOOLS_DESCRIPTION lists the inspect_db action."""
+        from src.agent import TOOLS_DESCRIPTION
+        self.assertIn("inspect_db", TOOLS_DESCRIPTION)
+
+    # ── TOOL_ICONS has new Sprint H entries ──────────────────────────────────
+
+    def test_tool_icons_inspect_db(self):
+        from src.agent import TOOL_ICONS
+        self.assertIn("inspect_db", TOOL_ICONS)
+
+    def test_tool_icons_file_diff(self):
+        from src.agent import TOOL_ICONS
+        self.assertIn("file_diff", TOOL_ICONS)
+
+

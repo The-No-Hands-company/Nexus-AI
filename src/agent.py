@@ -35,6 +35,16 @@ GITHUB_REPO = os.getenv("GITHUB_REPO", "")
 MAX_LOOP    = 16
 COOLDOWN_SECONDS = int(os.getenv("RATE_LIMIT_COOLDOWN", "60"))
 
+# ── Swarm View activity log ───────────────────────────────────────────────────
+_MAX_ACTIVITY = 500
+activity_log: List[Dict] = []
+
+def _push_activity(event: Dict) -> None:
+    """Append *event* to the circular activity log; trim if over cap."""
+    activity_log.append(event)
+    if len(activity_log) > _MAX_ACTIVITY:
+        del activity_log[:-_MAX_ACTIVITY]
+
 # ── token extraction from user messages ───────────────────────────────────────
 _TOKEN_RE   = re.compile(r'gh[ps]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{80,}')
 _GITHUB_URL_RE = re.compile(r'https://github\.com/[\w\-\.]+/[\w\-\.]+')
@@ -287,6 +297,14 @@ OLLAMA_MODEL_PREFERENCES: Dict[str, List[str]] = {
     ],
 }
 
+# Vision-capable Ollama models — tried in priority order when request contains images
+OLLAMA_VISION_MODELS: List[str] = [
+    "llava:34b", "llava:13b", "llava:7b",
+    "qwen2-vl:7b", "llava-llama3:8b",
+    "llava-phi3:3.8b", "minicpm-v:8b",
+    "moondream:1.8b", "bakllava:7b",
+]
+
 # Additional cloud-model aliases usable when a provider sends a specific model name
 EXTENDED_MODEL_ALIASES: Dict[str, str] = {
     # Ollama pull name → canonical ID used in routing
@@ -322,6 +340,37 @@ def get_best_ollama_model(task_type: str) -> str:
         pass
     # Return first preference as optimistic default (it may still work via cloud pull)
     return PROVIDERS["ollama"]["default_model"]
+
+
+def get_best_vision_model() -> str:
+    """Return the best locally-available Ollama vision model.
+
+    Falls back to the first entry in OLLAMA_VISION_MODELS (optimistic) if
+    none are confirmed available.
+    """
+    ollama_base = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/")
+    try:
+        import requests as _req
+        resp = _req.get(f"{ollama_base}/models", timeout=3)
+        if resp.status_code == 200:
+            available = {m["id"].lower() for m in resp.json().get("data", [])}
+            for mdl in OLLAMA_VISION_MODELS:
+                if mdl.lower() in available:
+                    return mdl
+    except Exception:
+        pass
+    return OLLAMA_VISION_MODELS[0]
+
+
+def _messages_have_images(messages: List[Dict]) -> bool:
+    """Return True when any message content contains an image_url part."""
+    for msg in messages:
+        content = msg.get("content", "")
+        if isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image_url":
+                    return True
+    return False
 
 
 _cooldowns: Dict[str, float] = {}
@@ -381,6 +430,19 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
         PROVIDERS["ollama"]["_selected_model"] = best_model
 
     return ordered
+
+
+def _smart_order_for_vision(messages: List[Dict]) -> None:
+    """If *messages* contain image_url parts and Ollama is available,
+    override the Ollama selected model to the best vision model.
+
+    Call this right before the provider loop in call_llm_with_fallback.
+    """
+    if not _messages_have_images(messages):
+        return
+    ollama_cfg = PROVIDERS.get("ollama")
+    if ollama_cfg and (_has_key(ollama_cfg)) and not _is_rate_limited("ollama"):
+        ollama_cfg["_vision_override"] = get_best_vision_model()
 
 # ── personas ──────────────────────────────────────────────────────────────────
 PERSONAS: Dict[str, Dict] = {
@@ -488,6 +550,7 @@ Available actions:
   { "action": "read_pdf",  "path": "document.pdf" }
   { "action": "diff",       "original": "old text", "modified": "new text", "filename": "app.py" }
   { "action": "query_db",   "connection_string": "sqlite:///data.db", "query": "SELECT * FROM table LIMIT 10" }
+  { "action": "inspect_db", "connection_string": "sqlite:///data.db" }  ← list all tables, columns and row counts
   { "action": "read_csv",   "path": "data.csv" }
   { "action": "write_csv",  "path": "output.csv", "data": [["col1","col2"],["a","b"]] }
   { "action": "api_call",   "method": "GET", "url": "https://api.example.com/data", "headers": {}, "body": null }
@@ -1152,6 +1215,7 @@ TOOL_ICONS = {
     "orchestrate_goal":"🧩","decompose_goal":"🧭","select_model":"🧠",
     "simulate":"🧬","agent_message":"📨",
     "rag_ingest":"📚","rag_query":"🔎","rag_status":"📊",
+    "inspect_db":"🔬","file_diff":"±",
 }
 
 # ── long-context compression ──────────────────────────────────────────────────
@@ -1593,7 +1657,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             result_stat = builtin_result.get("status", "done") if isinstance(builtin_result, dict) else "done"
             result_meta = builtin_result.get("metadata", {}) if isinstance(builtin_result, dict) else {}
             _tid        = f"tool_{int(time.time()*1000)}"
-            yield {
+            _evt = {
                 "type":"tool", "id":_tid, "parent_id":None,
                 "status":result_stat, "icon":icon,
                 "action":kind, "tool_name":kind,
@@ -1601,6 +1665,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "input":action, "metadata":result_meta,
                 "file_path":None, "file_content":None, "artifact":False,
             }
+            yield _evt
+            _push_activity({"ts": time.time(), "action": kind, "label": str(label)[:120],
+                            "status": result_stat, "session": sid})
             messages.append({"role":"assistant","content":json.dumps(action)})
             messages.append({"role":"user","content":f"Tool result:\n{result_str}\n\nContinue."})
             continue
@@ -1613,9 +1680,28 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             if kind == "write_file":
                 file_path    = action.get("path","file.txt")
                 fc           = action.get("content","")
+                # Capture existing content for diff before overwriting
+                _before_content = ""
+                _full_path = os.path.join(workdir, file_path)
+                if os.path.exists(_full_path):
+                    try:
+                        with open(_full_path, "r", encoding="utf-8", errors="replace") as _bfh:
+                            _before_content = _bfh.read()
+                    except Exception:
+                        pass
                 result       = tool_write_file(file_path, fc, workdir)
                 file_content = fc
                 artifact     = _is_artifact(file_path, fc)
+                # Emit file_diff event when modifying an existing file
+                if _before_content and _before_content != fc:
+                    _DIFF_LIMIT = 4000
+                    yield {
+                        "type": "file_diff",
+                        "path": file_path,
+                        "before": _before_content[:_DIFF_LIMIT],
+                        "after": fc[:_DIFF_LIMIT],
+                        "truncated": len(_before_content) > _DIFF_LIMIT or len(fc) > _DIFF_LIMIT,
+                    }
             elif kind == "read_file":
                 file_path = action.get("path","")
                 result    = tool_read_file(file_path, workdir)
@@ -1683,12 +1769,15 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             _tool_meta["file_path"] = file_path
         if kind in ("run_command", "clone_repo", "commit_push"):
             _tool_meta["workdir"] = workdir
-        yield {"type":"tool", "id":_tid, "parent_id":None,
+        _evt = {"type":"tool", "id":_tid, "parent_id":None,
                "status":"done", "icon":icon, "action":kind, "tool_name":kind,
                "label":str(label)[:120], "result":str(result)[:600],
                "input":action, "metadata":_tool_meta,
                "file_path":file_path, "file_content":file_content,
                "artifact":artifact, "workdir":workdir if artifact else None}
+        yield _evt
+        _push_activity({"ts": time.time(), "action": kind, "label": str(label)[:120],
+                        "status": "done", "session": sid})
         messages.append({"role":"assistant","content":json.dumps(action)})
         messages.append({"role":"user","content":f"Tool result:\n{result}\n\nContinue."})
 
