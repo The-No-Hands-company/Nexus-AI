@@ -930,6 +930,9 @@
       <button onclick="openPersonaEditor();toggleOverflow()">🎭 Persona editor</button>
       <button onclick="openSchedulerPanel();toggleOverflow()">⏱ Scheduler</button>
       <button onclick="openSwarmPanel();toggleOverflow()">🧬 Swarm View</button>
+      <button onclick="openKGPanel();toggleOverflow()">🧠 Knowledge Graph</button>
+      <button onclick="openTracePanel();toggleOverflow()">⏮ Trace Viewer</button>
+      <button onclick="openEnsemblePanel();toggleOverflow()">🔴 Ensemble Mode</button>
     </div>
   </div>
 </header>
@@ -1273,6 +1276,59 @@
       <button onclick="createSchedulerJob()" class="btn-primary" style="height:36px;">Add</button>
     </div>
     <div id="scheduler-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:80px;"></div>
+  </div>
+</div>
+
+<!-- ── Knowledge Graph Panel ──────────────────────────────────────────────── -->
+<div id="kg-panel" style="position:fixed;bottom:80px;right:800px;width:460px;max-height:520px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:40;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🧠 Knowledge Graph</span>
+    <button class="panel-btn" onclick="closeKGPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;">
+    <input id="kg-search-input" placeholder="Search entities…" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" onkeydown="if(event.key==='Enter')kgSearch()" />
+    <button class="btn-primary" style="height:36px;padding:0 14px;" onclick="kgSearch()">Search</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+    <input id="kg-add-name" placeholder="Entity name*" style="padding:7px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+    <input id="kg-add-type" placeholder="Type (person, project…)" value="concept" style="padding:7px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+    <textarea id="kg-add-facts" placeholder='Facts JSON: {"key":"value"}' rows="2" style="grid-column:1/3;padding:7px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);resize:vertical;font-family:inherit;font-size:.82rem;"></textarea>
+    <button class="btn-primary" style="height:34px;grid-column:1/3;" onclick="kgStore()">Save Entity</button>
+  </div>
+  <div id="kg-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:80px;font-size:.83rem;"></div>
+</div>
+
+<!-- ── Trace Viewer Panel ─────────────────────────────────────────────────── -->
+<div id="trace-panel" style="position:fixed;bottom:80px;right:370px;width:450px;max-height:500px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:41;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">⏮ Trace Viewer</span>
+    <button class="panel-btn" onclick="closeTracePanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:8px 12px;border-bottom:1px solid var(--border);">
+    <button class="btn-primary" style="height:32px;font-size:.8rem;padding:0 12px;" onclick="refreshTraces()">↻ Refresh</button>
+  </div>
+  <div id="trace-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:80px;font-size:.82rem;"></div>
+</div>
+
+<!-- ── Ensemble Panel ────────────────────────────────────────────────────── -->
+<div id="ensemble-panel" style="position:fixed;bottom:80px;right:20px;width:340px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:42;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🔴 Ensemble Mode</span>
+    <button class="panel-btn" onclick="closeEnsemblePanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:14px 16px;display:flex;flex-direction:column;gap:14px;">
+    <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;">
+      <span style="font-size:.88rem;">Enable high-risk ensemble</span>
+      <input type="checkbox" id="ens-toggle" onchange="saveEnsembleSettings()" style="width:18px;height:18px;cursor:pointer;" />
+    </label>
+    <div>
+      <div style="font-size:.82rem;color:var(--muted);margin-bottom:4px;">Risk threshold: <span id="ens-thr-val">0.40</span></div>
+      <input type="range" id="ens-threshold" min="0" max="1" step="0.05" value="0.4"
+             oninput="document.getElementById('ens-thr-val').textContent=parseFloat(this.value).toFixed(2)"
+             onchange="saveEnsembleSettings()"
+             style="width:100%;accent-color:var(--accent);" />
+    </div>
+    <div id="ens-status" style="font-size:.78rem;color:var(--muted);"></div>
   </div>
 </div>
 
@@ -3062,6 +3118,124 @@ async function createSchedulerJob() {
 async function cancelSchedulerJob(jobId) {
   await fetch(`/scheduler/jobs/${encodeURIComponent(jobId)}/cancel`, {method:'POST'});
   await refreshSchedulerJobs();
+}
+
+// ── Knowledge Graph panel ─────────────────────────────────────────────────
+function openKGPanel() {
+  document.getElementById('kg-panel').style.display = 'flex';
+  kgSearch();
+}
+function closeKGPanel() { document.getElementById('kg-panel').style.display = 'none'; }
+async function kgSearch() {
+  const q = document.getElementById('kg-search-input').value.trim();
+  const feed = document.getElementById('kg-feed');
+  feed.innerHTML = '<div style="color:var(--muted);padding:8px;">Loading…</div>';
+  try {
+    let url = q.length >= 2 ? `/kg/query?q=${encodeURIComponent(q)}&limit=20` : '/kg/entities?limit=40';
+    const r = await fetch(url);
+    const d = await r.json();
+    const items = d.results || d.entities || [];
+    if (!items.length) { feed.innerHTML = `<div style="color:var(--muted);padding:8px;">No results.</div>`; return; }
+    feed.innerHTML = items.map(e => {
+      const facts = Object.entries(e.facts || {}).slice(0,3).map(([k,v])=>`${k}: ${v}`).join(' · ');
+      const rels  = (e.relations||[]).slice(0,3).map(r=>`${r.relation}→${r.entity||r.to_entity}`).join(', ');
+      return `<div style="padding:7px 9px;background:var(--surface2);border-radius:7px;">
+        <div><span style="font-weight:600">${esc(e.name)}</span> <span style="color:var(--muted);font-size:.74rem;">[${esc(e.type||e.entity_type||'')}]</span></div>
+        ${facts ? `<div style="color:var(--muted);font-size:.76rem;margin-top:2px;">${esc(facts)}</div>` : ''}
+        ${rels  ? `<div style="color:var(--muted);font-size:.76rem;">🔗 ${esc(rels)}</div>` : ''}
+      </div>`;
+    }).join('');
+  } catch(e) { feed.innerHTML = `<div style="color:var(--red);padding:8px;">Error: ${e.message}</div>`; }
+}
+async function kgStore() {
+  const name = document.getElementById('kg-add-name').value.trim();
+  if (!name) { alert('Entity name required'); return; }
+  let facts = {};
+  try { facts = JSON.parse(document.getElementById('kg-add-facts').value || '{}'); } catch(_) {}
+  const r = await fetch('/kg/store', {
+    method: 'POST', headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ name, entity_type: document.getElementById('kg-add-type').value||'concept', facts })
+  });
+  if (r.ok) {
+    document.getElementById('kg-add-name').value = '';
+    document.getElementById('kg-add-facts').value = '';
+    kgSearch();
+  } else { alert('Failed to store entity'); }
+}
+
+// ── Trace Viewer panel ────────────────────────────────────────────────────
+function openTracePanel() {
+  document.getElementById('trace-panel').style.display = 'flex';
+  refreshTraces();
+}
+function closeTracePanel() { document.getElementById('trace-panel').style.display = 'none'; }
+async function refreshTraces() {
+  const feed = document.getElementById('trace-feed');
+  feed.innerHTML = '<div style="color:var(--muted);padding:8px;">Loading…</div>';
+  try {
+    const r = await fetch('/tasks?limit=30');
+    const d = await r.json();
+    if (!d.traces || !d.traces.length) {
+      feed.innerHTML = '<div style="color:var(--muted);padding:8px;">No traces recorded yet.</div>'; return;
+    }
+    feed.innerHTML = d.traces.map(t => `
+      <div style="padding:7px 9px;background:var(--surface2);border-radius:7px;">
+        <div style="font-size:.74rem;color:var(--muted);">${esc(t.trace_id)} · ${t.steps||0} steps · ${(t.started_at||'').slice(0,16)}</div>
+        <div style="font-size:.83rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${esc(t.task||'')}">${esc(t.task||'—')}</div>
+        <div style="display:flex;gap:6px;margin-top:5px;">
+          <button onclick="replayTrace('${esc(t.trace_id)}')" style="font-size:.74rem;padding:3px 8px;border-radius:5px;background:var(--accent);color:#fff;border:none;cursor:pointer;">⏮ Replay</button>
+          <button onclick="resumeTrace('${esc(t.trace_id)}')" style="font-size:.74rem;padding:3px 8px;border-radius:5px;background:var(--surface);color:var(--text);border:1px solid var(--border);cursor:pointer;">▶ Resume</button>
+        </div>
+      </div>`).join('');
+  } catch(e) { feed.innerHTML = `<div style="color:var(--red);padding:8px;">Error: ${e.message}</div>`; }
+}
+function replayTrace(traceId) {
+  const feed = document.getElementById('trace-feed');
+  feed.innerHTML = `<div style="color:var(--muted);padding:8px;">⏮ Replaying ${esc(traceId)}…</div>`;
+  const es = new EventSource(`/tasks/${encodeURIComponent(traceId)}/replay`);
+  es.onmessage = e => {
+    try {
+      const evt = JSON.parse(e.data);
+      const row = document.createElement('div');
+      row.style.cssText = 'padding:5px 8px;background:var(--surface2);border-radius:5px;font-size:.78rem;';
+      row.textContent = `[${evt.type||'event'}] ${esc(evt.action||evt.content||evt.message||'')}`.slice(0,120);
+      feed.appendChild(row);
+      feed.scrollTop = feed.scrollHeight;
+    } catch(_) {}
+  };
+  es.onerror = () => es.close();
+}
+async function resumeTrace(traceId) {
+  closeTracePanel();
+  await fetch(`/tasks/${encodeURIComponent(traceId)}/resume`, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'});
+  addMessage('system', `▶ Resuming trace ${traceId} — watch for output above.`);
+}
+
+// ── Ensemble panel ────────────────────────────────────────────────────────
+async function openEnsemblePanel() {
+  document.getElementById('ensemble-panel').style.display = 'flex';
+  try {
+    const r = await fetch('/settings/ensemble');
+    const d = await r.json();
+    document.getElementById('ens-toggle').checked = !!d.ensemble_mode;
+    const thr = parseFloat(d.ensemble_threshold||0.4);
+    document.getElementById('ens-threshold').value = thr;
+    document.getElementById('ens-thr-val').textContent = thr.toFixed(2);
+    document.getElementById('ens-status').textContent = d.ensemble_mode ? '🟢 Ensemble active' : '⚪ Ensemble disabled';
+  } catch(e) { document.getElementById('ens-status').textContent = 'Could not load settings'; }
+}
+function closeEnsemblePanel() { document.getElementById('ensemble-panel').style.display = 'none'; }
+async function saveEnsembleSettings() {
+  const mode = document.getElementById('ens-toggle').checked;
+  const threshold = parseFloat(document.getElementById('ens-threshold').value);
+  try {
+    const r = await fetch('/settings/ensemble', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ensemble_mode: mode, ensemble_threshold: threshold})
+    });
+    const d = await r.json();
+    document.getElementById('ens-status').textContent = d.ensemble_mode ? '🟢 Ensemble active' : '⚪ Ensemble disabled';
+  } catch(e) { document.getElementById('ens-status').textContent = 'Save failed'; }
 }
 
 

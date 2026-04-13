@@ -19,6 +19,20 @@ from ..personas import list_personas, set_persona, get_active_persona_name, get_
 from ..memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory, delete_all as delete_all_memory, get_all as get_all_memory)
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
 from ..safety import GuardrailViolation, check_user_task, scrub_pii
+from ..knowledge_graph import (
+    kg_store as _kg_store,
+    kg_query as _kg_query,
+    kg_list_entities as _kg_list,
+    kg_get as _kg_get,
+    kg_delete as _kg_delete,
+)
+from ..execution_trace import (
+    list_traces as _list_traces,
+    load_checkpoints as _load_checkpoints,
+    get_latest_checkpoint as _get_latest_checkpoint,
+    delete_trace as _delete_trace,
+)
+from ..ensemble import get_ensemble_enabled, set_ensemble_enabled
 from .schemas import *
 from .state import (
     run_results,
@@ -1327,7 +1341,7 @@ async def agent_stream(request: Request):
 
     def run_in_thread():
         try:
-            for event in stream_agent_task(task, history, files, stop_evt, sid=sid or ""):
+            for event in stream_agent_task(task, history, files, stop_evt, sid=sid or "", trace_id=trace_id):
                 if stop_evt.is_set(): break
                 if event["type"]=="done" and sid:
                     sessions[sid] = event.get("history", history)
@@ -1891,6 +1905,206 @@ async def post_agent_message(request: Request):
     from ..agent_bus import post_message
     msg = post_message(from_id, to_id, content)
     return msg.to_dict()
+
+
+@app.delete("/tasks/{trace_id}")
+def delete_task_trace(trace_id: str):
+    deleted = _delete_trace(trace_id)
+    execution_traces.pop(trace_id, None)
+    if not deleted:
+        return _api_error("trace not found", "not_found", 404)
+    return {"deleted": trace_id, "ok": True}
+
+
+# ── Ensemble settings endpoints ──────────────────────────────────────────────
+
+@app.post("/kg/store")
+async def kg_store_endpoint(request: Request):
+    data = await request.json()
+    name = (data.get("name") or "").strip()
+    if not name:
+        return _api_error("name is required", "validation_error", 422)
+    eid = _kg_store(
+        name,
+        entity_type=data.get("entity_type", "concept"),
+        facts=data.get("facts", {}),
+        relations=data.get("relations", []),
+    )
+    return {"id": eid, "name": name, "ok": True}
+
+
+@app.get("/kg/query")
+def kg_query_endpoint(q: str = "", limit: int = 10):
+    if not q:
+        return _api_error("q is required", "validation_error", 422)
+    results = _kg_query(q, limit=limit)
+    return {"results": results, "count": len(results)}
+
+
+@app.get("/kg/entities")
+def kg_entities_endpoint(entity_type: str = "", limit: int = 100):
+    results = _kg_list(entity_type=entity_type or None, limit=limit)
+    return {"entities": results, "count": len(results)}
+
+
+@app.get("/kg/entities/{name}")
+def kg_entity_get_endpoint(name: str):
+    entity = _kg_get(name)
+    if entity is None:
+        return _api_error(f"Entity not found: {name}", "not_found", 404)
+    return entity
+
+
+@app.delete("/kg/entities/{name}")
+def kg_entity_delete_endpoint(name: str):
+    deleted = _kg_delete(name)
+    if not deleted:
+        return _api_error(f"Entity not found: {name}", "not_found", 404)
+    return {"deleted": name, "ok": True}
+
+
+# ── Execution Trace replay/resume endpoints ──────────────────────────────────
+
+@app.get("/tasks")
+def list_tasks(limit: int = 50):
+    traces = _list_traces(limit=limit)
+    return {"traces": traces, "count": len(traces)}
+
+
+@app.get("/tasks/{trace_id}")
+def get_task_trace(trace_id: str):
+    # Check in-memory first (live traces), then SQLite checkpoints
+    in_memory = execution_traces.get(trace_id)
+    checkpoints = _load_checkpoints(trace_id)
+    if in_memory is None and not checkpoints:
+        return _api_error("trace not found", "not_found", 404)
+    events = in_memory if in_memory is not None else []
+    return {"trace_id": trace_id, "events": events, "checkpoints": len(checkpoints)}
+
+
+@app.get("/tasks/{trace_id}/replay")
+async def replay_task(trace_id: str):
+    """Stream stored trace events as SSE with a short delay for visual replay."""
+    import asyncio as _asyncio
+
+    # Prefer in-memory events, fall back to last SQLite checkpoint's events
+    stored_events = execution_traces.get(trace_id)
+    if stored_events is None:
+        cp = _get_latest_checkpoint(trace_id)
+        stored_events = cp["events"] if cp else None
+    if stored_events is None:
+        return _api_error("trace not found", "not_found", 404)
+
+    events_copy = list(stored_events)
+
+    async def _stream():
+        for evt in events_copy:
+            yield f"data: {json.dumps(evt)}\n\n"
+            await _asyncio.sleep(0.04)
+
+    return StreamingResponse(_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/tasks/{trace_id}/resume")
+async def resume_task(trace_id: str, request: Request):
+    """Resume a task from its latest checkpoint."""
+    data = await request.json()
+    sid = data.get("session_id", "")
+
+    cp = _get_latest_checkpoint(trace_id)
+    if not cp:
+        return _api_error("no checkpoints found for this trace", "not_found", 404)
+
+    task = cp.get("task", "")
+    saved_history = cp.get("history", [])
+
+    if not task:
+        return _api_error("checkpoint has no task to resume", "invalid_request", 422)
+
+    new_trace_id = str(uuid.uuid4())
+    execution_traces[new_trace_id] = []
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    stop_evt = threading.Event()
+    new_stream_id = str(uuid.uuid4())
+    _active_streams[new_stream_id] = stop_evt
+
+    def _run_resume():
+        try:
+            for event in stream_agent_task(task, saved_history, [], stop_evt,
+                                           sid=sid or "", trace_id=new_trace_id):
+                if stop_evt.is_set():
+                    break
+                if event["type"] == "done" and sid:
+                    sessions[sid] = event.get("history", saved_history)
+                trace_event = {k: v for k, v in event.items() if k not in ("history", "workdir")}
+                execution_traces[new_trace_id].append(trace_event)
+                loop.call_soon_threadsafe(queue.put_nowait, event)
+        except Exception as e:
+            err_event = {"type": "error", "message": str(e)}
+            execution_traces[new_trace_id].append(err_event)
+            loop.call_soon_threadsafe(queue.put_nowait, err_event)
+        finally:
+            _active_streams.pop(new_stream_id, None)
+            loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    threading.Thread(target=_run_resume, daemon=True).start()
+
+    async def _generate():
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                payload = {k: v for k, v in event.items() if k not in ("history", "workdir")}
+                yield f"data: {json.dumps(payload)}\n\n"
+        except asyncio.CancelledError:
+            stop_evt.set()
+
+    return StreamingResponse(_generate(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                                      "X-Trace-Id": new_trace_id})
+
+
+@app.delete("/tasks/{trace_id}")
+def delete_task_trace(trace_id: str):
+    deleted = _delete_trace(trace_id)
+    execution_traces.pop(trace_id, None)
+    if not deleted:
+        return _api_error("trace not found", "not_found", 404)
+    return {"deleted": trace_id, "ok": True}
+
+
+# ── Ensemble settings endpoints ──────────────────────────────────────────────
+
+@app.get("/settings/ensemble")
+def get_ensemble_settings():
+    return {
+        "ensemble_mode":      _config.get("ensemble_mode", True),
+        "ensemble_threshold": _config.get("ensemble_threshold", 0.4),
+        "ensemble_enabled":   get_ensemble_enabled(),
+    }
+
+
+@app.post("/settings/ensemble")
+async def update_ensemble_settings(request: Request):
+    data = await request.json()
+    kwargs = {}
+    if "ensemble_mode" in data:
+        kwargs["ensemble_mode"] = bool(data["ensemble_mode"])
+    if "ensemble_threshold" in data:
+        thr = float(data["ensemble_threshold"])
+        if not 0.0 <= thr <= 1.0:
+            return _api_error("ensemble_threshold must be between 0.0 and 1.0", "validation_error", 422)
+        kwargs["ensemble_threshold"] = thr
+    if kwargs:
+        update_config(**kwargs)
+    return {
+        "ensemble_mode":      _config.get("ensemble_mode", True),
+        "ensemble_threshold": _config.get("ensemble_threshold", 0.4),
+        "ensemble_enabled":   get_ensemble_enabled(),
+    }
 
 
 @app.on_event("startup")

@@ -56,6 +56,19 @@ _ACTION_RISK_ORDER: List[str] = [
 
 # ── public API ─────────────────────────────────────────────────────────────────
 
+# Runtime toggle — can be flipped via POST /settings/ensemble
+_ensemble_enabled: bool = True
+
+
+def get_ensemble_enabled() -> bool:
+    return _ensemble_enabled
+
+
+def set_ensemble_enabled(value: bool) -> None:
+    global _ensemble_enabled
+    _ensemble_enabled = bool(value)
+
+
 def score_task_risk(task: str) -> float:
     """Return a risk score in [0.0, 1.0]. >= RISK_THRESHOLD triggers ensemble mode."""
     hits = len(_RISK_RE.findall(task))
@@ -65,9 +78,10 @@ def score_task_risk(task: str) -> float:
     return min(1.0, score)
 
 
-def is_high_risk(task: str) -> bool:
+def is_high_risk(task: str, threshold: float | None = None) -> bool:
     """Convenience predicate — True when ensemble mode should be engaged."""
-    return score_task_risk(task) >= RISK_THRESHOLD
+    thr = threshold if threshold is not None else RISK_THRESHOLD
+    return score_task_risk(task) >= thr
 
 
 def action_risk_level(action: str) -> int:
