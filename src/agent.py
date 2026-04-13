@@ -580,7 +580,7 @@ Available actions:
   { "action": "list_files", "pattern": "**/*.py" }
   { "action": "delete_file","path": "old.txt" }
   { "action": "run_command","cmd": "pip install flask" }
-  { "action": "clone_repo",   "url": "https://github.com/user/repo" }
+    { "action": "clone_repo",   "url": "https://github.com/user/repo", "dest_path": "/absolute/or/relative/path" }
   { "action": "create_repo",  "name": "my-project", "description": "...", "private": false, "org": "" }
   { "action": "commit_push","message": "feat: ...", "repo_url": "https://github.com/user/repo" }
   { "action": "youtube",      "url": "https://youtube.com/watch?v=..." }
@@ -747,6 +747,10 @@ def tool_run_command(cmd: str, workdir: str) -> str:
                "cd /app",">/app",">> /app","/app/main.py","/app/agent.py"]
     for b in BLOCKED:
         if b in cmd: return f"❌ Blocked: {cmd}"
+    # Common sandbox mismatch: host mount paths are not visible in this runtime.
+    if ("/run/media/" in cmd or "/media/" in cmd) and not (os.path.exists("/run/media") or os.path.exists("/media")):
+        return ("❌ Host mount paths are not available in this runtime. "
+                f"Use a path under the current workspace: {workdir}")
     try:
         # Resource limits: 256MB RAM, 10s CPU
         def _preexec():
@@ -762,7 +766,7 @@ def tool_run_command(cmd: str, workdir: str) -> str:
     except subprocess.TimeoutExpired: return "⏱ Command timed out after 60s"
     except Exception as e: return f"Error: {e}"
 
-def tool_clone_repo(url: str, token: str, workdir: str) -> str:
+def tool_clone_repo(url: str, token: str, workdir: str, dest_path: str = "") -> str:
     """
     Fetch a GitHub repo via the Contents API (plain HTTPS, no git binary needed).
     Works in sandboxes where outbound git:// / git+https is blocked.
@@ -777,7 +781,18 @@ def tool_clone_repo(url: str, token: str, workdir: str) -> str:
     except IndexError:
         return f"❌ Cannot parse owner/repo from URL: {url}"
 
-    dest = os.path.join(workdir, repo_name)
+    if dest_path:
+        dest = dest_path if os.path.isabs(dest_path) else os.path.join(workdir, dest_path)
+    else:
+        dest = os.path.join(workdir, repo_name)
+
+    dest = os.path.abspath(dest)
+    parent = os.path.dirname(dest)
+    try:
+        os.makedirs(parent, exist_ok=True)
+    except Exception as e:
+        return f"❌ Destination path is not writable: {parent} ({e})"
+
     if os.path.exists(dest) and os.listdir(dest):
         top = [f for f in os.listdir(dest) if not f.startswith('.')][:20]
         return f"Already fetched at {dest}\nFiles: {', '.join(top)}"
@@ -1298,6 +1313,19 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
     # Accumulated reasoning trace — populated by think/think_deep steps
     _trace_steps: List[Dict[str, Any]] = []
+    _tool_attempts: Dict[str, int] = {}
+
+    def _action_sig(a: Dict[str, Any]) -> str:
+        keys = ("action", "url", "dest_path", "path", "cmd", "query", "name", "repo_url")
+        return "|".join(str(a.get(k, "")) for k in keys)[:800]
+
+    def _requested_path_from_text(text: str) -> str:
+        m = re.search(r"(/(?:run/media|media|home|workspace|tmp|mnt)[^\s,;]*)", text)
+        if not m:
+            return ""
+        p = m.group(1)
+        return "" if p.startswith("http") else p
+
     # Checkpoint tracking
     _step_idx: int = 0
     _checkpoint_events: List[Dict[str, Any]] = []
@@ -1314,10 +1342,14 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     # Direct clone bypass
     urls = _GITHUB_URL_RE.findall(clean_task)
     if urls and _CLONE_INTENT_RE.search(clean_task):
+        _requested_dest = _requested_path_from_text(clean_task)
         for url in urls:
             yield {"type":"tool","icon":"📦","action":"clone_repo",
                    "label":url,"result":"Cloning...","file_path":None,"file_content":None}
-            result = tool_clone_repo(url, session_token, workdir)
+            _dest = _requested_dest
+            if _dest and not _dest.endswith(url.rstrip('/').split('/')[-1].replace('.git','')):
+                _dest = os.path.join(_dest, url.rstrip('/').split('/')[-1].replace('.git',''))
+            result = tool_clone_repo(url, session_token, workdir, _dest)
             # Remember this repo for the rest of the session
             if sid and "Clone failed" not in result:
                 set_session_repo(sid, url)
@@ -1390,6 +1422,21 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                        "chain":" → ".join(PROVIDERS[p]["label"] for p in providers_used)}
 
         kind = action.get("action")
+
+        if kind in ("run_command", "clone_repo"):
+            _sig = _action_sig(action)
+            _tool_attempts[_sig] = _tool_attempts.get(_sig, 0) + 1
+            if _tool_attempts[_sig] > 2:
+                blocked = (
+                    "❌ Repeated tool call blocked to avoid loop. "
+                    "Summarize the blocker and ask one precise follow-up question."
+                )
+                yield {"type":"tool", "icon":TOOL_ICONS.get(kind, "🔧"), "action":kind,
+                       "label":str(action)[:120], "result":blocked,
+                       "file_path":None, "file_content":None, "artifact":False}
+                messages.append({"role":"assistant","content":json.dumps(action)})
+                messages.append({"role":"user","content":f"Tool result:\n{blocked}\n\nContinue."})
+                continue
 
         if kind == "clarify":
             yield {"type":"clarify","questions":action.get("questions",[])}
@@ -1765,11 +1812,17 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             elif kind == "clone_repo":
                 url    = action.get("url","")
                 repo_name = url.rstrip("/").split("/")[-1].replace(".git","")
-                already_cloned = os.path.exists(os.path.join(workdir, repo_name, ".git"))
+                dest_path = action.get("dest_path") or action.get("path") or ""
+                if not dest_path:
+                    hint = _requested_path_from_text(clean_task)
+                    if hint:
+                        dest_path = os.path.join(hint, repo_name)
+                target_dir = dest_path if dest_path else os.path.join(workdir, repo_name)
+                already_cloned = os.path.exists(os.path.join(target_dir, ".git"))
                 if already_cloned:
-                    result = f"Already cloned at {os.path.join(workdir, repo_name)} — skipping."
+                    result = f"Already cloned at {target_dir} — skipping."
                 else:
-                    result = tool_clone_repo(url, session_token, workdir)
+                    result = tool_clone_repo(url, session_token, workdir, target_dir)
                 if sid and "Clone failed" not in result and url:
                     set_session_repo(sid, url)
             elif kind == "commit_push":
