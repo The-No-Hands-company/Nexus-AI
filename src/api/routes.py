@@ -1447,8 +1447,393 @@ def feedback_stats():
     return get_feedback_stats()
 
 
+# ── Sprint F: Specialist Agent Library ───────────────────────────────────────
+
+@app.get("/agents")
+def list_specialist_agents():
+    """Return the full catalogue of built-in specialist agents."""
+    from ..agents import list_agents
+    return {"agents": list_agents()}
+
+
+@app.get("/agents/{agent_id}")
+def get_specialist_agent(agent_id: str):
+    """Return metadata for a single specialist agent."""
+    from ..agents import get_specialist
+    agent = get_specialist(agent_id)
+    if agent is None:
+        return _api_error(f"Agent '{agent_id}' not found", "not_found", 404)
+    return {
+        "id":                  agent.id,
+        "name":                agent.name,
+        "icon":                agent.icon,
+        "description":         agent.description,
+        "keywords":            agent.keywords,
+        "preferred_providers": agent.preferred_providers,
+        "temperature":         agent.temperature,
+        "tier":                agent.tier,
+    }
+
+
+@app.post("/agents/{agent_id}/run")
+async def run_specialist_agent(agent_id: str, request: Request):
+    """Run a task through a named specialist agent.
+
+    POST body: {"task": "...", "session_id": "optional"}
+    Returns the agent's response using its system prompt + preferred providers.
+    """
+    from ..agents import get_specialist
+    from ..agent import call_llm_with_fallback, _smart_order, get_system_resources, PROVIDERS
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    task = (body.get("task") or "").strip()
+    if not task:
+        return _api_error("task is required", "validation_error", 422)
+
+    agent = get_specialist(agent_id)
+    if agent is None:
+        return _api_error(f"Agent '{agent_id}' not found", "not_found", 404)
+
+    try:
+        check_user_task(task)
+    except GuardrailViolation as exc:
+        return _api_error(exc.reason, exc.code, 422)
+
+    messages = [
+        {"role": "system", "content": agent.system_prompt},
+        {"role": "user",   "content": task},
+    ]
+    try:
+        result, pid = call_llm_with_fallback(messages, task)
+        content = result.get("content", str(result))
+        return {
+            "agent_id":  agent_id,
+            "agent":     agent.name,
+            "provider":  pid,
+            "content":   content,
+        }
+    except Exception as exc:
+        return _api_error(str(exc), "agent_error", 500)
+
+
+@app.post("/agents/classify")
+async def classify_task_to_agent(request: Request):
+    """Classify a task description and return the best matching specialist agent."""
+    from ..agents import classify_to_specialist
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    task = (body.get("task") or "").strip()
+    if not task:
+        return _api_error("task is required", "validation_error", 422)
+    agent = classify_to_specialist(task)
+    return {
+        "agent_id":          agent.id,
+        "agent_name":        agent.name,
+        "icon":              agent.icon,
+        "description":       agent.description,
+        "match_score":       agent.matches(task),
+    }
+
+
+# ── Sprint F: Hierarchical Orchestration ─────────────────────────────────────
+
+@app.post("/orchestrate/hierarchical")
+async def hierarchical_orchestrate(request: Request):
+    """Run the full Planner → Executor → Reviewer → Verifier pipeline.
+
+    POST body:
+        goal          — required
+        max_subtasks  — optional int (default 6)
+        skip_review   — optional bool (default false)
+        skip_verify   — optional bool (default false)
+    """
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    goal = (body.get("goal") or "").strip()
+    if not goal:
+        return _api_error("goal is required", "validation_error", 422)
+
+    try:
+        goal = check_user_task(goal)
+    except GuardrailViolation as exc:
+        return _api_error(exc.reason, exc.code, 422)
+
+    max_subtasks = int(body.get("max_subtasks", 6))
+    skip_review  = bool(body.get("skip_review", False))
+    skip_verify  = bool(body.get("skip_verify", False))
+
+    try:
+        from ..autonomy import HierarchicalOrchestrator
+        orch = HierarchicalOrchestrator(
+            _orchestrator_llm,
+            max_parallel=2,
+            skip_review=skip_review,
+            skip_verify=skip_verify,
+        )
+        hr = orch.run(goal, max_subtasks=max_subtasks)
+        trace_id = secrets.token_hex(8)
+        result = {
+            "trace_id":         trace_id,
+            "goal":             hr.goal,
+            "plan":             hr.plan,
+            "execution":        hr.execution,
+            "review":           hr.review,
+            "verification":     hr.verification,
+            "final_output":     hr.final_output,
+            "execution_time":   round(hr.execution_time, 3),
+            "stages_completed": hr.stages_completed,
+        }
+        autonomy_traces[trace_id] = {"type": "hierarchical", "status": "done", **result}
+        return result
+    except Exception as exc:
+        return _api_error(str(exc), "orchestration_error", 500)
+
+
+@app.get("/orchestrate/hierarchical/{trace_id}")
+def get_hierarchical_trace(trace_id: str):
+    """Retrieve a stored hierarchical orchestration result by trace ID."""
+    trace = autonomy_traces.get(trace_id)
+    if trace is None:
+        return JSONResponse({"error": "trace not found"}, status_code=404)
+    return trace
+
+
+# ── Sprint G: Simulate Endpoint ───────────────────────────────────────────────
+
+@app.post("/simulate")
+async def run_simulation(request: Request):
+    """Run a swarm prediction simulation (MiroFish-inspired).
+
+    POST body:
+        topic      — required  e.g. "Will AI replace software engineers by 2030?"
+        seed       — optional context / background text
+        n_personas — optional int 2-8 (default 5)
+        n_rounds   — optional int 1-5 (default 3)
+
+    Returns a SimulationResult dict including prediction, confidence, personas, rounds,
+    minority_views and a full Markdown report.
+    """
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    topic = (body.get("topic") or "").strip()
+    if not topic:
+        return _api_error("topic is required", "validation_error", 422)
+
+    try:
+        check_user_task(topic)
+    except GuardrailViolation as exc:
+        return _api_error(exc.reason, exc.code, 422)
+
+    n_personas = max(2, min(int(body.get("n_personas", 5)), 8))
+    n_rounds   = max(1, min(int(body.get("n_rounds",   3)), 5))
+    seed       = (body.get("seed") or "").strip()
+
+    def _sim_llm(msgs):
+        try:
+            res, _ = call_llm_with_fallback(msgs, "simulation")
+            if isinstance(res, dict):
+                if res.get("action") == "respond":
+                    return res.get("content", "")
+                return json.dumps(res)
+            return str(res)
+        except Exception as _se:
+            return f"error: {_se}"
+
+    try:
+        from ..simulation import SimulationEngine
+        engine = SimulationEngine(_sim_llm, max_personas=8, max_rounds=5)
+        result = engine.run(topic, seed, n_personas, n_rounds)
+        return result.to_dict()
+    except Exception as exc:
+        return _api_error(str(exc), "simulation_error", 500)
+
+
+# ── Sprint G: Agent Marketplace ───────────────────────────────────────────────
+
+@app.get("/marketplace/agents")
+def list_marketplace_agents():
+    """Return all available agents (built-in + imported) from the marketplace."""
+    from ..agents.registry import SPECIALIST_AGENTS
+    from ..db import load_marketplace_agents
+
+    builtin = [
+        {
+            "id":                  a.id,
+            "name":                a.name,
+            "icon":                a.icon,
+            "description":         a.description,
+            "keywords":            a.keywords,
+            "preferred_providers": a.preferred_providers,
+            "temperature":         a.temperature,
+            "tier":                a.tier,
+            "source":              "builtin",
+        }
+        for a in SPECIALIST_AGENTS
+    ]
+    imported = load_marketplace_agents(source="imported")
+    return {"agents": builtin + imported, "total": len(builtin) + len(imported)}
+
+
+@app.post("/marketplace/agents", status_code=201)
+async def import_marketplace_agent(request: Request):
+    """Import a custom JSON-defined agent into the marketplace.
+
+    POST body (required fields):
+        id            — unique string id
+        name          — display name
+        system_prompt — agent system prompt
+    Optional:
+        icon, description, keywords, preferred_providers, temperature, tier
+    """
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        return _api_error("Invalid JSON body", "validation_error", 422)
+
+    agent_id = (body.get("id") or "").strip()
+    name     = (body.get("name") or "").strip()
+    prompt   = (body.get("system_prompt") or "").strip()
+
+    if not agent_id:
+        return _api_error("id is required", "validation_error", 422)
+    if not name:
+        return _api_error("name is required", "validation_error", 422)
+    if not prompt:
+        return _api_error("system_prompt is required", "validation_error", 422)
+
+    # Sanitise / normalise
+    icon                = (body.get("icon") or "🤖").strip()[:8]
+    description         = (body.get("description") or "").strip()[:512]
+    keywords            = body.get("keywords") or []
+    preferred_providers = body.get("preferred_providers") or []
+    temperature         = float(body.get("temperature", 0.7))
+    tier                = (body.get("tier") or "standard").strip()
+
+    if not isinstance(keywords, list):
+        keywords = [str(keywords)]
+    if not isinstance(preferred_providers, list):
+        preferred_providers = [str(preferred_providers)]
+
+    from ..db import save_marketplace_agent
+    save_marketplace_agent(
+        agent_id=agent_id,
+        name=name,
+        icon=icon,
+        description=description,
+        system_prompt=prompt,
+        keywords=keywords,
+        preferred_providers=preferred_providers,
+        temperature=temperature,
+        tier=tier,
+        source="imported",
+    )
+    return {"id": agent_id, "name": name, "status": "imported"}
+
+
+@app.delete("/marketplace/agents/{agent_id}", status_code=200)
+def delete_marketplace_agent(agent_id: str):
+    """Delete an imported marketplace agent by id.
+
+    Built-in agents cannot be deleted via this endpoint.
+    """
+    from ..db import delete_marketplace_agent as db_delete_agent
+    deleted = db_delete_agent(agent_id)
+    if not deleted:
+        return _api_error(
+            f"Agent '{agent_id}' not found or is a built-in agent",
+            "not_found",
+            404,
+        )
+    return {"id": agent_id, "status": "deleted"}
+
+
+# ── Sprint G: Agent Bus ───────────────────────────────────────────────────────
+
+# NOTE: /agents/bus/log must be registered BEFORE /agents/bus/{agent_id} so
+# FastAPI doesn't capture the literal "log" path segment as an agent_id.
+@app.get("/agents/bus/log")
+def get_bus_log(limit: int = 50):
+    """Return the recent global message bus log."""
+    from ..agent_bus import recent_log, all_agents
+    msgs = recent_log(limit=limit)
+    return {
+        "messages":      [m.to_dict() for m in msgs],
+        "active_agents": all_agents(),
+    }
+
+
+@app.get("/agents/bus/{agent_id}")
+def read_agent_inbox(
+    agent_id: str,
+    limit: int = 20,
+    unread_only: bool = False,
+):
+    """Read messages in an agent's inbox.
+
+    Query params:
+        limit       — max messages to return (default 20)
+        unread_only — if true, only return unread messages
+    """
+    from ..agent_bus import read_messages, unread_count
+    msgs = read_messages(agent_id, limit=limit, unread_only=unread_only, mark_read=True)
+    return {
+        "agent_id":     agent_id,
+        "messages":     [m.to_dict() for m in msgs],
+        "unread_count": unread_count(agent_id),
+    }
+
+
+@app.post("/agents/bus", status_code=201)
+async def post_agent_message(request: Request):
+    """Post a message from one agent to another (or broadcast).
+
+    POST body:
+        from_id  — sender agent id (or "user")
+        to_id    — recipient agent id (or "broadcast")
+        content  — message text
+    """
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        return _api_error("Invalid JSON body", "validation_error", 422)
+
+    from_id = (body.get("from_id") or "").strip()
+    to_id   = (body.get("to_id")   or "").strip()
+    content = (body.get("content") or "").strip()
+
+    if not from_id:
+        return _api_error("from_id is required", "validation_error", 422)
+    if not to_id:
+        return _api_error("to_id is required", "validation_error", 422)
+    if not content:
+        return _api_error("content is required", "validation_error", 422)
+
+    from ..agent_bus import post_message
+    msg = post_message(from_id, to_id, content)
+    return msg.to_dict()
+
+
 @app.on_event("startup")
 async def startup_event():
     asyncio.create_task(_register_with_nexus_cloud())
     asyncio.create_task(_heartbeat_loop())
+
 
