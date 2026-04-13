@@ -407,6 +407,36 @@ class TestSafetyAuditLog(unittest.TestCase):
         data = resp.json()
         self.assertLessEqual(len(data["events"]), 1)
 
+    def test_audit_can_filter_by_session_id(self):
+        session_a = client.post("/session").json()["session_id"]
+        session_b = client.post("/session").json()["session_id"]
+        try:
+            client.post(f"/session/{session_a}/safety", json={"safety_profile": "sandbox"})
+            client.post(f"/session/{session_b}/safety", json={"safety_profile": "strict"})
+
+            response = client.get(f"/safety/audit?session_id={session_a}")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertTrue(payload["filtered"])
+            self.assertEqual(payload["session_id"], session_a)
+            self.assertGreaterEqual(payload["total"], 1)
+            self.assertTrue(all(
+                (event.get("session") == session_a) or (event.get("session_id") == session_a)
+                for event in payload["events"]
+            ))
+        finally:
+            client.delete(f"/session/{session_a}")
+            client.delete(f"/session/{session_b}")
+
+    def test_audit_session_filter_returns_empty_for_unknown_session(self):
+        response = client.get("/safety/audit?session_id=missing-session")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertTrue(payload["filtered"])
+        self.assertEqual(payload["session_id"], "missing-session")
+        self.assertEqual(payload["total"], 0)
+        self.assertEqual(payload["events"], [])
+
     def test_blocked_input_guardrail_appears_in_audit_log(self):
         response = client.post(
             "/safety/check",
