@@ -1753,6 +1753,23 @@ def list_specialist_agents():
     return {"agents": list_agents()}
 
 
+@app.get("/architecture/hierarchy")
+def architecture_hierarchy():
+    """Return a live scaffold of the AI-system hierarchy.
+
+    This endpoint is intentionally read-only for now and acts as an architecture
+    planning contract for future model/agent/workflow expansion.
+    """
+    from ..agent import get_providers_list
+    from ..agents import list_agents
+    from ..architecture import build_runtime_hierarchy
+
+    return build_runtime_hierarchy(
+        providers=get_providers_list(),
+        specialist_agents=list_agents(),
+    )
+
+
 @app.get("/agents/{agent_id}")
 def get_specialist_agent(agent_id: str):
     """Return metadata for a single specialist agent."""
