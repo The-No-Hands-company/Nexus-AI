@@ -2110,8 +2110,7 @@ async def update_ensemble_settings(request: Request):
     }
 
 
-@app.on_event("startup")
-async def startup_event():
+def startup_event() -> None:
     set_run_function(_run_scheduled_task)
     asyncio.create_task(_register_with_nexus_cloud())
     asyncio.create_task(_heartbeat_loop())
