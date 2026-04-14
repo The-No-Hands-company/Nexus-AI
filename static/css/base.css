@@ -1,0 +1,36 @@
+:root {
+  --nexus-panel-shadow: 0 8px 32px rgba(0,0,0,.4);
+}
+
+/* Static shell base split from index.html for maintainability. */
+html, body {
+  min-height: 100%;
+}
+
+.nexus-panel {
+  position: fixed;
+  bottom: 80px;
+  right: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: none;
+  flex-direction: column;
+  box-shadow: var(--nexus-panel-shadow);
+}
+
+.nexus-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.nexus-panel-title {
+  font-size: .78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--muted);
+}

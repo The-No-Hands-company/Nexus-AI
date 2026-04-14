@@ -1,0 +1,21 @@
+/* Panel-specific sizing and z-index separation (kept static). */
+#diff-viewer-panel { z-index: 44; width: 560px; max-height: 620px; }
+#self-review-panel { z-index: 45; width: 480px; max-height: 580px; }
+#documents-panel { z-index: 46; width: 500px; max-height: 600px; }
+#debate-panel { z-index: 47; width: 540px; max-height: 660px; }
+#hypothesis-panel { z-index: 48; width: 540px; max-height: 660px; }
+#adaptive-routing-panel { z-index: 49; width: 420px; max-height: 500px; }
+
+@media (max-width: 900px) {
+  #diff-viewer-panel,
+  #self-review-panel,
+  #documents-panel,
+  #debate-panel,
+  #hypothesis-panel,
+  #adaptive-routing-panel {
+    right: 10px;
+    left: 10px;
+    width: auto;
+    max-height: 70vh;
+  }
+}
