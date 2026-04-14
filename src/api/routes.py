@@ -907,6 +907,150 @@ async def reason_consensus(request: Request):
         return _api_error(str(exc), "consensus_error", 500)
 
 
+def _extract_citation_urls(text: str) -> list[str]:
+    import re as _re
+
+    source = text or ""
+    urls = []
+
+    # Markdown links: [label](https://...)
+    for m in _re.finditer(r"\[[^\]]+\]\((https?://[^)\s]+)\)", source):
+        urls.append(m.group(1))
+
+    # Bare URLs
+    for m in _re.finditer(r"\bhttps?://[^\s)]+", source):
+        urls.append(m.group(0))
+
+    # Preserve order and uniqueness
+    unique = []
+    seen = set()
+    for u in urls:
+        if u not in seen:
+            seen.add(u)
+            unique.append(u)
+    return unique
+
+
+def _score_citation_confidence(answer: str, expected_sources: list[str] | None = None) -> dict:
+    from urllib.parse import urlparse as _urlparse
+
+    citations = _extract_citation_urls(answer)
+    expected = [str(s).strip() for s in (expected_sources or []) if str(s).strip()]
+
+    if not citations:
+        return {
+            "score": 0.1 if expected else 0.25,
+            "citations": [],
+            "matched_expected_sources": [],
+            "expected_source_coverage": 0.0,
+        }
+
+    if not expected:
+        score = min(0.9, 0.35 + 0.12 * len(citations))
+        return {
+            "score": round(score, 3),
+            "citations": citations,
+            "matched_expected_sources": [],
+            "expected_source_coverage": None,
+        }
+
+    expected_domains = {(_urlparse(u).netloc or u).lower() for u in expected}
+    citation_domains = [(_urlparse(u).netloc or u).lower() for u in citations]
+
+    matched = []
+    for domain in expected_domains:
+        if any(domain in cd or cd in domain for cd in citation_domains):
+            matched.append(domain)
+
+    coverage = len(matched) / max(1, len(expected_domains))
+    score = 0.35 + 0.65 * coverage
+    return {
+        "score": round(min(1.0, score), 3),
+        "citations": citations,
+        "matched_expected_sources": matched,
+        "expected_source_coverage": round(coverage, 3),
+    }
+
+
+@app.post("/reason/generator-critic")
+async def reason_generator_critic(request: Request):
+    """Generator-critic research flow with citation confidence scoring.
+
+    POST body:
+      {"task": "...", "sources": ["https://...", ...]}
+    """
+    from ..thinking import build_critique_prompt, parse_critique_response
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    task = (body.get("task") or "").strip()
+    sources = body.get("sources") or []
+    if not task:
+        return _api_error("task is required", "validation_error", 422)
+
+    try:
+        safe_task = check_user_task(task, policy_profile=_config.get("safety_profile", "standard"))
+    except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input",
+            "tool": "reason_generator_critic",
+            "label": task[:120],
+            "profile": _config.get("safety_profile", "standard"),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
+        return _api_error(exc.reason, exc.code, 422)
+
+    generator_task = (
+        safe_task
+        + "\n\nProvide a concise research answer. Include citations as markdown links when available."
+    )
+    generated_resp, generator_provider = call_llm_with_fallback(
+        [{"role": "user", "content": generator_task}],
+        generator_task,
+    )
+    generated_answer = generated_resp.get("content") or str(generated_resp)
+
+    critique_prompt = build_critique_prompt(generated_answer, task) + (
+        "\n\nEnsure the revised answer preserves or improves citation quality with source links."
+    )
+    critic_resp, critic_provider = call_llm_with_fallback(
+        [{"role": "user", "content": critique_prompt}],
+        task,
+    )
+    critic_raw = critic_resp.get("content") or str(critic_resp)
+    critique_data = parse_critique_response(critic_raw)
+
+    revised_answer = (critique_data.get("revised") or "").strip() or generated_answer
+    critique_text = (critique_data.get("critique") or "").strip()
+    try:
+        confidence = float(critique_data.get("confidence", 0.5))
+    except Exception:
+        confidence = 0.5
+    confidence = max(0.0, min(1.0, confidence))
+
+    citation_meta = _score_citation_confidence(revised_answer, expected_sources=sources)
+
+    return {
+        "task": task,
+        "generated_answer": generated_answer,
+        "critique": critique_text,
+        "revised_answer": revised_answer,
+        "confidence": round(confidence, 3),
+        "citation_confidence": citation_meta.get("score", 0.0),
+        "citations": citation_meta.get("citations", []),
+        "expected_source_coverage": citation_meta.get("expected_source_coverage"),
+        "matched_expected_sources": citation_meta.get("matched_expected_sources", []),
+        "providers": {
+            "generator": generator_provider,
+            "critic": critic_provider,
+        },
+    }
+
+
 # ── RAG endpoints ─────────────────────────────────────────────────────────
 @app.post("/rag/ingest")
 async def rag_ingest(request: Request):
