@@ -1813,150 +1813,7 @@ function showMemoryBadge(){
 // Provider utilities moved to static/js/utilities/providers.js
 
 // ── SIDEBAR ────────────────────────────────────────────────────────────────────
-function toggleSidebar(){
-  sidebarOpen=!sidebarOpen;
-  document.getElementById('sidebar').classList.toggle('hidden',!sidebarOpen);
-  document.getElementById('sidebar-overlay').classList.toggle('active',sidebarOpen);
-}
-function closeSidebar(){
-  sidebarOpen=false;
-  document.getElementById('sidebar').classList.add('hidden');
-  document.getElementById('sidebar-overlay').classList.remove('active');
-}
-async function loadChatList(){
-  const d=await fetch('/chats').then(r=>r.json()).catch(()=>({chats:[]}));
-  renderChatList(d.chats||[]);
-}
-function renderChatList(chats){
-  const el=document.getElementById('chat-list');
-  if(!chats.length){el.innerHTML='<div class="no-chats">No saved chats yet.<br>Hit 💾 to save one.</div>';return}
-  el.innerHTML=chats.map(c=>{
-    const date=new Date(c.updated_at).toLocaleDateString('en',{month:'short',day:'numeric'});
-    const active=c.id===activeChatId?'active':'';
-    return `<div class="chat-item ${active}" onclick="loadChat('${c.id}')">
-      <span class="chat-item-title" id="chat-title-${c.id}" ondblclick="event.stopPropagation();startRename('${c.id}')" title="Double-click to rename">${esc(c.title)}</span>
-      <span class="chat-item-date">${date}</span>
-      <div class="chat-actions">
-  <button class="chat-act-btn" onclick="event.stopPropagation();togglePin('${c.id}','${c.pinned?'true':'false'}')" title="${c.pinned?'Unstar':'Star'}" style="${c.pinned?'color:var(--amber)':''}">${c.pinned?'★':'☆'}</button>
-        <button class="chat-act-btn" onclick="event.stopPropagation();startRename('${c.id}')" title="Rename">✏️</button>
-        <button class="chat-act-btn" onclick="event.stopPropagation();exportChat('${c.id}')" title="Export">⬇</button>
-        <button class="chat-act-btn" onclick="event.stopPropagation();shareChat('${c.id}')" title="Share">🔗</button>
-        <button class="chat-act-btn" onclick="event.stopPropagation();deleteChat('${c.id}')" title="Delete" style="color:var(--red)">🗑</button>
-      </div>
-    </div>`;
-  }).join('');
-}
-// ── AUTO-SAVE ─────────────────────────────────────────────────────────────────
-let _autoSaveTimer = null;
-
-function triggerAutoSave(delay = 1500) {
-  clearTimeout(_autoSaveTimer);
-  _autoSaveTimer = setTimeout(autoSave, delay);
-}
-
-async function autoSave() {
-  const msgs = document.getElementById('messages');
-  const hasContent = [...msgs.children].some(c => c.id !== 'typing');
-  if (!hasContent) return;
-
-  const dot = document.getElementById('autosave-dot');
-  dot.className = 'saving';
-
-  const resp = await fetch('/chats', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({session_id: sid, chat_id: activeChatId})
-  }).then(r => r.json()).catch(() => null);
-
-  if (resp?.chat_id) {
-    activeChatId = resp.chat_id;
-    dot.className = 'saved';
-    setTimeout(() => { dot.className = ''; }, 2000);
-    await Promise.all([loadChatList(), loadMemoryCount()]);
-  } else {
-    dot.className = '';
-  }
-}
-
-// ── RENAME CHAT ────────────────────────────────────────────────────────────────
-function startRename(cid) {
-  const titleEl = document.getElementById('chat-title-' + cid);
-  if (!titleEl) return;
-  const current = titleEl.textContent;
-
-  const input = document.createElement('input');
-  input.className = 'chat-rename-input';
-  input.value = current;
-  input.onclick = e => e.stopPropagation();
-
-  const finishRename = async () => {
-    const newTitle = input.value.trim();
-    if (!newTitle || newTitle === current) {
-      titleEl.style.display = '';
-      input.remove();
-      return;
-    }
-    titleEl.style.display = '';
-    titleEl.textContent = newTitle;
-    input.remove();
-    // Update server
-    await fetch('/chats', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({session_id: sid, chat_id: cid, title: newTitle})
-    });
-    await loadChatList();
-  };
-
-  input.addEventListener('keydown', e => {
-    if (e.key === 'Enter') { e.preventDefault(); finishRename(); }
-    if (e.key === 'Escape') { titleEl.style.display = ''; input.remove(); }
-  });
-  input.addEventListener('blur', finishRename);
-
-  titleEl.style.display = 'none';
-  titleEl.parentNode.insertBefore(input, titleEl.nextSibling);
-  setTimeout(() => input.focus(), 10);
-}
-async function loadChat(cid){
-  const d=await fetch(`/chats/${cid}`).then(r=>r.json());
-  if(d.error) return;
-  activeChatId=cid;
-  const s=await fetch('/session',{method:'POST'}).then(r=>r.json());
-  sid=s.session_id;
-  await fetch('/agent',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({task:'__restore__',session_id:sid,_history:d.messages||[]})}).catch(()=>{});
-  clearMessages();showChat();
-  const history=d.messages||[];
-  for(const m of history){
-    if(m.role==='user'&&typeof m.content==='string'
-       &&!m.content.startsWith('Tool result:')&&!m.content.startsWith('Continue')
-       &&!m.content.startsWith('[MEMORY')){
-      addBubble('user',esc(m.content).replace(/\n/g,'<br>'));
-    } else if(m.role==='assistant'&&m.content&&!m.content.startsWith('{')){
-      addBubble('agent',renderMd(m.content));
-    }
-  }
-  await refreshSessionSafetyUI();
-  triggerAutoSave(500);
-  closeSidebar();loadChatList();
-}
-async function deleteChat(cid){
-  await fetch(`/chats/${cid}`,{method:'DELETE'});
-  if(activeChatId===cid) activeChatId=null;
-  await loadChatList();
-}
-async function exportChat(cid){
-  window.open(`/chats/${cid}/export`,'_blank');
-}
-async function shareChat(cid){
-  const d=await fetch(`/chats/${cid}/share`,{method:'POST'}).then(r=>r.json());
-  if(d.url){
-    const url=location.origin+d.url;
-    await navigator.clipboard.writeText(url).catch(()=>{});
-    alert(`Share link copied!\n${url}`);
-  }
-}
+// Sidebar utilities moved to static/js/utilities/sidebar.js
 
 // ── MEMORY ─────────────────────────────────────────────────────────────────────
 async function loadMemoryCount(){
@@ -2435,17 +2292,7 @@ function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 
 
 // ── THEME ──────────────────────────────────────────────────────────────────────
-let isDark = localStorage.getItem('theme') !== 'light';
-function applyTheme() {
-  document.body.classList.toggle('light', !isDark);
-  document.getElementById('theme-btn').textContent = isDark ? '☀️' : '🌙';
-}
-function toggleTheme() {
-  isDark = !isDark;
-  localStorage.setItem('theme', isDark ? 'dark' : 'light');
-  applyTheme(); haptic('light');
-}
-applyTheme();
+// Theme and preferences utilities moved to static/js/utilities/theme-prefs.js
 
 
 // ── KEYBOARD SHORTCUTS ─────────────────────────────────────────────────────────
@@ -2466,13 +2313,7 @@ document.addEventListener('keydown', e => {
 
 // Search utilities moved to static/js/utilities/search-command.js
 // ── PIN CHAT ───────────────────────────────────────────────────────────────────
-async function togglePin(cid, currentlyPinned) {
-  const newVal = currentlyPinned !== 'true';
-  await fetch(`/chats/${cid}/pin`, {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({pinned: newVal})});
-  await loadChatList();
-}
+// Pin chat utility moved to static/js/utilities/sidebar.js
 
 
 // ── TOKEN COUNTER ──────────────────────────────────────────────────────────────
@@ -2493,56 +2334,7 @@ function addTokenCount(wrap, inputText, outputText) {
 
 
 // ── CUSTOM PERSONA EDITOR ──────────────────────────────────────────────────────
-async function openPersonaEditor() {
-  document.getElementById('persona-editor-modal').classList.add('open');
-  await refreshPersonaEditorList();
-}
-function closePersonaEditor() {
-  document.getElementById('persona-editor-modal').classList.remove('open');
-}
-
-async function refreshPersonaEditorList() {
-  const d    = await fetch('/personas/custom').then(r=>r.json()).catch(()=>({personas:[]}));
-  const list = document.getElementById('existing-personas-list');
-  if (!(d.personas||[]).length) {
-    list.innerHTML = '<div style="color:var(--muted);font-size:.75rem">No custom personas yet.</div>';
-    return;
-  }
-  list.innerHTML = (d.personas||[]).map(p => `
-    <div class="cpersona-item">
-      <div class="cpersona-icon">${p.icon||'🤖'}</div>
-      <div class="cpersona-info">
-        <div class="cpersona-name">${esc(p.name)}</div>
-        <div class="cpersona-desc">${esc(p.description||'')}</div>
-      </div>
-      <button class="memory-del" onclick="deleteCustomPersona('${p.id}')">🗑</button>
-    </div>`).join('');
-}
-
-async function saveCustomPersona() {
-  const name   = document.getElementById('cpe-name').value.trim();
-  const icon   = document.getElementById('cpe-icon').value.trim() || '🤖';
-  const prompt = document.getElementById('cpe-prompt').value.trim();
-  const temp   = parseFloat(document.getElementById('cpe-temp').value);
-  const color  = document.getElementById('cpe-color').value;
-  if (!name || !prompt) { alert('Name and system prompt are required.'); return; }
-  await fetch('/personas/custom', {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({name, icon, prompt_prefix: prompt,
-                          description: prompt.slice(0,60)+'…',
-                          temperature: temp, color, tier:'medium'})});
-  // Clear form
-  ['cpe-name','cpe-icon','cpe-prompt'].forEach(id => document.getElementById(id).value='');
-  await refreshPersonaEditorList();
-  await loadPersonas();
-  addSysMsg(`🎭 Persona "${name}" created`);
-}
-
-async function deleteCustomPersona(id) {
-  await fetch(`/personas/custom/${id}`, {method:'DELETE'});
-  await refreshPersonaEditorList();
-  await loadPersonas();
-}
+// Persona editor utilities moved to static/js/utilities/persona-editor.js
 
 
 // ── KEYBOARD SHORTCUTS ────────────────────────────────────────────────────────
@@ -2561,41 +2353,11 @@ function closeShortcuts() { document.getElementById('shortcuts-overlay').classLi
 
 // Command palette utilities moved to static/js/utilities/search-command.js
 // ── PINS ──────────────────────────────────────────────────────────────────────
-async function togglePin(cid, isPinned) {
-  haptic('light');
-  if (isPinned) {
-    await fetch(`/chats/${cid}/pin`, {method:'DELETE'});
-  } else {
-    await fetch(`/chats/${cid}/pin`, {method:'POST'});
-  }
-  await loadChatList();
-}
+// Pin chat utility moved to static/js/utilities/sidebar.js
 
 
 // ── THEME & FONT SIZE ─────────────────────────────────────────────────────────
-function setTheme(theme) {
-  document.body.classList.toggle('light-theme', theme === 'light');
-  fetch('/prefs', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({theme})});
-  document.getElementById('theme-light').style.borderColor = theme==='light' ? 'var(--accent)' : '';
-  document.getElementById('theme-dark').style.borderColor  = theme==='dark'  ? 'var(--accent)' : '';
-  document.getElementById('theme-light').style.color = theme==='light' ? 'var(--text)' : '';
-  document.getElementById('theme-dark').style.color  = theme==='dark'  ? 'var(--text)' : '';
-}
-
-function setFontSize(size) {
-  document.body.className = document.body.className
-    .replace(/fs-\d+/g, '').trim();
-  document.body.classList.add('fs-'+size);
-  fetch('/prefs', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({font_size: String(size)})});
-}
-
-async function loadPrefs() {
-  const d = await fetch('/prefs').then(r=>r.json()).catch(()=>({}));
-  if (d.theme) setTheme(d.theme);
-  if (d.font_size) setFontSize(parseInt(d.font_size));
-}
+// Theme and preferences utilities moved to static/js/utilities/theme-prefs.js
 
 
 // ── TOKEN COUNTER ─────────────────────────────────────────────────────────────
@@ -2644,71 +2406,13 @@ async function initSessionSafetySelector(profiles) {
 
 // Provider health utilities moved to static/js/utilities/providers.js
 // ── MESSAGE REACTIONS ─────────────────────────────────────────────────────────
-function addReactionButtons(wrap, msgIdx) {
-  const row = document.createElement('div');
-  row.className = 'reaction-row';
-  let upActive = false, downActive = false;
-
-  const upBtn   = document.createElement('button');
-  upBtn.className = 'reaction-btn'; upBtn.textContent = '👍';
-  upBtn.onclick   = async () => {
-    if (upActive) return;
-    upActive = true; downActive = false;
-    upBtn.classList.add('active-up'); downBtn.classList.remove('active-down');
-    await fetch('/reactions', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({chat_id: activeChatId, msg_idx: msgIdx, reaction:'up',
-                             text: wrap.querySelector('.bubble')?.innerText?.slice(0,200)||''})});
-  };
-
-  const downBtn = document.createElement('button');
-  downBtn.className = 'reaction-btn'; downBtn.textContent = '👎';
-  downBtn.onclick   = async () => {
-    if (downActive) return;
-    downActive = true; upActive = false;
-    downBtn.classList.add('active-down'); upBtn.classList.remove('active-up');
-    await fetch('/reactions', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({chat_id: activeChatId, msg_idx: msgIdx, reaction:'down',
-                             text: wrap.querySelector('.bubble')?.innerText?.slice(0,200)||''})});
-  };
-
-  row.appendChild(upBtn); row.appendChild(downBtn);
-  wrap.appendChild(row);
-}
-
-
-
-// ── OVERFLOW MENU ──────────────────────────────────────────────────────────────
-function toggleOverflow() {
-  const menu = document.getElementById('overflow-menu');
-  const isOpen = menu.style.display !== 'none';
-  menu.style.display = isOpen ? 'none' : 'flex';
-}
-document.addEventListener('click', e => {
-  const wrap = document.querySelector('.overflow-menu-wrap');
-  if (wrap && !wrap.contains(e.target)) {
-    const menu = document.getElementById('overflow-menu');
-    if (menu) menu.style.display = 'none';
-  }
-});
+// Interaction utilities moved to static/js/utilities/interaction-ui.js
 
 // Panel modules moved to static/js/panels/*.js
 
 
 // ── CUSTOM INSTRUCTIONS ───────────────────────────────────────────────────────
-async function openCIModal() {
-  const d = await fetch('/instructions').then(r=>r.json()).catch(()=>({instructions:''}));
-  document.getElementById('ci-text').value = d.instructions || '';
-  document.getElementById('ci-modal').classList.add('open');
-}
-function closeCIModal() { document.getElementById('ci-modal').classList.remove('open'); }
-async function saveCIModal() {
-  const val = document.getElementById('ci-text').value.trim();
-  await fetch('/instructions', {method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({instructions: val})});
-  closeCIModal();
-  addSysMsg('📋 Custom instructions saved');
-}
+// Interaction utilities moved to static/js/utilities/interaction-ui.js
 
 
 // Memory and projects utilities moved to static/js/utilities/memory-projects.js
@@ -2724,6 +2428,10 @@ async function saveCIModal() {
 <script src="/static/js/utilities/settings.js"></script>
 <script src="/static/js/utilities/usage.js"></script>
 <script src="/static/js/utilities/source-cards.js"></script>
+<script src="/static/js/utilities/sidebar.js"></script>
+<script src="/static/js/utilities/theme-prefs.js"></script>
+<script src="/static/js/utilities/persona-editor.js"></script>
+<script src="/static/js/utilities/interaction-ui.js"></script>
 <script src="/static/js/panels/documents.js"></script>
 <script src="/static/js/panels/debate.js"></script>
 <script src="/static/js/panels/hypothesis.js"></script>
