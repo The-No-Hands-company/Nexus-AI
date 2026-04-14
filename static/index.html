@@ -18,6 +18,8 @@
   <link rel="apple-touch-icon" href="/static/icon-192.svg">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/panels.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
   <style>
     :root{
@@ -3036,185 +3038,7 @@ async function loadSelfReviewHistory() {
   } catch(e) { /* silent */ }
 }
 
-// ── DOCUMENT UNDERSTANDING PANEL ─────────────────────────────────────────────
-function openDocumentsPanel() {
-  document.getElementById('documents-panel').style.display = 'flex';
-}
-function closeDocumentsPanel() {
-  document.getElementById('documents-panel').style.display = 'none';
-}
-async function runDocumentUnderstand() {
-  const path     = document.getElementById('doc-path').value.trim();
-  const question = document.getElementById('doc-question').value.trim() || 'Summarise this document.';
-  const ftype    = document.getElementById('doc-type').value;
-  const status   = document.getElementById('doc-status');
-  const out      = document.getElementById('doc-output');
-  if (!path) { status.textContent = '❌ Enter a file path.'; return; }
-  status.textContent = 'Processing…';
-  out.innerHTML = '';
-  try {
-    const body = { path, question };
-    if (ftype) body.file_type = ftype;
-    const r = await fetch('/documents/understand', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    const d = await r.json();
-    if (d.error) { status.textContent = `❌ ${d.error}`; return; }
-    status.textContent = `✓ ${d.type||'?'} · ${d.excerpt_chars} chars · ${d.provider}`;
-    out.innerHTML = `<div style="margin-bottom:8px;font-size:.75rem;color:var(--muted);">Q: ${d.question}</div>` +
-      `<div style="font-size:.84rem;color:var(--text);white-space:pre-wrap;">${d.answer}</div>`;
-  } catch(e) { status.textContent = `❌ ${e.message}`; }
-}
-async function runDocumentIngest() {
-  const path   = document.getElementById('doc-path').value.trim();
-  const ftype  = document.getElementById('doc-type').value;
-  const status = document.getElementById('doc-status');
-  const out    = document.getElementById('doc-output');
-  if (!path) { status.textContent = '❌ Enter a file path.'; return; }
-  status.textContent = 'Ingesting…';
-  out.innerHTML = '';
-  try {
-    const body = { path };
-    if (ftype) body.file_type = ftype;
-    const r = await fetch('/documents/ingest', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
-    const d = await r.json();
-    if (d.error) { status.textContent = `❌ ${d.error}`; return; }
-    status.textContent = `✓ Ingested ${d.ingested_chunks} chunk(s)`;
-    out.innerHTML = `<div style="font-size:.82rem;color:var(--text);">Document <b>${d.filename}</b> (${d.type}) ingested as ${d.ingested_chunks} RAG chunks.</div>`;
-  } catch(e) { status.textContent = `❌ ${e.message}`; }
-}
-
-// ── DEBATE PANEL ──────────────────────────────────────────────────────────
-function openDebatePanel() {
-  document.getElementById('debate-panel').style.display = 'flex';
-}
-function closeDebatePanel() {
-  document.getElementById('debate-panel').style.display = 'none';
-}
-async function runDebate() {
-  const claim  = document.getElementById('debate-claim').value.trim();
-  const rounds = parseInt(document.getElementById('debate-rounds').value || '2', 10);
-  const status = document.getElementById('debate-status');
-  const out    = document.getElementById('debate-output');
-  if (!claim) { status.textContent = '❌ Enter a claim.'; return; }
-  status.textContent = `Running ${rounds} round(s)…`;
-  out.innerHTML = '';
-  try {
-    const r = await fetch('/reason/debate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ claim, rounds }),
-    });
-    const d = await r.json();
-    if (d.error || d.detail) { status.textContent = `❌ ${d.error || d.detail}`; return; }
-    status.textContent = `✓ ${rounds} round(s) complete · verdict: ${d.verdict} (conf ${(d.confidence*100).toFixed(0)}%)`;
-
-    let html = `<div style="margin-bottom:12px;padding:10px;background:var(--surface2);border-radius:8px;">
-      <b style="font-size:.85rem;">⚖️ Verdict: <span style="color:${d.verdict==='supported'?'#4ade80':d.verdict==='refuted'?'#f87171':'#facc15'}">${d.verdict.toUpperCase()}</span></b>
-      <div style="margin-top:6px;font-size:.82rem;color:var(--text);">${d.synthesis}</div>
-    </div>`;
-
-    d.transcript.forEach(rnd => {
-      html += `<details style="margin-bottom:8px;"><summary style="cursor:pointer;font-size:.78rem;font-weight:700;color:var(--muted);">Round ${rnd.round}</summary>
-        <div style="margin-top:6px;padding:8px;background:var(--surface2);border-radius:6px;font-size:.8rem;">
-          <div style="color:#4ade80;margin-bottom:4px;">✅ Proponent: ${rnd.proponent}</div>
-          <div style="color:#f87171;margin-top:6px;">🔴 Critic: ${rnd.critic}</div>
-        </div></details>`;
-    });
-
-    html += `<div style="margin-top:8px;font-size:.76rem;color:var(--muted);">
-      Strongest FOR: ${d.strongest_proponent_point}<br>
-      Strongest AGAINST: ${d.strongest_critic_point}
-    </div>`;
-    out.innerHTML = html;
-  } catch(e) { status.textContent = `❌ ${e.message}`; }
-}
-
-// ── HYPOTHESIS PANEL ─────────────────────────────────────────────────────
-function openHypothesisPanel() {
-  document.getElementById('hypothesis-panel').style.display = 'flex';
-}
-function closeHypothesisPanel() {
-  document.getElementById('hypothesis-panel').style.display = 'none';
-}
-async function runHypothesis() {
-  const obs    = document.getElementById('hypothesis-obs').value.trim();
-  const maxH   = parseInt(document.getElementById('hypothesis-max').value || '4', 10);
-  const status = document.getElementById('hypothesis-status');
-  const out    = document.getElementById('hypothesis-output');
-  if (!obs) { status.textContent = '❌ Enter an observation.'; return; }
-  status.textContent = `Generating & testing up to ${maxH} hypotheses…`;
-  out.innerHTML = '';
-  try {
-    const r = await fetch('/reason/hypothesis', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ observation: obs, max_hypotheses: maxH }),
-    });
-    const d = await r.json();
-    if (d.error || d.detail) { status.textContent = `❌ ${d.error || d.detail}`; return; }
-    const n = d.hypotheses_tested?.length || 0;
-    status.textContent = `✓ ${n} hypotheses tested · conf ${(d.overall_confidence*100).toFixed(0)}%`;
-
-    let html = `<div style="margin-bottom:12px;padding:10px;background:var(--surface2);border-radius:8px;">
-      <b style="font-size:.85rem;">🎯 Conclusion</b>
-      <div style="margin-top:6px;font-size:.82rem;color:var(--text);">${d.conclusion}</div>
-      ${d.uncertainty ? `<div style="margin-top:4px;font-size:.76rem;color:var(--muted);">Uncertainty: ${d.uncertainty}</div>` : ''}
-    </div>`;
-
-    (d.hypotheses_tested || []).forEach(h => {
-      const verdictColor = h.verdict==='accept' ? '#4ade80' : h.verdict==='reject' ? '#f87171' : '#facc15';
-      html += `<details style="margin-bottom:8px;"><summary style="cursor:pointer;font-size:.78rem;font-weight:700;color:var(--muted);">
-        H${h.id}: ${h.statement} — <span style="color:${verdictColor}">${h.verdict.toUpperCase()}</span> (${(h.confidence*100).toFixed(0)}%)</summary>
-        <div style="margin-top:6px;padding:8px;background:var(--surface2);border-radius:6px;font-size:.78rem;">
-          ${h.evidence_for?.length ? `<div style="color:#4ade80;">For: ${h.evidence_for.join('; ')}</div>` : ''}
-          ${h.evidence_against?.length ? `<div style="color:#f87171;margin-top:4px;">Against: ${h.evidence_against.join('; ')}</div>` : ''}
-          ${h.explanation ? `<div style="margin-top:4px;color:var(--text);">${h.explanation}</div>` : ''}
-        </div></details>`;
-    });
-
-    if (d.next_steps?.length) {
-      html += `<div style="margin-top:8px;font-size:.76rem;color:var(--muted);">Next steps: ${d.next_steps.join(' · ')}</div>`;
-    }
-    out.innerHTML = html;
-  } catch(e) { status.textContent = `❌ ${e.message}`; }
-}
-
-// ── ADAPTIVE ROUTING PANEL ────────────────────────────────────────────────
-function openAdaptiveRoutingPanel() {
-  document.getElementById('adaptive-routing-panel').style.display = 'flex';
-  loadAdaptiveRouting();
-}
-function closeAdaptiveRoutingPanel() {
-  document.getElementById('adaptive-routing-panel').style.display = 'none';
-}
-async function loadAdaptiveRouting() {
-  const status = document.getElementById('ar-status');
-  try {
-    const r = await fetch('/settings/adaptive-routing');
-    const d = await r.json();
-    document.getElementById('ar-enabled').checked = d.enabled !== false;
-    document.getElementById('ar-threshold').value = d.confidence_threshold ?? 0.6;
-    document.getElementById('ar-tries').value = d.escalation_tries ?? 2;
-    status.textContent = 'Loaded.';
-  } catch(e) { status.textContent = `❌ ${e.message}`; }
-}
-async function saveAdaptiveRouting() {
-  const status = document.getElementById('ar-status');
-  const body = {
-    enabled: document.getElementById('ar-enabled').checked,
-    confidence_threshold: parseFloat(document.getElementById('ar-threshold').value),
-    escalation_tries: parseInt(document.getElementById('ar-tries').value, 10),
-  };
-  try {
-    const r = await fetch('/settings/adaptive-routing', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const d = await r.json();
-    if (d.error) { status.textContent = `❌ ${d.error}`; return; }
-    status.textContent = `✓ Saved — threshold ${d.confidence_threshold}, tries ${d.escalation_tries}`;
-  } catch(e) { status.textContent = `❌ ${e.message}`; }
-}
+// Panel modules moved to static/js/panels/*.js
 
 // ── ARCHITECTURE PANEL (PHASE A) ───────────────────────────────────────────
 let _archVersions = [];
@@ -4192,5 +4016,10 @@ async function saveEnsembleSettings() {
 
 init();
 </script>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/panels/documents.js"></script>
+<script src="/static/js/panels/debate.js"></script>
+<script src="/static/js/panels/hypothesis.js"></script>
+<script src="/static/js/panels/adaptive-routing.js"></script>
 </body>
 </html>
