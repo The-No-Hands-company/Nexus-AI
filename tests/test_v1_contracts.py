@@ -89,6 +89,37 @@ class TestV1Contracts(unittest.TestCase):
         self.assertIn("single_agent_loop", workflow_ids)
         self.assertIn("hierarchical_orchestrator", workflow_ids)
 
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_reason_generator_critic_returns_revised_answer_with_citation_confidence(self, call_with_fallback):
+        call_with_fallback.side_effect = [
+            ({"content": "Initial answer with source: https://example.com/report"}, "provider_a"),
+            ({
+                "content": '{"critique":"Needs tighter summary","revised":"Improved answer with citation https://example.com/report","confidence":0.88}'
+            }, "provider_b"),
+        ]
+
+        response = client.post(
+            "/reason/generator-critic",
+            json={
+                "task": "Summarize this topic with one source.",
+                "sources": ["https://example.com/report"],
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("generated_answer", payload)
+        self.assertIn("revised_answer", payload)
+        self.assertIn("citation_confidence", payload)
+        self.assertGreater(payload["citation_confidence"], 0.5)
+        self.assertEqual(payload["providers"]["generator"], "provider_a")
+        self.assertEqual(payload["providers"]["critic"], "provider_b")
+
+    def test_reason_generator_critic_requires_task(self):
+        response = client.post("/reason/generator-critic", json={"task": ""})
+        self.assertEqual(response.status_code, 422)
+        payload = response.json()
+        self.assertEqual(payload["type"], "validation_error")
+
 
 class TestSafetyModule(unittest.TestCase):
     def test_safe_text_passes(self):
