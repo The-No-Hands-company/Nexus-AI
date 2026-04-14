@@ -15,7 +15,7 @@ from ..scheduler import (
     set_run_function,
 )
 from ..gist_backup import restore_from_gist
-from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref)
+from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews)
 from ..personas import list_personas, set_persona, get_active_persona_name, get_persona
 from ..memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory, delete_all as delete_all_memory, get_all as get_all_memory)
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
@@ -33,6 +33,9 @@ from ..execution_trace import (
     load_checkpoints as _load_checkpoints,
     get_latest_checkpoint as _get_latest_checkpoint,
     delete_trace as _delete_trace,
+    save_file_diff as _save_file_diff,
+    get_file_diffs as _get_file_diffs,
+    get_file_diff_detail as _get_file_diff_detail,
 )
 from ..ensemble import get_ensemble_enabled, set_ensemble_enabled
 from .schemas import *
@@ -1101,6 +1104,317 @@ def rag_status():
         return get_rag_system().stats()
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+# ── Diff viewer endpoints ─────────────────────────────────────────────────────
+
+def _compute_diff_stats(original: str, modified: str, filename: str = "file") -> dict:
+    """Compute structured diff stats between two text blobs."""
+    import difflib
+    orig_lines = original.splitlines(keepends=True)
+    mod_lines  = modified.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(
+        orig_lines, mod_lines,
+        fromfile=f"a/{filename}", tofile=f"b/{filename}", lineterm="",
+    ))
+    unified = "\n".join(diff)
+    additions = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+    deletions = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+    chunks = sum(1 for l in diff if l.startswith("@@"))
+    return {
+        "filename": filename,
+        "additions": additions,
+        "deletions": deletions,
+        "chunks": chunks,
+        "unchanged": max(0, len(orig_lines) - deletions),
+        "unified_diff": unified if len(unified) <= 8000 else unified[:8000] + "\n… (truncated)",
+        "has_changes": bool(diff),
+    }
+
+
+@app.post("/diff")
+async def compute_diff(request: Request):
+    """Compute a structured unified diff between two text blobs.
+
+    POST body:
+      { "original": "...", "modified": "...", "filename": "app.py", "trace_id": "" }
+
+    If trace_id is provided the diff is persisted to the file diff history.
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    original = body.get("original") or ""
+    modified = body.get("modified") or ""
+    filename = (body.get("filename") or "file").strip()
+    trace_id = (body.get("trace_id") or "").strip()
+
+    stats = _compute_diff_stats(original, modified, filename)
+
+    saved = None
+    if trace_id and stats["has_changes"]:
+        saved = _save_file_diff(trace_id, filename, original, modified)
+
+    return {**stats, "saved": saved}
+
+
+@app.get("/diff/history")
+def diff_history(trace_id: str = "", limit: int = 50):
+    """Return file diff history, optionally filtered by trace_id."""
+    try:
+        limit = max(1, min(int(limit), 200))
+    except Exception:
+        limit = 50
+    diffs = _get_file_diffs(trace_id=trace_id, limit=limit)
+    return {"diffs": diffs, "total": len(diffs)}
+
+
+@app.get("/diff/{diff_id}")
+def diff_detail(diff_id: int):
+    """Return full diff detail (including before/after text and unified diff) by id."""
+    record = _get_file_diff_detail(diff_id)
+    if not record:
+        return JSONResponse({"error": "diff not found"}, status_code=404)
+    return record
+
+
+# ── Self-improvement loop endpoints ──────────────────────────────────────────
+
+def _build_self_review_prompt(traces: list[dict]) -> str:
+    """Build an LLM prompt for analyzing agent traces and suggesting improvements."""
+    if not traces:
+        return "No execution traces available to review."
+    lines = [
+        "You are an AI self-improvement analyst. The following are summaries of recent agent "
+        "execution traces. Analyze them and respond with a JSON object:\n"
+        '{\n'
+        '  "insights": ["<insight 1>", ...],\n'
+        '  "suggestions": ["<improvement suggestion 1>", ...]\n'
+        '}\n\n'
+        "Include 3-7 insights (patterns you observed) and 3-5 actionable suggestions for improving "
+        "agent prompts, tool selection, or task handling. Be specific.\n\n"
+        "Traces:\n"
+    ]
+    for t in traces[:10]:
+        lines.append(
+            f"- trace_id={t.get('trace_id','?')} steps={t.get('steps',0)} "
+            f"task={str(t.get('task',''))[:120]} started={t.get('started_at','?')[:19]}"
+        )
+    return "\n".join(lines)
+
+
+@app.post("/agent/self-review")
+async def agent_self_review(request: Request):
+    """Analyze recent execution traces and generate self-improvement suggestions.
+
+    POST body (optional):
+      { "limit": 20 }
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    limit = body.get("limit", 20)
+    try:
+        limit = max(1, min(int(limit), 100))
+    except Exception:
+        limit = 20
+
+    traces = _list_traces(limit=limit)
+    if not traces:
+        return {"review_id": None, "traces_analyzed": 0,
+                "insights": [], "suggestions": [],
+                "message": "No traces available to review."}
+
+    prompt = _build_self_review_prompt(traces)
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": prompt}], prompt
+    )
+    raw = resp.get("content") or str(resp)
+
+    # Parse JSON response
+    import re as _re
+    insights: list = []
+    suggestions: list = []
+    try:
+        # Strip markdown fences if present
+        cleaned = _re.sub(r"```(?:json)?", "", raw).strip().strip("`")
+        parsed = json.loads(cleaned)
+        insights    = parsed.get("insights", []) or []
+        suggestions = parsed.get("suggestions", []) or []
+    except Exception:
+        # Fallback: split raw text into lines as suggestions
+        suggestions = [l.strip("- •") for l in raw.splitlines() if l.strip()][:10]
+
+    review_id = "review_" + secrets.token_hex(6)
+    db_save_self_review(
+        review_id=review_id,
+        traces_analyzed=len(traces),
+        insights=insights,
+        suggestions=suggestions,
+        provider=provider,
+    )
+
+    return {
+        "review_id": review_id,
+        "traces_analyzed": len(traces),
+        "insights": insights,
+        "suggestions": suggestions,
+        "provider": provider,
+    }
+
+
+@app.get("/agent/self-review/history")
+def self_review_history(limit: int = 10):
+    """Return past self-review results."""
+    try:
+        limit = max(1, min(int(limit), 50))
+    except Exception:
+        limit = 10
+    reviews = db_list_self_reviews(limit=limit)
+    return {"reviews": reviews, "total": len(reviews)}
+
+
+# ── Document understanding endpoints ─────────────────────────────────────────
+
+def _extract_document_text(path: str, file_type: str = "") -> tuple[str, str]:
+    """Extract text from a document file. Returns (text, detected_type)."""
+    from ..tools_builtin import tool_read_pdf, tool_read_docx, tool_read_xlsx, tool_read_pptx
+
+    ext = file_type.lower().lstrip(".") if file_type else ""
+    if not ext and path:
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+
+    workdir = os.path.dirname(path) if os.path.isabs(path) else "/tmp"
+
+    if ext in ("pdf",):
+        return tool_read_pdf(path, workdir=workdir), "pdf"
+    elif ext in ("docx", "doc"):
+        return tool_read_docx(path, workdir=workdir), "docx"
+    elif ext in ("xlsx", "xls"):
+        return tool_read_xlsx(path, workdir=workdir), "xlsx"
+    elif ext in ("pptx", "ppt"):
+        return tool_read_pptx(path, workdir=workdir), "pptx"
+    elif ext in ("txt", "md", "csv", "json", "yaml", "yml", "toml", "ini"):
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                return f.read()[:8000], ext
+        except Exception as e:
+            return f"❌ Failed to read {path}: {e}", "text"
+    return f"❌ Unsupported file type: {ext or 'unknown'}", ext
+
+
+@app.post("/documents/ingest")
+async def documents_ingest(request: Request):
+    """Extract text from a document and ingest it into the RAG store.
+
+    POST body:
+      { "path": "/tmp/report.pdf", "file_type": "pdf", "metadata": {} }
+      OR
+      { "text": "...", "filename": "report.pdf", "metadata": {} }
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    text  = (body.get("text") or "").strip()
+    path  = (body.get("path") or "").strip()
+    ftype = (body.get("file_type") or body.get("type") or "").strip()
+    filename = (body.get("filename") or (path.split("/")[-1] if path else "document")).strip()
+    metadata = body.get("metadata") or {}
+
+    if not text and not path:
+        return JSONResponse({"error": "path or text is required"}, status_code=400)
+
+    detected_type = ftype
+    if not text and path:
+        text, detected_type = _extract_document_text(path, ftype)
+        if text.startswith("❌"):
+            return JSONResponse({"error": text}, status_code=400)
+
+    if len(text) > 500_000:
+        text = text[:500_000]
+
+    doc_meta = {"source": filename, "type": detected_type, **metadata}
+    try:
+        count = get_rag_system().ingest(text, metadata=doc_meta, doc_id_prefix=filename)
+        return {
+            "filename": filename,
+            "type": detected_type,
+            "ingested_chunks": count,
+            "char_count": len(text),
+            "status": "ok",
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/documents/understand")
+async def documents_understand(request: Request):
+    """Extract text from a document and answer a question about it using an LLM.
+
+    POST body:
+      { "path": "/tmp/report.pdf", "question": "What are the key findings?", "file_type": "pdf" }
+      OR
+      { "text": "...", "question": "Summarise this." }
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    text     = (body.get("text") or "").strip()
+    path     = (body.get("path") or "").strip()
+    question = (body.get("question") or "Summarise this document.").strip()
+    ftype    = (body.get("file_type") or body.get("type") or "").strip()
+    filename = (body.get("filename") or (path.split("/")[-1] if path else "document")).strip()
+
+    if not text and not path:
+        return JSONResponse({"error": "path or text is required"}, status_code=400)
+    if not question:
+        return JSONResponse({"error": "question is required"}, status_code=400)
+
+    try:
+        question = check_user_task(question, policy_profile=_config.get("safety_profile", "standard"))
+    except GuardrailViolation as exc:
+        return _api_error(exc.reason, exc.code, 422)
+
+    detected_type = ftype
+    if not text and path:
+        text, detected_type = _extract_document_text(path, ftype)
+        if text.startswith("❌"):
+            return JSONResponse({"error": text}, status_code=400)
+
+    # Truncate to stay within context
+    excerpt = text[:12000]
+    prompt = (
+        f"The following is the content of a document ({detected_type or 'text'}) "
+        f"named '{filename}':\n\n"
+        f"---\n{excerpt}\n---\n\n"
+        f"Question: {question}\n\n"
+        "Please answer based only on the document content above."
+    )
+
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": prompt}], question
+    )
+    answer = resp.get("content") or str(resp)
+
+    return {
+        "filename": filename,
+        "type": detected_type,
+        "question": question,
+        "answer": answer,
+        "provider": provider,
+        "excerpt_chars": len(excerpt),
+        "total_chars": len(text),
+    }
 
 
 @app.post("/autonomy/plan")

@@ -405,6 +405,15 @@ def dispatch_builtin(action: dict) -> dict | None:
         r = tool_write_csv(action.get("path", ""), action.get("data", []),
                            action.get("workdir", "/tmp"))
         return _tool_trace(action, r, {"path": action.get("path", "")})
+    if kind == "read_docx":
+        r = tool_read_docx(action.get("path", ""), action.get("workdir", "/tmp"))
+        return _tool_trace(action, r, {"path": action.get("path", "")})
+    if kind == "read_xlsx":
+        r = tool_read_xlsx(action.get("path", ""), action.get("workdir", "/tmp"))
+        return _tool_trace(action, r, {"path": action.get("path", "")})
+    if kind == "read_pptx":
+        r = tool_read_pptx(action.get("path", ""), action.get("workdir", "/tmp"))
+        return _tool_trace(action, r, {"path": action.get("path", "")})
     return None
 
 
@@ -466,47 +475,6 @@ def tool_youtube_transcript(url: str) -> str:
         return f"No English subtitles found for: {title or url}"
     except Exception as e:
         return f"YouTube transcript failed: {e}"
-
-
-# ── PDF READER ────────────────────────────────────────────────────────────────
-def tool_read_pdf(path: str, workdir: str = "/tmp") -> str:
-    """Extract text from a PDF file."""
-    import os
-    full = os.path.join(workdir, path) if not os.path.isabs(path) else path
-    if not os.path.exists(full):
-        return f"File not found: {path}"
-    try:
-        import fitz   # PyMuPDF
-        doc   = fitz.open(full)
-        pages = []
-        for i, page in enumerate(doc):
-            text = page.get_text().strip()
-            if text:
-                pages.append(f"--- Page {i+1} ---\n{text}")
-            if sum(len(p) for p in pages) > 6000:
-                pages.append("*(truncated — too long)*")
-                break
-        doc.close()
-        return "\n\n".join(pages) if pages else "No text found in PDF."
-    except ImportError:
-        return "PDF reading requires PyMuPDF (pip install pymupdf)"
-    except Exception as e:
-        return f"PDF read failed: {e}"
-
-
-# ── DIFF VIEWER ───────────────────────────────────────────────────────────────
-def tool_diff(original: str, modified: str, filename: str = "file") -> str:
-    """Generate a unified diff between two strings."""
-    import difflib
-    orig_lines = original.splitlines(keepends=True)
-    mod_lines  = modified.splitlines(keepends=True)
-    diff = list(difflib.unified_diff(
-        orig_lines, mod_lines,
-        fromfile=f"a/{filename}", tofile=f"b/{filename}", lineterm=""
-    ))
-    if not diff:
-        return "No changes."
-    return "```diff\n" + "".join(diff[:200]) + ("…" if len(diff)>200 else "") + "\n```"
 
 
 # ── YOUTUBE TRANSCRIPT ────────────────────────────────────────────────────────
@@ -590,6 +558,85 @@ def tool_diff(original: str, modified: str, filename: str = "file") -> str:
         diff_text = diff_text[:4000] + "\n… (diff truncated)"
     return f"```diff\n{diff_text}\n```"
 
+
+# ── OFFICE DOCUMENT READERS ───────────────────────────────────────────────────
+
+def tool_read_docx(path: str, workdir: str = "/tmp") -> str:
+    """Extract text from a Word (.docx) file."""
+    import os as _os
+    full = _os.path.join(workdir, path) if not _os.path.isabs(path) else path
+    if not _os.path.exists(full):
+        return f"❌ File not found: {path}"
+    try:
+        from docx import Document
+        doc = Document(full)
+        paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        content = "\n\n".join(paragraphs)
+        if len(content) > 6000:
+            content = content[:6000] + f"\n\n… (truncated, {len(doc.paragraphs)} paragraphs total)"
+        return content if content else "❌ No extractable text found in document."
+    except ImportError:
+        return "❌ python-docx not installed. Run: pip install python-docx"
+    except Exception as e:
+        return f"❌ DOCX read failed: {e}"
+
+
+def tool_read_xlsx(path: str, workdir: str = "/tmp") -> str:
+    """Extract data from an Excel (.xlsx) file."""
+    import os as _os
+    full = _os.path.join(workdir, path) if not _os.path.isabs(path) else path
+    if not _os.path.exists(full):
+        return f"❌ File not found: {path}"
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(full, read_only=True, data_only=True)
+        lines = []
+        for sheet_name in wb.sheetnames[:3]:   # first 3 sheets
+            ws = wb[sheet_name]
+            lines.append(f"### Sheet: {sheet_name}")
+            row_count = 0
+            for row in ws.iter_rows(max_row=50, values_only=True):
+                cells = [str(c) if c is not None else "" for c in row]
+                if any(cells):
+                    lines.append(" | ".join(cells))
+                    row_count += 1
+            if ws.max_row and ws.max_row > 50:
+                lines.append(f"… ({ws.max_row - 50} more rows in sheet)")
+        wb.close()
+        content = "\n".join(lines)
+        return content if content.strip() else "❌ No data found in workbook."
+    except ImportError:
+        return "❌ openpyxl not installed. Run: pip install openpyxl"
+    except Exception as e:
+        return f"❌ XLSX read failed: {e}"
+
+
+def tool_read_pptx(path: str, workdir: str = "/tmp") -> str:
+    """Extract text from a PowerPoint (.pptx) file."""
+    import os as _os
+    full = _os.path.join(workdir, path) if not _os.path.isabs(path) else path
+    if not _os.path.exists(full):
+        return f"❌ File not found: {path}"
+    try:
+        from pptx import Presentation
+        prs = Presentation(full)
+        slides = []
+        for i, slide in enumerate(prs.slides[:30]):   # first 30 slides
+            texts = []
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text.strip():
+                    texts.append(shape.text.strip())
+            if texts:
+                slides.append(f"[Slide {i+1}]\n" + "\n".join(texts))
+        content = "\n\n".join(slides)
+        total = len(prs.slides)
+        if len(content) > 6000:
+            content = content[:6000] + f"\n\n… (truncated, {total} slides total)"
+        return content if content else "❌ No text found in presentation."
+    except ImportError:
+        return "❌ python-pptx not installed. Run: pip install python-pptx"
+    except Exception as e:
+        return f"❌ PPTX read failed: {e}"
 
 
 # ── SPREADSHEET (CSV) ─────────────────────────────────────────────────────────
