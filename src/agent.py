@@ -730,7 +730,10 @@ Available actions:
   { "action": "mcp_call",    "name": "github_issues", "args": {} }
   { "action": "generate_image",  "prompt": "a glowing neon city at night","width": 512,"height": 512 }
   { "action": "youtube_transcript","url": "https://youtube.com/watch?v=..." }
-  { "action": "read_pdf",  "path": "document.pdf" }
+  { "action": "read_pdf",   "path": "document.pdf" }
+  { "action": "read_docx",  "path": "report.docx" }
+  { "action": "read_xlsx",  "path": "data.xlsx" }
+  { "action": "read_pptx",  "path": "slides.pptx" }
   { "action": "diff",       "original": "old text", "modified": "new text", "filename": "app.py" }
   { "action": "query_db",   "connection_string": "sqlite:///data.db", "query": "SELECT * FROM table LIMIT 10" }
   { "action": "inspect_db", "connection_string": "sqlite:///data.db" }  ← list all tables, columns and row counts
@@ -759,6 +762,9 @@ Available actions:
   { "action": "commit_push","message": "feat: ...", "repo_url": "https://github.com/user/repo" }
   { "action": "youtube",      "url": "https://youtube.com/watch?v=..." }
   { "action": "read_pdf",     "path": "document.pdf" }
+  { "action": "read_docx",    "path": "report.docx" }
+  { "action": "read_xlsx",    "path": "data.xlsx" }
+  { "action": "read_pptx",    "path": "slides.pptx" }
   { "action": "diff",         "original": "old text", "modified": "new text", "filename": "app.py" }
   { "action": "simulate",     "topic": "Will interest rates drop in 2026?", "seed": "optional context", "n_personas": 5, "n_rounds": 3 }  ← swarm prediction via persona debate
   { "action": "agent_message", "from": "planner", "to": "architect", "content": "Proceed with module split." }  ← agent-to-agent message
@@ -1452,6 +1458,7 @@ TOOL_ICONS = {
     "write_file":"📝","read_file":"📖","list_files":"📂","delete_file":"🗑️",
     "run_command":"⚙️","clone_repo":"📦","commit_push":"🚀","create_repo":"🆕",
     "query_db":"🗄️","generate_image":"🎨","youtube":"▶️","read_pdf":"📑","diff":"±",
+    "read_docx":"📝","read_xlsx":"📊","read_pptx":"📽️",
     "youtube_transcript":"▶️","read_page":"🌐","api_call":"🔌","sub_agent":"🤖",
     "orchestrate_goal":"🧩","decompose_goal":"🧭","select_model":"🧠",
     "simulate":"🧬","agent_message":"📨",
@@ -2167,6 +2174,15 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             elif kind == "read_pdf":
                 from .tools_builtin import tool_read_pdf as _tool_read_pdf
                 result = _tool_read_pdf(action.get("path",""), workdir)
+            elif kind == "read_docx":
+                from .tools_builtin import tool_read_docx as _tool_read_docx
+                result = _tool_read_docx(action.get("path",""), workdir)
+            elif kind == "read_xlsx":
+                from .tools_builtin import tool_read_xlsx as _tool_read_xlsx
+                result = _tool_read_xlsx(action.get("path",""), workdir)
+            elif kind == "read_pptx":
+                from .tools_builtin import tool_read_pptx as _tool_read_pptx
+                result = _tool_read_pptx(action.get("path",""), workdir)
             elif kind == "create_repo":
                 result = tool_create_repo(
                     action.get("name","new-project"),

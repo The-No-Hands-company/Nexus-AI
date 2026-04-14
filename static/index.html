@@ -980,6 +980,9 @@
       <button onclick="openTracePanel();toggleOverflow()">⏮ Trace Viewer</button>
       <button onclick="openEnsemblePanel();toggleOverflow()">🔴 Ensemble Mode</button>
       <button onclick="openArchitecturePanel();toggleOverflow()">🏛 Architecture</button>
+      <button onclick="openDiffViewer();toggleOverflow()">📊 Diff viewer</button>
+      <button onclick="openSelfReviewPanel();toggleOverflow()">🔄 Self-improve</button>
+      <button onclick="openDocumentsPanel();toggleOverflow()">📄 Documents</button>
     </div>
   </div>
 </header>
@@ -1466,6 +1469,82 @@
       <div id="arch-summary" style="padding:0 10px 10px;font-size:.8rem;color:var(--muted);">Select a version.</div>
     </div>
   </div>
+</div>
+
+<!-- ── Diff Viewer Panel ──────────────────────────────────────────────────── -->
+<div id="diff-viewer-panel" style="position:fixed;bottom:80px;right:20px;width:560px;max-height:620px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:44;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">📊 Diff Viewer</span>
+    <button class="panel-btn" onclick="closeDiffViewer()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+    <div style="display:flex;gap:8px;align-items:center;">
+      <input id="diff-filename" placeholder="filename (e.g. app.py)" value="file"
+        style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+      <input id="diff-trace-id" placeholder="trace_id (optional)"
+        style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <textarea id="diff-original" placeholder="Original (before)" rows="5"
+        style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.78rem;font-family:monospace;resize:vertical;"></textarea>
+      <textarea id="diff-modified" placeholder="Modified (after)" rows="5"
+        style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.78rem;font-family:monospace;resize:vertical;"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runDiffViewer()">Compute diff</button>
+      <button class="btn-ghost" style="height:32px;font-size:.8rem;" onclick="loadDiffHistory()">📋 History</button>
+      <span id="diff-stats" style="font-size:.76rem;color:var(--muted);margin-left:4px;"></span>
+    </div>
+  </div>
+  <div id="diff-output" style="flex:1;overflow-y:auto;padding:10px 12px;font-family:monospace;font-size:.78rem;white-space:pre-wrap;line-height:1.5;"></div>
+</div>
+
+<!-- ── Self-Improvement Panel ─────────────────────────────────────────────── -->
+<div id="self-review-panel" style="position:fixed;bottom:80px;right:20px;width:480px;max-height:580px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:45;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🔄 Self-Improvement Loop</span>
+    <button class="panel-btn" onclick="closeSelfReviewPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;">
+    <label style="font-size:.8rem;color:var(--muted);">Traces to analyze:</label>
+    <input id="sr-limit" type="number" min="1" max="100" value="20"
+      style="width:70px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+    <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runSelfReview()">Analyze &amp; suggest</button>
+    <button class="btn-ghost" style="height:32px;font-size:.8rem;" onclick="loadSelfReviewHistory()">📋 History</button>
+  </div>
+  <div id="sr-loading" style="display:none;padding:20px;text-align:center;color:var(--muted);font-size:.82rem;">Analyzing traces…</div>
+  <div id="sr-output" style="flex:1;overflow-y:auto;padding:12px 14px;"></div>
+</div>
+
+<!-- ── Documents Panel ────────────────────────────────────────────────────── -->
+<div id="documents-panel" style="position:fixed;bottom:80px;right:20px;width:500px;max-height:600px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:46;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">📄 Document Understanding</span>
+    <button class="panel-btn" onclick="closeDocumentsPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+    <div style="display:flex;gap:8px;">
+      <input id="doc-path" placeholder="File path (e.g. /tmp/report.pdf)"
+        style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+      <select id="doc-type"
+        style="width:90px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;">
+        <option value="">auto</option>
+        <option value="pdf">PDF</option>
+        <option value="docx">DOCX</option>
+        <option value="xlsx">XLSX</option>
+        <option value="pptx">PPTX</option>
+        <option value="txt">TXT</option>
+      </select>
+    </div>
+    <textarea id="doc-question" placeholder="Question (leave blank to summarise)" rows="2"
+      style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;resize:vertical;"></textarea>
+    <div style="display:flex;gap:8px;">
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runDocumentUnderstand()">Ask</button>
+      <button class="btn-ghost" style="height:32px;font-size:.8rem;" onclick="runDocumentIngest()">Ingest into RAG</button>
+    </div>
+    <div id="doc-status" style="font-size:.72rem;color:var(--muted);"></div>
+  </div>
+  <div id="doc-output" style="flex:1;overflow-y:auto;padding:12px 14px;font-size:.82rem;"></div>
 </div>
 
 <script>
@@ -2569,8 +2648,25 @@ function _commandPool() {
     { label: 'Open scheduler', tag: 'panel', run: () => openSchedulerPanel() },
     { label: 'Open swarm view', tag: 'panel', run: () => openSwarmPanel() },
     { label: 'Open architecture panel', tag: 'panel', run: () => openArchitecturePanel() },
-    { label: 'Open settings', tag: 'panel', run: () => openSettings() },
+    { label: 'Open diff viewer', tag: 'panel', run: () => openDiffViewer() },
+    { label: 'Open self-improvement loop', tag: 'panel', run: () => openSelfReviewPanel() },
+    { label: 'Open document understanding', tag: 'panel', run: () => openDocumentsPanel() },
+    { label: 'Open safety audit log', tag: 'panel', run: () => openSafetyAudit() },
+    { label: 'Open safety scanner', tag: 'panel', run: () => openSafetyScanner() },
     { label: 'Open usage dashboard', tag: 'panel', run: () => openUsageModal() },
+    { label: 'Open provider health', tag: 'panel', run: () => openHealthModal() },
+    { label: 'Open memory', tag: 'panel', run: () => openMemoryModal() },
+    { label: 'Open projects', tag: 'panel', run: () => openProjectsModal() },
+    { label: 'Open custom instructions', tag: 'panel', run: () => openCIModal() },
+    { label: 'Open knowledge graph', tag: 'panel', run: () => openKGPanel() },
+    { label: 'Open trace viewer', tag: 'panel', run: () => openTracePanel() },
+    { label: 'Open ensemble settings', tag: 'panel', run: () => openEnsemblePanel() },
+    { label: 'Open persona editor', tag: 'panel', run: () => openPersonaEditor() },
+    { label: 'Open settings', tag: 'panel', run: () => openSettings() },
+    { label: 'Open command shortcuts', tag: 'panel', run: () => openShortcuts() },
+    { label: 'Save chat now', tag: 'action', run: () => autoSave() },
+    { label: 'Stop generation', tag: 'action', run: () => stopStream() },
+    { label: 'Clear memory', tag: 'action', run: () => clearMemory() },
     ...chats,
   ];
 }
@@ -2745,6 +2841,168 @@ async function openSafetyAudit() {
   await loadAuditLog();
 }
 function closeAuditModal() { document.getElementById('audit-modal').classList.remove('open'); }
+
+// ── DIFF VIEWER PANEL ─────────────────────────────────────────────────────────
+function openDiffViewer() {
+  document.getElementById('diff-viewer-panel').style.display = 'flex';
+}
+function closeDiffViewer() {
+  document.getElementById('diff-viewer-panel').style.display = 'none';
+}
+async function runDiffViewer() {
+  const original = document.getElementById('diff-original').value;
+  const modified = document.getElementById('diff-modified').value;
+  const filename  = document.getElementById('diff-filename').value.trim() || 'file';
+  const traceId   = document.getElementById('diff-trace-id').value.trim();
+  const out       = document.getElementById('diff-output');
+  const stats     = document.getElementById('diff-stats');
+  out.textContent = 'Computing…';
+  stats.textContent = '';
+  try {
+    const body = { original, modified, filename };
+    if (traceId) body.trace_id = traceId;
+    const r = await fetch('/diff', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (!d.has_changes) { out.textContent = 'No differences found.'; stats.textContent = ''; return; }
+    stats.textContent = `+${d.additions} −${d.deletions} in ${d.chunks} chunk(s)`;
+    const html = d.unified_diff.split('\n').map(line => {
+      const esc = line.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      if (line.startsWith('+++') || line.startsWith('---')) return `<span style="color:var(--muted)">${esc}</span>`;
+      if (line.startsWith('+')) return `<span style="color:#4caf50;background:rgba(76,175,80,.12)">${esc}</span>`;
+      if (line.startsWith('-')) return `<span style="color:#f44336;background:rgba(244,67,54,.12)">${esc}</span>`;
+      if (line.startsWith('@@')) return `<span style="color:#2196f3">${esc}</span>`;
+      return esc;
+    }).join('\n');
+    out.innerHTML = html;
+    if (traceId && d.saved) stats.textContent += ' · saved';
+  } catch(e) { out.textContent = `Error: ${e.message}`; }
+}
+async function loadDiffHistory() {
+  const traceId = document.getElementById('diff-trace-id').value.trim();
+  const out     = document.getElementById('diff-output');
+  out.textContent = 'Loading…';
+  try {
+    const url = '/diff/history' + (traceId ? `?trace_id=${encodeURIComponent(traceId)}&limit=20` : '?limit=20');
+    const r = await fetch(url);
+    const d = await r.json();
+    if (!d.diffs || !d.diffs.length) { out.textContent = 'No diff history found.'; return; }
+    out.innerHTML = d.diffs.map(df =>
+      `<div style="border-bottom:1px solid var(--border);padding:6px 0;font-size:.75rem;">
+        <b>${df.file_path || '?'}</b>
+        <span style="color:#4caf50;margin-left:8px;">+${df.additions}</span>
+        <span style="color:#f44336;margin-left:4px;">−${df.deletions}</span>
+        <span style="color:var(--muted);margin-left:8px;">${(df.created_at||'').slice(0,19)}</span>
+        ${df.trace_id ? `<span style="color:var(--muted);margin-left:8px;">trace:${df.trace_id}</span>` : ''}
+        <button onclick="loadDiffDetail(${df.id})" style="float:right;background:none;border:none;color:var(--accent);cursor:pointer;font-size:.75rem;">view</button>
+      </div>`
+    ).join('');
+  } catch(e) { out.textContent = `Error: ${e.message}`; }
+}
+async function loadDiffDetail(id) {
+  const out = document.getElementById('diff-output');
+  out.textContent = 'Loading…';
+  try {
+    const r = await fetch(`/diff/${id}`);
+    const d = await r.json();
+    if (d.error) { out.textContent = d.error; return; }
+    document.getElementById('diff-original').value = d.before_text || '';
+    document.getElementById('diff-modified').value = d.after_text || '';
+    document.getElementById('diff-filename').value = d.file_path || 'file';
+    await runDiffViewer();
+  } catch(e) { out.textContent = `Error: ${e.message}`; }
+}
+
+// ── SELF-IMPROVEMENT PANEL ────────────────────────────────────────────────────
+function openSelfReviewPanel() {
+  document.getElementById('self-review-panel').style.display = 'flex';
+  loadSelfReviewHistory();
+}
+function closeSelfReviewPanel() {
+  document.getElementById('self-review-panel').style.display = 'none';
+}
+async function runSelfReview() {
+  const limit   = parseInt(document.getElementById('sr-limit').value) || 20;
+  const loading = document.getElementById('sr-loading');
+  const out     = document.getElementById('sr-output');
+  loading.style.display = 'block';
+  out.innerHTML = '';
+  try {
+    const r = await fetch('/agent/self-review', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ limit }) });
+    const d = await r.json();
+    loading.style.display = 'none';
+    if (d.message && !d.insights.length) { out.textContent = d.message; return; }
+    let html = `<div style="font-size:.75rem;color:var(--muted);margin-bottom:10px;">Analyzed ${d.traces_analyzed} traces · provider: ${d.provider}</div>`;
+    if (d.insights && d.insights.length) {
+      html += `<div style="font-weight:700;font-size:.8rem;margin-bottom:6px;color:var(--text);">Insights</div>`;
+      html += d.insights.map(i => `<div style="font-size:.8rem;padding:5px 0;border-bottom:1px solid var(--border);color:var(--text);">• ${i}</div>`).join('');
+    }
+    if (d.suggestions && d.suggestions.length) {
+      html += `<div style="font-weight:700;font-size:.8rem;margin:12px 0 6px;color:var(--text);">Suggestions</div>`;
+      html += d.suggestions.map((s,i) => `<div style="font-size:.8rem;padding:5px 0;border-bottom:1px solid var(--border);color:var(--text);">${i+1}. ${s}</div>`).join('');
+    }
+    out.innerHTML = html;
+  } catch(e) { loading.style.display='none'; out.textContent = `Error: ${e.message}`; }
+}
+async function loadSelfReviewHistory() {
+  const out = document.getElementById('sr-output');
+  try {
+    const r = await fetch('/agent/self-review/history?limit=5');
+    const d = await r.json();
+    if (!d.reviews || !d.reviews.length) return;
+    out.innerHTML = `<div style="font-size:.73rem;color:var(--muted);margin-bottom:8px;">Past ${d.reviews.length} review(s)</div>` +
+      d.reviews.map(rv => `
+        <div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px;">
+          <div style="font-size:.73rem;color:var(--muted);">${(rv.created_at||'').slice(0,19)} · ${rv.traces_analyzed} traces</div>
+          ${rv.suggestions.slice(0,2).map(s=>`<div style="font-size:.78rem;padding-top:4px;">• ${s}</div>`).join('')}
+        </div>`).join('');
+  } catch(e) { /* silent */ }
+}
+
+// ── DOCUMENT UNDERSTANDING PANEL ─────────────────────────────────────────────
+function openDocumentsPanel() {
+  document.getElementById('documents-panel').style.display = 'flex';
+}
+function closeDocumentsPanel() {
+  document.getElementById('documents-panel').style.display = 'none';
+}
+async function runDocumentUnderstand() {
+  const path     = document.getElementById('doc-path').value.trim();
+  const question = document.getElementById('doc-question').value.trim() || 'Summarise this document.';
+  const ftype    = document.getElementById('doc-type').value;
+  const status   = document.getElementById('doc-status');
+  const out      = document.getElementById('doc-output');
+  if (!path) { status.textContent = '❌ Enter a file path.'; return; }
+  status.textContent = 'Processing…';
+  out.innerHTML = '';
+  try {
+    const body = { path, question };
+    if (ftype) body.file_type = ftype;
+    const r = await fetch('/documents/understand', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (d.error) { status.textContent = `❌ ${d.error}`; return; }
+    status.textContent = `✓ ${d.type||'?'} · ${d.excerpt_chars} chars · ${d.provider}`;
+    out.innerHTML = `<div style="margin-bottom:8px;font-size:.75rem;color:var(--muted);">Q: ${d.question}</div>` +
+      `<div style="font-size:.84rem;color:var(--text);white-space:pre-wrap;">${d.answer}</div>`;
+  } catch(e) { status.textContent = `❌ ${e.message}`; }
+}
+async function runDocumentIngest() {
+  const path   = document.getElementById('doc-path').value.trim();
+  const ftype  = document.getElementById('doc-type').value;
+  const status = document.getElementById('doc-status');
+  const out    = document.getElementById('doc-output');
+  if (!path) { status.textContent = '❌ Enter a file path.'; return; }
+  status.textContent = 'Ingesting…';
+  out.innerHTML = '';
+  try {
+    const body = { path };
+    if (ftype) body.file_type = ftype;
+    const r = await fetch('/documents/ingest', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const d = await r.json();
+    if (d.error) { status.textContent = `❌ ${d.error}`; return; }
+    status.textContent = `✓ Ingested ${d.ingested_chunks} chunk(s)`;
+    out.innerHTML = `<div style="font-size:.82rem;color:var(--text);">Document <b>${d.filename}</b> (${d.type}) ingested as ${d.ingested_chunks} RAG chunks.</div>`;
+  } catch(e) { status.textContent = `❌ ${e.message}`; }
+}
 
 // ── ARCHITECTURE PANEL (PHASE A) ───────────────────────────────────────────
 let _archVersions = [];

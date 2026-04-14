@@ -1147,3 +1147,63 @@ try:
     init_marketplace_table()
 except Exception:
     pass
+
+
+# ── Self-review log ────────────────────────────────────────────────────────────
+
+def init_self_review_table() -> None:
+    _conn().executescript("""
+        CREATE TABLE IF NOT EXISTS self_review_log (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_id        TEXT NOT NULL UNIQUE,
+            traces_analyzed  INTEGER NOT NULL DEFAULT 0,
+            insights         TEXT NOT NULL DEFAULT '[]',
+            suggestions      TEXT NOT NULL DEFAULT '[]',
+            provider         TEXT NOT NULL DEFAULT '',
+            created_at       TEXT NOT NULL
+        );
+    """)
+    _conn().commit()
+
+
+def save_self_review(
+    review_id: str,
+    traces_analyzed: int,
+    insights: list,
+    suggestions: list,
+    provider: str = "",
+) -> None:
+    import time as _t
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    import json as _json
+    _conn().execute(
+        "INSERT OR REPLACE INTO self_review_log "
+        "(review_id, traces_analyzed, insights, suggestions, provider, created_at) "
+        "VALUES (?,?,?,?,?,?)",
+        (review_id, traces_analyzed,
+         _json.dumps(insights), _json.dumps(suggestions),
+         provider, now),
+    )
+    _conn().commit()
+
+
+def list_self_reviews(limit: int = 20) -> list[dict]:
+    import json as _json
+    rows = _conn().execute(
+        "SELECT * FROM self_review_log ORDER BY id DESC LIMIT ?", (limit,)
+    ).fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        d["insights"]    = _json.loads(d.get("insights") or "[]")
+        d["suggestions"] = _json.loads(d.get("suggestions") or "[]")
+        results.append(d)
+    return results
+
+
+# Seed self-review table on import
+try:
+    init_self_review_table()
+except Exception:
+    pass
