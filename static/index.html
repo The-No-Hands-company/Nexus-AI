@@ -1684,18 +1684,7 @@ let voiceRecognition=null, isListening=false;
 let artifactCount=0;
 
 // ── TOKEN HANDLING ─────────────────────────────────────────────────────────
-function showTokenBar(){document.getElementById('token-bar').style.display='flex'}
-async function submitToken(){
-  const val=document.getElementById('token-input').value.trim();
-  if(!val||!sid) return;
-  await fetch(`/session/${sid}/token`,{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({token:val})});
-  document.getElementById('token-input').value='';
-  document.getElementById('token-bar').style.display='none';
-  // Show confirmation in chat
-  addSysMsg('🔑 Token stored for this session');
-}
+// UI helper utilities moved to static/js/utilities/ui-helpers.js
 
 // ── ARTIFACT RENDERER ──────────────────────────────────────────────────────
 function makeArtifact(path, content){
@@ -1830,82 +1819,7 @@ async function clearMemory(){
 // Settings utilities moved to static/js/utilities/settings.js
 
 // ── VOICE INPUT ────────────────────────────────────────────────────────────────
-function setupVoice(){
-  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-  if(!SR){
-    document.getElementById('voice-btn').style.opacity='.3';
-    document.getElementById('voice-btn').title='Voice not supported in this browser';
-    return;
-  }
-  voiceRecognition=new SR();
-  voiceRecognition.continuous=false;
-  voiceRecognition.interimResults=true;
-  voiceRecognition.lang='en-US';
-
-  voiceRecognition.onresult=e=>{
-    let interim='',final='';
-    for(const r of e.results){
-      if(r.isFinal) final+=r[0].transcript;
-      else interim+=r[0].transcript;
-    }
-    ta.value=(final||interim).trim();
-    ta.dispatchEvent(new Event('input'));
-  };
-  voiceRecognition.onend=()=>setListening(false);
-  voiceRecognition.onerror=()=>setListening(false);
-}
-function toggleVoice(){
-  if(!voiceRecognition) return;
-  if(isListening){voiceRecognition.stop();setListening(false)}
-  else{voiceRecognition.start();setListening(true)}
-}
-function setListening(v){
-  isListening=v;
-  document.getElementById('voice-btn').classList.toggle('listening',v);
-}
-
-// ── TEXTAREA ───────────────────────────────────────────────────────────────────
-const ta=document.getElementById('task');
-ta.addEventListener('input',()=>{ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,130)+'px'});
-ta.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
-function fillTask(t){ta.value=t;ta.dispatchEvent(new Event('input'));ta.focus();if(drawerOpen)toggleDrawer()}
-
-// ── FILE HANDLING ──────────────────────────────────────────────────────────────
-function setupDrop(){
-  const ov=document.getElementById('drop-overlay');let dc=0;
-  document.addEventListener('dragenter',e=>{if(e.dataTransfer?.types.includes('Files')){dc++;ov.classList.add('active')}});
-  document.addEventListener('dragleave',()=>{if(--dc<=0){dc=0;ov.classList.remove('active')}});
-  document.addEventListener('dragover',e=>e.preventDefault());
-  document.addEventListener('drop',e=>{e.preventDefault();dc=0;ov.classList.remove('active');
-    if(e.dataTransfer?.files?.length) processFiles(Array.from(e.dataTransfer.files))});
-}
-function handleFileInput(e){processFiles(Array.from(e.target.files));e.target.value=''}
-const TEXT_EXTS=new Set(['txt','md','js','ts','jsx','tsx','py','json','yaml','yml',
-  'toml','html','css','sh','go','rs','rb','php','java','c','cpp','h','sql']);
-async function processFiles(list){
-  for(const f of list){
-    const ext=f.name.split('.').pop()?.toLowerCase()||'';
-    if(f.type.startsWith('image/')){
-      attachedFiles.push({name:f.name,type:f.type,content:await readB64(f)});
-    } else {
-      try{attachedFiles.push({name:f.name,type:'text/plain',content:await readTxt(f)})}
-      catch{alert(`Can't read: ${f.name}`);continue}
-    }
-  }
-  renderFileChips();
-}
-const readTxt=f=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(r.error);r.readAsText(f)});
-const readB64=f=>new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=()=>rej(r.error);r.readAsDataURL(f)});
-function renderFileChips(){
-  const w=document.getElementById('file-chips');
-  if(!attachedFiles.length){w.style.display='none';return}
-  w.style.display='flex';
-  w.innerHTML=attachedFiles.map((f,i)=>
-    `<div class="file-chip">${f.type.startsWith('image/')?'🖼️':'📄'}
-     <span class="fname">${esc(f.name)}</span>
-     <span class="rm" onclick="removeFile(${i})">×</span></div>`).join('');
-}
-function removeFile(i){attachedFiles.splice(i,1);renderFileChips()}
+// Input handling utilities moved to static/js/utilities/input-handling.js
 
 // ── MESSAGES ───────────────────────────────────────────────────────────────────
 function showChat(){document.getElementById('welcome').style.display='none'}
@@ -2317,20 +2231,7 @@ document.addEventListener('keydown', e => {
 
 
 // ── TOKEN COUNTER ──────────────────────────────────────────────────────────────
-function estimateTokens(text) {
-  // Rough estimate: ~4 chars per token
-  return Math.ceil((text || '').length / 4);
-}
-
-function addTokenCount(wrap, inputText, outputText) {
-  const inToks  = estimateTokens(inputText);
-  const outToks = estimateTokens(outputText);
-  const el = document.createElement('div');
-  el.className = 'token-count';
-  el.innerHTML = `<span class="tc-in">↑ ~${inToks} tokens</span>
-                  <span class="tc-out">↓ ~${outToks} tokens</span>`;
-  wrap.appendChild(el);
-}
+// UI helper utilities moved to static/js/utilities/ui-helpers.js
 
 
 // ── CUSTOM PERSONA EDITOR ──────────────────────────────────────────────────────
@@ -2348,8 +2249,7 @@ document.addEventListener('keydown', e => {
   if (mod && e.key === 'l') { e.preventDefault(); ta.focus(); ta.select(); return; }
   if (mod && e.key === 's') { e.preventDefault(); autoSave(); return; }
 });
-function openShortcuts()  { document.getElementById('shortcuts-overlay').classList.add('open'); }
-function closeShortcuts() { document.getElementById('shortcuts-overlay').classList.remove('open'); }
+// Shortcuts modal helpers moved to static/js/utilities/ui-helpers.js
 
 // Command palette utilities moved to static/js/utilities/search-command.js
 // ── PINS ──────────────────────────────────────────────────────────────────────
@@ -2361,13 +2261,7 @@ function closeShortcuts() { document.getElementById('shortcuts-overlay').classLi
 
 
 // ── TOKEN COUNTER ─────────────────────────────────────────────────────────────
-function showTokenCount(inputTokens, outputTokens) {
-  const bar = document.getElementById('token-bar-msg');
-  if (inputTokens == null && outputTokens == null) { bar.classList.remove('visible'); return; }
-  document.getElementById('tok-in').textContent  = inputTokens  != null ? `↑ ${inputTokens} tokens`  : '';
-  document.getElementById('tok-out').textContent = outputTokens != null ? `↓ ${outputTokens} tokens` : '';
-  bar.classList.add('visible');
-}
+// UI helper utilities moved to static/js/utilities/ui-helpers.js
 
 
 
@@ -2428,6 +2322,8 @@ async function initSessionSafetySelector(profiles) {
 <script src="/static/js/utilities/settings.js"></script>
 <script src="/static/js/utilities/usage.js"></script>
 <script src="/static/js/utilities/source-cards.js"></script>
+<script src="/static/js/utilities/input-handling.js"></script>
+<script src="/static/js/utilities/ui-helpers.js"></script>
 <script src="/static/js/utilities/sidebar.js"></script>
 <script src="/static/js/utilities/theme-prefs.js"></script>
 <script src="/static/js/utilities/persona-editor.js"></script>
