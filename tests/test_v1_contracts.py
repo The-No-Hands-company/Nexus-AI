@@ -2592,7 +2592,7 @@ class TestSelfImprovementLoop(unittest.TestCase):
             {"trace_id": "tr_001", "steps": 3, "task": "test", "started_at": "2026-04-14T12:00:00Z"},
             {"trace_id": "tr_002", "steps": 5, "task": "test", "started_at": "2026-04-14T11:00:00Z"},
         ]
-        with patch("src.agent.call_llm_with_fallback", return_value=(mock_response, "mock-provider")), \
+        with patch("src.api.routes.call_llm_with_fallback", return_value=(mock_response, "mock-provider")), \
              patch("src.api.routes._list_traces", return_value=mock_traces):
             resp = client.post("/agent/self-review", json={"limit": 5})
         self.assertEqual(resp.status_code, 200)
@@ -2611,7 +2611,7 @@ class TestSelfImprovementLoop(unittest.TestCase):
         mock_traces = [
             {"trace_id": "tr_hist_001", "steps": 2, "task": "test", "started_at": "2026-04-14T10:00:00Z"},
         ]
-        with patch("src.agent.call_llm_with_fallback", return_value=(mock_response, "test-provider")), \
+        with patch("src.api.routes.call_llm_with_fallback", return_value=(mock_response, "test-provider")), \
              patch("src.api.routes._list_traces", return_value=mock_traces):
             post_resp = client.post("/agent/self-review", json={"limit": 3})
         review_id = post_resp.json().get("review_id")
@@ -2692,7 +2692,7 @@ class TestDocumentUnderstanding(unittest.TestCase):
     def test_documents_understand_text_blob(self):
         from unittest.mock import patch
         mock_resp = {"content": "The main topic is AI privacy."}
-        with patch("src.agent.call_llm_with_fallback", return_value=(mock_resp, "mock-provider")):
+        with patch("src.api.routes.call_llm_with_fallback", return_value=(mock_resp, "mock-provider")):
             resp = client.post("/documents/understand", json={
                 "text": "Nexus AI is a privacy-first assistant that never phones home.",
                 "question": "What is the main topic?",
@@ -2711,7 +2711,7 @@ class TestDocumentUnderstanding(unittest.TestCase):
         try:
             from unittest.mock import patch
             mock_resp = {"content": "Privacy."}
-            with patch("src.agent.call_llm_with_fallback", return_value=(mock_resp, "mock-provider")):
+            with patch("src.api.routes.call_llm_with_fallback", return_value=(mock_resp, "mock-provider")):
                 resp = client.post("/documents/understand", json={
                     "path": path,
                     "file_type": "txt",
@@ -2769,3 +2769,325 @@ class TestDocumentUnderstanding(unittest.TestCase):
         source = inspect.getsource(tb)
         count = source.count("def tool_diff(")
         self.assertEqual(count, 1, "tool_diff is defined more than once")
+
+
+class TestAdvancedReasoning(unittest.TestCase):
+    """Sprint J Advanced Reasoning — /reason/debate, /reason/hypothesis,
+    /settings/adaptive-routing, and thinking.py helpers."""
+
+    # ── thinking.py unit tests ─────────────────────────────────────────────
+
+    def test_debate_position_prompt_proponent(self):
+        from src.thinking import build_debate_position_prompt
+        p = build_debate_position_prompt("AI will replace all jobs", "proponent")
+        self.assertIn("PROPONENT", p)
+        self.assertIn("AI will replace all jobs", p)
+        self.assertIn("json", p.lower())
+
+    def test_debate_position_prompt_critic(self):
+        from src.thinking import build_debate_position_prompt
+        p = build_debate_position_prompt("AI will replace all jobs", "critic")
+        self.assertIn("CRITIC", p)
+        self.assertIn("AGAINST", p)
+
+    def test_debate_position_prompt_with_prior_round(self):
+        from src.thinking import build_debate_position_prompt
+        p = build_debate_position_prompt("test claim", "critic", prior_round="some prior argument")
+        self.assertIn("some prior argument", p)
+        self.assertIn("Opponent", p)
+
+    def test_parse_debate_turn_valid_json(self):
+        from src.thinking import parse_debate_turn
+        raw = '{"argument": "Strong point", "key_points": ["A", "B"], "confidence": 0.8}'
+        result = parse_debate_turn(raw)
+        self.assertEqual(result["argument"], "Strong point")
+        self.assertEqual(result["key_points"], ["A", "B"])
+        self.assertAlmostEqual(result["confidence"], 0.8)
+
+    def test_parse_debate_turn_invalid_json_fallback(self):
+        from src.thinking import parse_debate_turn
+        result = parse_debate_turn("not json at all")
+        self.assertEqual(result["argument"], "not json at all")
+        self.assertEqual(result["confidence"], 0.5)
+
+    def test_parse_debate_verdict_valid(self):
+        from src.thinking import parse_debate_verdict
+        raw = ('{"verdict":"supported","synthesis":"balanced","'
+               'strongest_proponent_point":"point A","strongest_critic_point":"point B",'
+               '"confidence":0.75}')
+        result = parse_debate_verdict(raw)
+        self.assertEqual(result["verdict"], "supported")
+        self.assertAlmostEqual(result["confidence"], 0.75)
+        self.assertEqual(result["strongest_proponent_point"], "point A")
+
+    def test_build_hypothesis_generation_prompt(self):
+        from src.thinking import build_hypothesis_generation_prompt
+        p = build_hypothesis_generation_prompt("server latency spiked", 3)
+        self.assertIn("server latency spiked", p)
+        self.assertIn("3", p)
+        self.assertIn("json", p.lower())
+
+    def test_parse_hypothesis_generation_valid(self):
+        from src.thinking import parse_hypothesis_generation
+        raw = ('{"hypotheses": ['
+               '{"id":1,"statement":"DB overload","initial_reasoning":"high queries","plausibility":0.7},'
+               '{"id":2,"statement":"Memory leak","initial_reasoning":"rss growing","plausibility":0.5}'
+               ']}')
+        result = parse_hypothesis_generation(raw)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(result[0]["id"], 1)
+        self.assertAlmostEqual(result[0]["plausibility"], 0.7)
+
+    def test_parse_hypothesis_generation_fallback(self):
+        from src.thinking import parse_hypothesis_generation
+        result = parse_hypothesis_generation("not json")
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["statement"], "not json")
+
+    def test_parse_hypothesis_test_valid(self):
+        from src.thinking import parse_hypothesis_test
+        raw = ('{"evidence_for":["ev1"],"evidence_against":["ev2"],'
+               '"assumptions":["a1"],"verdict":"accept","confidence":0.8,"explanation":"ok"}')
+        result = parse_hypothesis_test(raw)
+        self.assertEqual(result["verdict"], "accept")
+        self.assertAlmostEqual(result["confidence"], 0.8)
+        self.assertEqual(result["evidence_for"], ["ev1"])
+
+    def test_parse_hypothesis_conclusion_valid(self):
+        from src.thinking import parse_hypothesis_conclusion
+        raw = ('{"conclusion":"H1 best explains it","best_hypothesis_id":1,'
+               '"uncertainty":"low","next_steps":["step1"],"overall_confidence":0.75}')
+        result = parse_hypothesis_conclusion(raw)
+        self.assertEqual(result["conclusion"], "H1 best explains it")
+        self.assertEqual(result["best_hypothesis_id"], 1)
+        self.assertAlmostEqual(result["overall_confidence"], 0.75)
+
+    # ── /reason/debate HTTP endpoint ──────────────────────────────────────
+
+    def test_debate_missing_claim(self):
+        resp = client.post("/reason/debate", json={})
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("claim", resp.json().get("error", ""))
+
+    def test_debate_empty_claim(self):
+        resp = client.post("/reason/debate", json={"claim": ""})
+        self.assertEqual(resp.status_code, 422)
+
+    _MOCK_DEBATE_TURN = {"content": '{"argument":"Strong point","key_points":["A"],"confidence":0.8}'}
+    _MOCK_CRITIC_TURN = {"content": '{"argument":"Counter point","key_points":["B"],"confidence":0.7}'}
+    _MOCK_VERDICT    = {"content": '{"verdict":"inconclusive","synthesis":"Balanced view","strongest_proponent_point":"A","strongest_critic_point":"B","confidence":0.65}'}
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_debate_returns_expected_shape(self, mock_llm):
+        mock_llm.side_effect = [
+            (self._MOCK_DEBATE_TURN, "prov_a"),
+            (self._MOCK_CRITIC_TURN, "prov_b"),
+            (self._MOCK_VERDICT,     "prov_c"),
+        ]
+        resp = client.post("/reason/debate", json={"claim": "Python is better than JavaScript", "rounds": 1})
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("claim", data)
+        self.assertIn("transcript", data)
+        self.assertIn("verdict", data)
+        self.assertIn("synthesis", data)
+        self.assertIn("confidence", data)
+        self.assertIn("providers", data)
+        self.assertIsInstance(data["transcript"], list)
+        self.assertEqual(len(data["transcript"]), 1)
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_debate_verdict_is_valid_value(self, mock_llm):
+        mock_llm.side_effect = [
+            (self._MOCK_DEBATE_TURN, "prov_a"),
+            (self._MOCK_CRITIC_TURN, "prov_b"),
+            (self._MOCK_VERDICT,     "prov_c"),
+        ]
+        resp = client.post("/reason/debate", json={"claim": "Tests slow development", "rounds": 1})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(resp.json()["verdict"], ("supported", "refuted", "inconclusive"))
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_debate_transcript_has_round_structure(self, mock_llm):
+        mock_llm.side_effect = [
+            (self._MOCK_DEBATE_TURN, "prov_a"),
+            (self._MOCK_CRITIC_TURN, "prov_b"),
+            (self._MOCK_VERDICT,     "prov_c"),
+        ]
+        resp = client.post("/reason/debate", json={"claim": "Open source beats commercial software", "rounds": 1})
+        self.assertEqual(resp.status_code, 200)
+        rnd = resp.json()["transcript"][0]
+        self.assertIn("round", rnd)
+        self.assertIn("proponent", rnd)
+        self.assertIn("critic", rnd)
+        self.assertEqual(rnd["round"], 1)
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_debate_confidence_in_range(self, mock_llm):
+        mock_llm.side_effect = [
+            (self._MOCK_DEBATE_TURN, "prov_a"),
+            (self._MOCK_CRITIC_TURN, "prov_b"),
+            (self._MOCK_VERDICT,     "prov_c"),
+        ]
+        resp = client.post("/reason/debate", json={"claim": "Remote work is more productive", "rounds": 1})
+        self.assertEqual(resp.status_code, 200)
+        conf = resp.json()["confidence"]
+        self.assertGreaterEqual(conf, 0.0)
+        self.assertLessEqual(conf, 1.0)
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_debate_rounds_clamped_to_max(self, mock_llm):
+        # 99 rounds → clamped to 5: 5×2 turn calls + 1 verdict call = 11 calls
+        _turn    = {"content": '{"argument":"x","key_points":[],"confidence":0.5}'}
+        _verdict = {"content": '{"verdict":"inconclusive","synthesis":"ok","strongest_proponent_point":"","strongest_critic_point":"","confidence":0.5}'}
+        mock_llm.side_effect = [(_turn, "p")] * 10 + [(_verdict, "p")]
+        resp = client.post("/reason/debate", json={"claim": "Simple test claim", "rounds": 99})
+        self.assertEqual(resp.status_code, 200)
+        self.assertLessEqual(resp.json()["rounds_completed"], 5)
+
+    # ── /reason/hypothesis HTTP endpoint ─────────────────────────────────
+
+    def test_hypothesis_missing_observation(self):
+        resp = client.post("/reason/hypothesis", json={})
+        self.assertEqual(resp.status_code, 422)
+        self.assertIn("observation", resp.json().get("error", ""))
+
+    def test_hypothesis_empty_observation(self):
+        resp = client.post("/reason/hypothesis", json={"observation": ""})
+        self.assertEqual(resp.status_code, 422)
+
+    _HYP_GEN_RESP = {"content": ('{"hypotheses":['  
+        '{"id":1,"statement":"DB overloaded","initial_reasoning":"high queries","plausibility":0.7},'  
+        '{"id":2,"statement":"Memory leak","initial_reasoning":"rss growing","plausibility":0.5}'  
+        ']}')}
+    _HYP_TEST_RESP = {"content": ('{"evidence_for":["ev1"],"evidence_against":["ev2"],'  
+        '"assumptions":["a1"],"verdict":"accept","confidence":0.8,"explanation":"OK"}')}
+    _HYP_CONC_RESP = {"content": ('{"conclusion":"H1 most likely","best_hypothesis_id":1,'  
+        '"uncertainty":"low","next_steps":["step1"],"overall_confidence":0.75}')}
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_hypothesis_returns_expected_shape(self, mock_llm):
+        mock_llm.side_effect = [
+            (self._HYP_GEN_RESP,  "gen"),
+            (self._HYP_TEST_RESP, "t1"),
+            (self._HYP_TEST_RESP, "t2"),
+            (self._HYP_CONC_RESP, "conc"),
+        ]
+        resp = client.post("/reason/hypothesis", json={
+            "observation": "The database query time doubled after an index was removed.",
+            "max_hypotheses": 2,
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("observation", data)
+        self.assertIn("hypotheses_tested", data)
+        self.assertIn("conclusion", data)
+        self.assertIn("overall_confidence", data)
+        self.assertIn("providers", data)
+        self.assertIsInstance(data["hypotheses_tested"], list)
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_hypothesis_each_result_has_verdict(self, mock_llm):
+        mock_llm.side_effect = [
+            (self._HYP_GEN_RESP,  "gen"),
+            (self._HYP_TEST_RESP, "t1"),
+            (self._HYP_TEST_RESP, "t2"),
+            (self._HYP_CONC_RESP, "conc"),
+        ]
+        resp = client.post("/reason/hypothesis", json={
+            "observation": "The API returns 504 every night at 3am.",
+            "max_hypotheses": 2,
+        })
+        self.assertEqual(resp.status_code, 200)
+        for h in resp.json()["hypotheses_tested"]:
+            self.assertIn("statement", h)
+            self.assertIn("verdict", h)
+            self.assertIn("confidence", h)
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_hypothesis_overall_confidence_in_range(self, mock_llm):
+        mock_llm.side_effect = [
+            (self._HYP_GEN_RESP,  "gen"),
+            (self._HYP_TEST_RESP, "t1"),
+            (self._HYP_TEST_RESP, "t2"),
+            (self._HYP_CONC_RESP, "conc"),
+        ]
+        resp = client.post("/reason/hypothesis", json={
+            "observation": "CPU usage spikes every 5 minutes.",
+            "max_hypotheses": 2,
+        })
+        self.assertEqual(resp.status_code, 200)
+        conf = resp.json()["overall_confidence"]
+        self.assertGreaterEqual(conf, 0.0)
+        self.assertLessEqual(conf, 1.0)
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_hypothesis_max_clamped(self, mock_llm):
+        # 99 -> clamped to 8: 1 gen + 8 test + 1 conc = 10 calls
+        mock_llm.side_effect = (
+            [(self._HYP_GEN_RESP, "gen")] +
+            [(self._HYP_TEST_RESP, f"t{i}") for i in range(8)] +
+            [(self._HYP_CONC_RESP, "conc")]
+        )
+        resp = client.post("/reason/hypothesis", json={
+            "observation": "Test observation for clamping.",
+            "max_hypotheses": 99,
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertLessEqual(len(resp.json()["hypotheses_tested"]), 8)
+
+    # ── /settings/adaptive-routing ────────────────────────────────────────
+
+    def test_adaptive_routing_get_default(self):
+        resp = client.get("/settings/adaptive-routing")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertIn("enabled", data)
+        self.assertIn("confidence_threshold", data)
+        self.assertIn("escalation_tries", data)
+
+    def test_adaptive_routing_post_valid(self):
+        resp = client.post("/settings/adaptive-routing", json={
+            "enabled": True,
+            "confidence_threshold": 0.55,
+            "escalation_tries": 1,
+        })
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertAlmostEqual(data["confidence_threshold"], 0.55)
+        self.assertEqual(data["escalation_tries"], 1)
+        self.assertTrue(data["enabled"])
+
+    def test_adaptive_routing_invalid_threshold(self):
+        resp = client.post("/settings/adaptive-routing", json={"confidence_threshold": 1.5})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_adaptive_routing_invalid_tries(self):
+        resp = client.post("/settings/adaptive-routing", json={"escalation_tries": 99})
+        self.assertEqual(resp.status_code, 422)
+
+    def test_adaptive_routing_partial_update(self):
+        # Only update enabled flag, other values should persist from previous test
+        resp = client.post("/settings/adaptive-routing", json={"enabled": False})
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(resp.json()["enabled"])
+        # Re-enable for subsequent tests
+        client.post("/settings/adaptive-routing", json={"enabled": True, "confidence_threshold": 0.6, "escalation_tries": 2})
+
+    # ── thinking.py new functions exist ──────────────────────────────────
+
+    def test_all_new_thinking_functions_importable(self):
+        from src.thinking import (
+            build_debate_position_prompt,
+            build_debate_verdict_prompt,
+            parse_debate_turn,
+            parse_debate_verdict,
+            build_hypothesis_generation_prompt,
+            build_hypothesis_test_prompt,
+            build_hypothesis_conclusion_prompt,
+            parse_hypothesis_generation,
+            parse_hypothesis_test,
+            parse_hypothesis_conclusion,
+        )
+        # All imported successfully
+        self.assertTrue(callable(build_debate_position_prompt))

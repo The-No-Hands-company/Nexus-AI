@@ -155,3 +155,219 @@ def parse_consensus_response(response: str) -> dict:
             "approach1": "", "approach2": "", "approach3": "",
             "consensus": response, "confidence": 0.5,
         }
+
+
+# ── Multi-agent debate helpers ─────────────────────────────────────────────
+
+def build_debate_position_prompt(claim: str, role: str, prior_round: str = "") -> str:
+    """Build a debate round prompt for 'proponent' or 'critic' role.
+
+    ``role`` must be ``"proponent"`` or ``"critic"``.
+    ``prior_round`` is the opponent's previous argument (empty for round 1).
+    """
+    if role == "proponent":
+        persona = (
+            "You are the PROPONENT.  Your job is to argue strongly in FAVOUR of "
+            "the following claim, presenting the best possible evidence and reasoning."
+        )
+        stance = "Argue FOR"
+    else:
+        persona = (
+            "You are the CRITIC.  Your job is to argue strongly AGAINST the "
+            "following claim, identifying weaknesses, counter-evidence, and risks."
+        )
+        stance = "Argue AGAINST"
+
+    prior_section = (
+        f"\n\nOpponent's previous argument:\n{prior_round}\n\nRespond directly to the "
+        "opponent's points and advance your own position.\n"
+        if prior_round else ""
+    )
+
+    return (
+        persona + "\n\n"
+        "Claim: " + claim + "\n"
+        + prior_section
+        + f"\n{stance} the claim above.\n\n"
+        'Reply ONLY with valid JSON:\n'
+        '{"argument": "<your argument>", "key_points": ["<point1>", "<point2>"], '
+        '"confidence": 0.8}'
+    )
+
+
+def build_debate_verdict_prompt(claim: str, rounds: list) -> str:
+    """Build a final verdict prompt that synthesises the full debate transcript."""
+    transcript_parts = []
+    for i, r in enumerate(rounds, 1):
+        transcript_parts.append(f"Round {i} — Proponent: {r.get('proponent', '')}")
+        transcript_parts.append(f"Round {i} — Critic: {r.get('critic', '')}")
+    transcript = "\n\n".join(transcript_parts)
+
+    return (
+        "You are an impartial judge evaluating the following debate.\n\n"
+        "Claim: " + claim + "\n\n"
+        "Complete debate transcript:\n" + transcript + "\n\n"
+        "Weigh the arguments on both sides. "
+        "Provide a verdict, overall confidence, and a nuanced synthesis.\n\n"
+        'Reply ONLY with valid JSON:\n'
+        '{"verdict": "supported|refuted|inconclusive", "synthesis": "<balanced summary>", '
+        '"strongest_proponent_point": "<best argument for>", '
+        '"strongest_critic_point": "<best argument against>", '
+        '"confidence": 0.75}'
+    )
+
+
+def parse_debate_turn(response: str) -> dict:
+    """Parse a single debate turn response."""
+    try:
+        data = json.loads(response)
+        return {
+            "argument":    data.get("argument", response),
+            "key_points":  data.get("key_points", []),
+            "confidence":  float(data.get("confidence", 0.5)),
+        }
+    except Exception:
+        return {"argument": response, "key_points": [], "confidence": 0.5}
+
+
+def parse_debate_verdict(response: str) -> dict:
+    """Parse the final judge verdict response."""
+    try:
+        data = json.loads(response)
+        return {
+            "verdict":                    data.get("verdict", "inconclusive"),
+            "synthesis":                  data.get("synthesis", response),
+            "strongest_proponent_point":  data.get("strongest_proponent_point", ""),
+            "strongest_critic_point":     data.get("strongest_critic_point", ""),
+            "confidence":                 float(data.get("confidence", 0.5)),
+        }
+    except Exception:
+        return {
+            "verdict":                    "inconclusive",
+            "synthesis":                  response,
+            "strongest_proponent_point":  "",
+            "strongest_critic_point":     "",
+            "confidence":                 0.5,
+        }
+
+
+# ── Hypothesis testing helpers ──────────────────────────────────────────────
+
+def build_hypothesis_generation_prompt(observation: str, num_hypotheses: int = 4) -> str:
+    """Build a prompt that generates multiple competing hypotheses for an observation."""
+    return (
+        "You are a scientific thinker.  Given the observation below, generate "
+        f"{num_hypotheses} distinct, competing hypotheses that could explain it.\n\n"
+        "Observation: " + observation + "\n\n"
+        "For each hypothesis, provide: a concise statement, the reasoning that "
+        "supports it, and an initial plausibility score (0-1).\n\n"
+        'Reply ONLY with valid JSON:\n'
+        '{"hypotheses": ['
+        '{"id": 1, "statement": "...", "initial_reasoning": "...", "plausibility": 0.7}, '
+        '{"id": 2, "statement": "...", "initial_reasoning": "...", "plausibility": 0.5}'
+        ']}'
+    )
+
+
+def build_hypothesis_test_prompt(hypothesis: str, observation: str) -> str:
+    """Build a prompt that rigorously tests a single hypothesis against evidence."""
+    return (
+        "You are a rigorous scientist testing a hypothesis.\n\n"
+        "Observation: " + observation + "\n"
+        "Hypothesis: " + hypothesis + "\n\n"
+        "1. List evidence that SUPPORTS this hypothesis.\n"
+        "2. List evidence that CONTRADICTS this hypothesis.\n"
+        "3. Identify assumptions required for this hypothesis to hold.\n"
+        "4. Provide a final verdict: accept / reject / uncertain.\n"
+        "5. Provide a revised confidence score (0-1).\n\n"
+        'Reply ONLY with valid JSON:\n'
+        '{"evidence_for": ["<ev1>", "<ev2>"], '
+        '"evidence_against": ["<ev1>", "<ev2>"], '
+        '"assumptions": ["<a1>", "<a2>"], '
+        '"verdict": "accept", '
+        '"confidence": 0.8, '
+        '"explanation": "<brief explanation>"}'
+    )
+
+
+def build_hypothesis_conclusion_prompt(observation: str, results: list) -> str:
+    """Build a prompt that draws a final conclusion from all tested hypotheses."""
+    summaries = []
+    for r in results:
+        summaries.append(
+            f"  H{r.get('id', '?')}: {r.get('statement', '')} → "
+            f"{r.get('verdict', '?')} (confidence {r.get('confidence', 0):.2f})"
+        )
+    summary_text = "\n".join(summaries)
+
+    return (
+        "You are drawing a final scientific conclusion.\n\n"
+        "Observation: " + observation + "\n\n"
+        "Tested hypotheses and results:\n" + summary_text + "\n\n"
+        "Based on the evidence, state the most supported conclusion, "
+        "note any remaining uncertainty, and suggest next investigative steps.\n\n"
+        'Reply ONLY with valid JSON:\n'
+        '{"conclusion": "<final conclusion>", '
+        '"best_hypothesis_id": 1, '
+        '"uncertainty": "<remaining uncertainty>", '
+        '"next_steps": ["<step1>", "<step2>"], '
+        '"overall_confidence": 0.75}'
+    )
+
+
+def parse_hypothesis_generation(response: str) -> list:
+    """Parse the hypothesis generation LLM response."""
+    try:
+        data = json.loads(response)
+        hyps = data.get("hypotheses", [])
+        out = []
+        for h in hyps:
+            out.append({
+                "id":                int(h.get("id", 0)),
+                "statement":         str(h.get("statement", "")),
+                "initial_reasoning": str(h.get("initial_reasoning", "")),
+                "plausibility":      float(h.get("plausibility", 0.5)),
+            })
+        return out
+    except Exception:
+        return [{"id": 1, "statement": response, "initial_reasoning": "", "plausibility": 0.5}]
+
+
+def parse_hypothesis_test(response: str) -> dict:
+    """Parse a single hypothesis test response."""
+    try:
+        data = json.loads(response)
+        return {
+            "evidence_for":     data.get("evidence_for", []),
+            "evidence_against": data.get("evidence_against", []),
+            "assumptions":      data.get("assumptions", []),
+            "verdict":          data.get("verdict", "uncertain"),
+            "confidence":       float(data.get("confidence", 0.5)),
+            "explanation":      data.get("explanation", ""),
+        }
+    except Exception:
+        return {
+            "evidence_for": [], "evidence_against": [], "assumptions": [],
+            "verdict": "uncertain", "confidence": 0.5, "explanation": response,
+        }
+
+
+def parse_hypothesis_conclusion(response: str) -> dict:
+    """Parse the final hypothesis conclusion response."""
+    try:
+        data = json.loads(response)
+        return {
+            "conclusion":         data.get("conclusion", response),
+            "best_hypothesis_id": int(data.get("best_hypothesis_id", 0)),
+            "uncertainty":        data.get("uncertainty", ""),
+            "next_steps":         data.get("next_steps", []),
+            "overall_confidence": float(data.get("overall_confidence", 0.5)),
+        }
+    except Exception:
+        return {
+            "conclusion":         response,
+            "best_hypothesis_id": 0,
+            "uncertainty":        "",
+            "next_steps":         [],
+            "overall_confidence": 0.5,
+        }

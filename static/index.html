@@ -983,6 +983,9 @@
       <button onclick="openDiffViewer();toggleOverflow()">📊 Diff viewer</button>
       <button onclick="openSelfReviewPanel();toggleOverflow()">🔄 Self-improve</button>
       <button onclick="openDocumentsPanel();toggleOverflow()">📄 Documents</button>
+      <button onclick="openDebatePanel();toggleOverflow()">⚔️ Debate</button>
+      <button onclick="openHypothesisPanel();toggleOverflow()">🔬 Hypothesis</button>
+      <button onclick="openAdaptiveRoutingPanel();toggleOverflow()">🎯 Adaptive routing</button>
     </div>
   </div>
 </header>
@@ -1545,6 +1548,78 @@
     <div id="doc-status" style="font-size:.72rem;color:var(--muted);"></div>
   </div>
   <div id="doc-output" style="flex:1;overflow-y:auto;padding:12px 14px;font-size:.82rem;"></div>
+</div>
+
+<!-- ── Debate panel ─────────────────────────────────────────────────────────── -->
+<div id="debate-panel" style="position:fixed;bottom:80px;right:20px;width:540px;max-height:660px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:47;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">⚔️ Multi-Agent Debate</span>
+    <button class="panel-btn" onclick="closeDebatePanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+    <textarea id="debate-claim" placeholder="Enter claim to debate (e.g. TypeScript is strictly better than JavaScript)" rows="2"
+      style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;resize:vertical;"></textarea>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <label style="font-size:.78rem;color:var(--muted);">Rounds:</label>
+      <input id="debate-rounds" type="number" min="1" max="5" value="2"
+        style="width:56px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runDebate()">Run Debate</button>
+    </div>
+    <div id="debate-status" style="font-size:.72rem;color:var(--muted);"></div>
+  </div>
+  <div id="debate-output" style="flex:1;overflow-y:auto;padding:12px 14px;font-size:.82rem;"></div>
+</div>
+
+<!-- ── Hypothesis panel ──────────────────────────────────────────────────────── -->
+<div id="hypothesis-panel" style="position:fixed;bottom:80px;right:20px;width:540px;max-height:660px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:48;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🔬 Hypothesis Testing</span>
+    <button class="panel-btn" onclick="closeHypothesisPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+    <textarea id="hypothesis-obs" placeholder="Describe the observation (e.g. Response latency spiked 3× after deploys on Tuesdays)" rows="3"
+      style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;resize:vertical;"></textarea>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <label style="font-size:.78rem;color:var(--muted);">Max hypotheses:</label>
+      <input id="hypothesis-max" type="number" min="1" max="8" value="4"
+        style="width:56px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runHypothesis()">Test Hypotheses</button>
+    </div>
+    <div id="hypothesis-status" style="font-size:.72rem;color:var(--muted);"></div>
+  </div>
+  <div id="hypothesis-output" style="flex:1;overflow-y:auto;padding:12px 14px;font-size:.82rem;"></div>
+</div>
+
+<!-- ── Adaptive routing panel ────────────────────────────────────────────────── -->
+<div id="adaptive-routing-panel" style="position:fixed;bottom:80px;right:20px;width:420px;max-height:500px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:49;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🎯 Adaptive Confidence Routing</span>
+    <button class="panel-btn" onclick="closeAdaptiveRoutingPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:12px 14px;display:flex;flex-direction:column;gap:12px;">
+    <p style="font-size:.78rem;color:var(--muted);">
+      When the AI's confidence falls below the threshold, it automatically escalates to a stronger model tier.
+    </p>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <label style="font-size:.82rem;min-width:140px;">Enabled:</label>
+      <input id="ar-enabled" type="checkbox" checked style="width:16px;height:16px;cursor:pointer;" />
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <label style="font-size:.82rem;min-width:140px;">Confidence threshold:</label>
+      <input id="ar-threshold" type="number" min="0" max="1" step="0.05" value="0.6"
+        style="width:72px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <label style="font-size:.82rem;min-width:140px;">Escalation tries:</label>
+      <input id="ar-tries" type="number" min="0" max="5" value="2"
+        style="width:56px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="saveAdaptiveRouting()">Save</button>
+      <button class="btn-ghost" style="height:32px;font-size:.8rem;" onclick="loadAdaptiveRouting()">Reload</button>
+    </div>
+    <div id="ar-status" style="font-size:.75rem;color:var(--muted);"></div>
+  </div>
 </div>
 
 <script>
@@ -2651,6 +2726,9 @@ function _commandPool() {
     { label: 'Open diff viewer', tag: 'panel', run: () => openDiffViewer() },
     { label: 'Open self-improvement loop', tag: 'panel', run: () => openSelfReviewPanel() },
     { label: 'Open document understanding', tag: 'panel', run: () => openDocumentsPanel() },
+    { label: 'Open debate arena', tag: 'panel', run: () => openDebatePanel() },
+    { label: 'Open hypothesis testing', tag: 'panel', run: () => openHypothesisPanel() },
+    { label: 'Open adaptive routing settings', tag: 'panel', run: () => openAdaptiveRoutingPanel() },
     { label: 'Open safety audit log', tag: 'panel', run: () => openSafetyAudit() },
     { label: 'Open safety scanner', tag: 'panel', run: () => openSafetyScanner() },
     { label: 'Open usage dashboard', tag: 'panel', run: () => openUsageModal() },
@@ -3001,6 +3079,140 @@ async function runDocumentIngest() {
     if (d.error) { status.textContent = `❌ ${d.error}`; return; }
     status.textContent = `✓ Ingested ${d.ingested_chunks} chunk(s)`;
     out.innerHTML = `<div style="font-size:.82rem;color:var(--text);">Document <b>${d.filename}</b> (${d.type}) ingested as ${d.ingested_chunks} RAG chunks.</div>`;
+  } catch(e) { status.textContent = `❌ ${e.message}`; }
+}
+
+// ── DEBATE PANEL ──────────────────────────────────────────────────────────
+function openDebatePanel() {
+  document.getElementById('debate-panel').style.display = 'flex';
+}
+function closeDebatePanel() {
+  document.getElementById('debate-panel').style.display = 'none';
+}
+async function runDebate() {
+  const claim  = document.getElementById('debate-claim').value.trim();
+  const rounds = parseInt(document.getElementById('debate-rounds').value || '2', 10);
+  const status = document.getElementById('debate-status');
+  const out    = document.getElementById('debate-output');
+  if (!claim) { status.textContent = '❌ Enter a claim.'; return; }
+  status.textContent = `Running ${rounds} round(s)…`;
+  out.innerHTML = '';
+  try {
+    const r = await fetch('/reason/debate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ claim, rounds }),
+    });
+    const d = await r.json();
+    if (d.error || d.detail) { status.textContent = `❌ ${d.error || d.detail}`; return; }
+    status.textContent = `✓ ${rounds} round(s) complete · verdict: ${d.verdict} (conf ${(d.confidence*100).toFixed(0)}%)`;
+
+    let html = `<div style="margin-bottom:12px;padding:10px;background:var(--surface2);border-radius:8px;">
+      <b style="font-size:.85rem;">⚖️ Verdict: <span style="color:${d.verdict==='supported'?'#4ade80':d.verdict==='refuted'?'#f87171':'#facc15'}">${d.verdict.toUpperCase()}</span></b>
+      <div style="margin-top:6px;font-size:.82rem;color:var(--text);">${d.synthesis}</div>
+    </div>`;
+
+    d.transcript.forEach(rnd => {
+      html += `<details style="margin-bottom:8px;"><summary style="cursor:pointer;font-size:.78rem;font-weight:700;color:var(--muted);">Round ${rnd.round}</summary>
+        <div style="margin-top:6px;padding:8px;background:var(--surface2);border-radius:6px;font-size:.8rem;">
+          <div style="color:#4ade80;margin-bottom:4px;">✅ Proponent: ${rnd.proponent}</div>
+          <div style="color:#f87171;margin-top:6px;">🔴 Critic: ${rnd.critic}</div>
+        </div></details>`;
+    });
+
+    html += `<div style="margin-top:8px;font-size:.76rem;color:var(--muted);">
+      Strongest FOR: ${d.strongest_proponent_point}<br>
+      Strongest AGAINST: ${d.strongest_critic_point}
+    </div>`;
+    out.innerHTML = html;
+  } catch(e) { status.textContent = `❌ ${e.message}`; }
+}
+
+// ── HYPOTHESIS PANEL ─────────────────────────────────────────────────────
+function openHypothesisPanel() {
+  document.getElementById('hypothesis-panel').style.display = 'flex';
+}
+function closeHypothesisPanel() {
+  document.getElementById('hypothesis-panel').style.display = 'none';
+}
+async function runHypothesis() {
+  const obs    = document.getElementById('hypothesis-obs').value.trim();
+  const maxH   = parseInt(document.getElementById('hypothesis-max').value || '4', 10);
+  const status = document.getElementById('hypothesis-status');
+  const out    = document.getElementById('hypothesis-output');
+  if (!obs) { status.textContent = '❌ Enter an observation.'; return; }
+  status.textContent = `Generating & testing up to ${maxH} hypotheses…`;
+  out.innerHTML = '';
+  try {
+    const r = await fetch('/reason/hypothesis', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ observation: obs, max_hypotheses: maxH }),
+    });
+    const d = await r.json();
+    if (d.error || d.detail) { status.textContent = `❌ ${d.error || d.detail}`; return; }
+    const n = d.hypotheses_tested?.length || 0;
+    status.textContent = `✓ ${n} hypotheses tested · conf ${(d.overall_confidence*100).toFixed(0)}%`;
+
+    let html = `<div style="margin-bottom:12px;padding:10px;background:var(--surface2);border-radius:8px;">
+      <b style="font-size:.85rem;">🎯 Conclusion</b>
+      <div style="margin-top:6px;font-size:.82rem;color:var(--text);">${d.conclusion}</div>
+      ${d.uncertainty ? `<div style="margin-top:4px;font-size:.76rem;color:var(--muted);">Uncertainty: ${d.uncertainty}</div>` : ''}
+    </div>`;
+
+    (d.hypotheses_tested || []).forEach(h => {
+      const verdictColor = h.verdict==='accept' ? '#4ade80' : h.verdict==='reject' ? '#f87171' : '#facc15';
+      html += `<details style="margin-bottom:8px;"><summary style="cursor:pointer;font-size:.78rem;font-weight:700;color:var(--muted);">
+        H${h.id}: ${h.statement} — <span style="color:${verdictColor}">${h.verdict.toUpperCase()}</span> (${(h.confidence*100).toFixed(0)}%)</summary>
+        <div style="margin-top:6px;padding:8px;background:var(--surface2);border-radius:6px;font-size:.78rem;">
+          ${h.evidence_for?.length ? `<div style="color:#4ade80;">For: ${h.evidence_for.join('; ')}</div>` : ''}
+          ${h.evidence_against?.length ? `<div style="color:#f87171;margin-top:4px;">Against: ${h.evidence_against.join('; ')}</div>` : ''}
+          ${h.explanation ? `<div style="margin-top:4px;color:var(--text);">${h.explanation}</div>` : ''}
+        </div></details>`;
+    });
+
+    if (d.next_steps?.length) {
+      html += `<div style="margin-top:8px;font-size:.76rem;color:var(--muted);">Next steps: ${d.next_steps.join(' · ')}</div>`;
+    }
+    out.innerHTML = html;
+  } catch(e) { status.textContent = `❌ ${e.message}`; }
+}
+
+// ── ADAPTIVE ROUTING PANEL ────────────────────────────────────────────────
+function openAdaptiveRoutingPanel() {
+  document.getElementById('adaptive-routing-panel').style.display = 'flex';
+  loadAdaptiveRouting();
+}
+function closeAdaptiveRoutingPanel() {
+  document.getElementById('adaptive-routing-panel').style.display = 'none';
+}
+async function loadAdaptiveRouting() {
+  const status = document.getElementById('ar-status');
+  try {
+    const r = await fetch('/settings/adaptive-routing');
+    const d = await r.json();
+    document.getElementById('ar-enabled').checked = d.enabled !== false;
+    document.getElementById('ar-threshold').value = d.confidence_threshold ?? 0.6;
+    document.getElementById('ar-tries').value = d.escalation_tries ?? 2;
+    status.textContent = 'Loaded.';
+  } catch(e) { status.textContent = `❌ ${e.message}`; }
+}
+async function saveAdaptiveRouting() {
+  const status = document.getElementById('ar-status');
+  const body = {
+    enabled: document.getElementById('ar-enabled').checked,
+    confidence_threshold: parseFloat(document.getElementById('ar-threshold').value),
+    escalation_tries: parseInt(document.getElementById('ar-tries').value, 10),
+  };
+  try {
+    const r = await fetch('/settings/adaptive-routing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.error) { status.textContent = `❌ ${d.error}`; return; }
+    status.textContent = `✓ Saved — threshold ${d.confidence_threshold}, tries ${d.escalation_tries}`;
   } catch(e) { status.textContent = `❌ ${e.message}`; }
 }
 
