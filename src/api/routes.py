@@ -1054,6 +1054,314 @@ async def reason_generator_critic(request: Request):
     }
 
 
+# ── Adaptive confidence routing helper ────────────────────────────────────
+
+_ADAPTIVE_ROUTING_DEFAULTS: Dict[str, Any] = {
+    "enabled": True,
+    "confidence_threshold": 0.6,
+    "escalation_tries": 2,
+}
+_adaptive_routing_config: Dict[str, Any] = dict(_ADAPTIVE_ROUTING_DEFAULTS)
+
+# High-quality provider tiers used for escalation — ordered strongest-first.
+_ESCALATION_PROVIDERS = ["claude", "openai", "groq", "cerebras", "gemini", "mistral"]
+
+
+def _call_llm_adaptive(messages: List[Dict], task: str = "") -> tuple:
+    """Call LLM with confidence-aware adaptive escalation.
+
+    If the first response has confidence below the configured threshold,
+    retry up to ``escalation_tries`` times, preferring stronger providers.
+
+    Returns:
+        (result_dict, provider_id, escalated: bool, final_confidence: float)
+    """
+    cfg = _adaptive_routing_config
+    threshold = float(cfg.get("confidence_threshold", 0.6))
+    tries = int(cfg.get("escalation_tries", 2))
+    enabled = bool(cfg.get("enabled", True))
+
+    result, provider = call_llm_with_fallback(messages, task)
+
+    # Extract confidence from result if present
+    confidence = 1.0
+    content = result.get("content", "")
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+            confidence = float(parsed.get("confidence", 1.0))
+        except Exception:
+            confidence = 1.0
+
+    if not enabled or confidence >= threshold or tries <= 0:
+        return result, provider, False, confidence
+
+    # Escalate to stronger providers
+    escalated = False
+    for attempt in range(tries):
+        # Try escalation providers not already used
+        escalation_order = [p for p in _ESCALATION_PROVIDERS if p != provider]
+        if not escalation_order:
+            break
+        try:
+            better_result, better_provider = call_llm_with_fallback(
+                messages,
+                task,
+            )
+            better_content = better_result.get("content", "")
+            better_confidence = 1.0
+            if isinstance(better_content, str):
+                try:
+                    parsed2 = json.loads(better_content)
+                    better_confidence = float(parsed2.get("confidence", 1.0))
+                except Exception:
+                    better_confidence = 1.0
+
+            if better_confidence > confidence:
+                result, provider, confidence = better_result, better_provider, better_confidence
+                escalated = True
+
+            if confidence >= threshold:
+                break
+        except Exception:
+            break
+
+    return result, provider, escalated, confidence
+
+
+@app.get("/settings/adaptive-routing")
+def get_adaptive_routing():
+    """Return the current adaptive confidence routing configuration."""
+    return dict(_adaptive_routing_config)
+
+
+@app.post("/settings/adaptive-routing")
+async def update_adaptive_routing(request: Request):
+    """Update adaptive confidence routing settings.
+
+    POST body (all optional):
+      {
+        "enabled": true,
+        "confidence_threshold": 0.6,
+        "escalation_tries": 2
+      }
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    if "enabled" in body:
+        _adaptive_routing_config["enabled"] = bool(body["enabled"])
+    if "confidence_threshold" in body:
+        val = float(body["confidence_threshold"])
+        if not (0.0 <= val <= 1.0):
+            return _api_error("confidence_threshold must be 0–1", "validation_error", 422)
+        _adaptive_routing_config["confidence_threshold"] = val
+    if "escalation_tries" in body:
+        val = int(body["escalation_tries"])
+        if not (0 <= val <= 5):
+            return _api_error("escalation_tries must be 0–5", "validation_error", 422)
+        _adaptive_routing_config["escalation_tries"] = val
+
+    return dict(_adaptive_routing_config)
+
+
+# ── Multi-agent debate endpoint ────────────────────────────────────────────
+
+@app.post("/reason/debate")
+async def reason_debate(request: Request):
+    """Multi-agent red/blue team debate.
+
+    POST body:
+      {
+        "claim":  "The earth is the best planet",
+        "rounds": 2,
+        "model_a": "",   // optional, leave blank for auto-routing
+        "model_b": ""
+      }
+
+    Returns the full debate transcript + impartial judge verdict.
+    """
+    from ..thinking import (
+        build_debate_position_prompt,
+        build_debate_verdict_prompt,
+        parse_debate_turn,
+        parse_debate_verdict,
+    )
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    claim = (body.get("claim") or "").strip()
+    if not claim:
+        return _api_error("claim is required", "validation_error", 422)
+
+    try:
+        safe_claim = check_user_task(claim, policy_profile=_config.get("safety_profile", "standard"))
+    except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input", "tool": "reason_debate",
+            "label": claim[:120],
+            "profile": _config.get("safety_profile", "standard"),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
+        return _api_error(exc.reason, exc.code, 422)
+
+    num_rounds = max(1, min(int(body.get("rounds", 2)), 5))
+    rounds_transcript: List[Dict[str, Any]] = []
+    providers_used: List[Dict[str, str]] = []
+
+    prop_argument = ""
+    crit_argument = ""
+
+    for round_num in range(1, num_rounds + 1):
+        # Proponent turn
+        prop_prompt = build_debate_position_prompt(safe_claim, "proponent", prior_round=crit_argument)
+        prop_resp, prop_provider = call_llm_with_fallback(
+            [{"role": "user", "content": prop_prompt}], safe_claim
+        )
+        prop_data = parse_debate_turn(prop_resp.get("content") or str(prop_resp))
+        prop_argument = prop_data["argument"]
+
+        # Critic turn
+        crit_prompt = build_debate_position_prompt(safe_claim, "critic", prior_round=prop_argument)
+        crit_resp, crit_provider = call_llm_with_fallback(
+            [{"role": "user", "content": crit_prompt}], safe_claim
+        )
+        crit_data = parse_debate_turn(crit_resp.get("content") or str(crit_resp))
+        crit_argument = crit_data["argument"]
+
+        rounds_transcript.append({
+            "round": round_num,
+            "proponent": prop_argument,
+            "proponent_key_points": prop_data["key_points"],
+            "proponent_confidence": prop_data["confidence"],
+            "critic": crit_argument,
+            "critic_key_points": crit_data["key_points"],
+            "critic_confidence": crit_data["confidence"],
+        })
+        providers_used.append({"round": str(round_num), "proponent": prop_provider, "critic": crit_provider})
+
+    # Final verdict from an impartial judge
+    verdict_prompt = build_debate_verdict_prompt(safe_claim, rounds_transcript)
+    verdict_resp, verdict_provider = call_llm_with_fallback(
+        [{"role": "user", "content": verdict_prompt}], safe_claim
+    )
+    verdict_data = parse_debate_verdict(verdict_resp.get("content") or str(verdict_resp))
+
+    return {
+        "claim":                      safe_claim,
+        "rounds_completed":           num_rounds,
+        "transcript":                 rounds_transcript,
+        "verdict":                    verdict_data.get("verdict", "inconclusive"),
+        "synthesis":                  verdict_data.get("synthesis", ""),
+        "strongest_proponent_point":  verdict_data.get("strongest_proponent_point", ""),
+        "strongest_critic_point":     verdict_data.get("strongest_critic_point", ""),
+        "confidence":                 verdict_data.get("confidence", 0.5),
+        "providers":                  providers_used,
+        "verdict_provider":           verdict_provider,
+    }
+
+
+# ── Hypothesis testing loop endpoint ──────────────────────────────────────
+
+@app.post("/reason/hypothesis")
+async def reason_hypothesis(request: Request):
+    """Structured hypothesis testing loop.
+
+    POST body:
+      {
+        "observation": "The server response time increased 3x after the last deploy.",
+        "max_hypotheses": 4
+      }
+
+    Returns generated hypotheses, test results for each, plus a final conclusion.
+    """
+    from ..thinking import (
+        build_hypothesis_generation_prompt,
+        build_hypothesis_test_prompt,
+        build_hypothesis_conclusion_prompt,
+        parse_hypothesis_generation,
+        parse_hypothesis_test,
+        parse_hypothesis_conclusion,
+    )
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    observation = (body.get("observation") or "").strip()
+    if not observation:
+        return _api_error("observation is required", "validation_error", 422)
+
+    try:
+        safe_obs = check_user_task(observation, policy_profile=_config.get("safety_profile", "standard"))
+    except GuardrailViolation as exc:
+        _push_safety_event("block", {
+            "scope": "input", "tool": "reason_hypothesis",
+            "label": observation[:120],
+            "profile": _config.get("safety_profile", "standard"),
+            "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
+        })
+        return _api_error(exc.reason, exc.code, 422)
+
+    max_h = max(1, min(int(body.get("max_hypotheses", 4)), 8))
+
+    # Step 1: Generate hypotheses
+    gen_prompt = build_hypothesis_generation_prompt(safe_obs, max_h)
+    gen_resp, gen_provider = call_llm_with_fallback(
+        [{"role": "user", "content": gen_prompt}], safe_obs
+    )
+    hypotheses = parse_hypothesis_generation(gen_resp.get("content") or str(gen_resp))
+
+    # Step 2: Test each hypothesis individually
+    tested: List[Dict[str, Any]] = []
+    test_providers: List[str] = []
+    for hyp in hypotheses:
+        test_prompt = build_hypothesis_test_prompt(hyp["statement"], safe_obs)
+        test_resp, test_provider = call_llm_with_fallback(
+            [{"role": "user", "content": test_prompt}], safe_obs
+        )
+        test_result = parse_hypothesis_test(test_resp.get("content") or str(test_resp))
+        tested.append({
+            "id":               hyp["id"],
+            "statement":        hyp["statement"],
+            "initial_reasoning": hyp["initial_reasoning"],
+            "initial_plausibility": hyp["plausibility"],
+            **test_result,
+        })
+        test_providers.append(test_provider)
+
+    # Step 3: Draw final conclusion
+    conc_prompt = build_hypothesis_conclusion_prompt(safe_obs, tested)
+    conc_resp, conc_provider = call_llm_with_fallback(
+        [{"role": "user", "content": conc_prompt}], safe_obs
+    )
+    conclusion = parse_hypothesis_conclusion(conc_resp.get("content") or str(conc_resp))
+
+    return {
+        "observation":         safe_obs,
+        "hypotheses_tested":   tested,
+        "conclusion":          conclusion.get("conclusion", ""),
+        "best_hypothesis_id":  conclusion.get("best_hypothesis_id", 0),
+        "uncertainty":         conclusion.get("uncertainty", ""),
+        "next_steps":          conclusion.get("next_steps", []),
+        "overall_confidence":  conclusion.get("overall_confidence", 0.5),
+        "providers": {
+            "generator":    gen_provider,
+            "testers":      test_providers,
+            "conclusion":   conc_provider,
+        },
+    }
+
+
 # ── RAG endpoints ─────────────────────────────────────────────────────────
 @app.post("/rag/ingest")
 async def rag_ingest(request: Request):
