@@ -84,3 +84,30 @@ async function saveSettings(){
   await refreshSessionSafetyUI();
   await refreshProviders();
 }
+
+// ── SESSION SAFETY OVERRIDE ────────────────────────────────────────────────────
+async function refreshSessionSafetyUI() {
+  if(!sid) return;
+  const sel = document.getElementById('session-safety-sel');
+  const d = await fetch(`/session/${sid}/safety`).then(r=>r.json()).catch(()=>null);
+  if(!d) return;
+  if(sel) sel.value = d.session_profile||'';
+  updateSafetyBadge(d.effective_profile||d.global_profile||'standard', d.session_profile ? 'session' : 'global');
+}
+
+async function initSessionSafetySelector(profiles) {
+  const sel = document.getElementById('session-safety-sel');
+  if(!sel) return;
+  sel.innerHTML = '<option value="">— global default —</option>'
+    + profiles.map(p=>`<option value="${p}">${p.charAt(0).toUpperCase()+p.slice(1)}</option>`).join('');
+  await refreshSessionSafetyUI();
+  sel.onchange = async () => {
+    const profile = sel.value || null;
+    const resp = await fetch(`/session/${sid}/safety`,{method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({safety_profile: profile})});
+    const data = await resp.json().catch(()=>null);
+    const effective = data?.effective_profile || profile || 'standard';
+    updateSafetyBadge(effective, data?.session_profile ? 'session' : 'global');
+  };
+}

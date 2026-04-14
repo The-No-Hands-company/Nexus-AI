@@ -162,3 +162,22 @@ async function deleteProject(id) {
   if (activeProjectId === id) activeProjectId = null;
   await refreshProjectsModal();
 }
+
+function showMemoryBadge(){
+  const badge=document.createElement('div');
+  badge.style.cssText='font-size:.65rem;color:var(--teal);text-align:center;padding:6px;';
+  badge.textContent='🧠 Memory loaded from previous sessions';
+  document.getElementById('welcome').insertBefore(badge,
+    document.getElementById('welcome').querySelector('.chips'));
+}
+
+async function loadMemoryCount(){
+  const d=await fetch('/memory').then(r=>r.json()).catch(()=>({memories:[]}));
+  document.getElementById('mem-count').textContent=(d.memories||[]).length;
+}
+
+async function clearMemory(){
+  if(!confirm('Clear all memory?')) return;
+  await fetch('/memory',{method:'DELETE'});
+  await loadMemoryCount();
+}

@@ -1627,55 +1627,7 @@
 <script>
 marked.setOptions({breaks:true,gfm:true});
 
-// ── PWA SERVICE WORKER ────────────────────────────────────────────────────────
-if('serviceWorker' in navigator){
-  navigator.serviceWorker.register('/sw.js').catch(()=>{});
-}
-let deferredInstall=null;
-window.addEventListener('beforeinstallprompt',e=>{
-  e.preventDefault(); deferredInstall=e;
-  document.getElementById('install-banner').classList.add('show');
-});
-document.getElementById('install-btn')?.addEventListener('click',async()=>{
-  if(!deferredInstall) return;
-  deferredInstall.prompt();
-  const {outcome}=await deferredInstall.userChoice;
-  deferredInstall=null;
-  document.getElementById('install-banner').classList.remove('show');
-});
-function dismissInstall(){
-  document.getElementById('install-banner').classList.remove('show');
-  localStorage.setItem('install-dismissed','1');
-}
-if(localStorage.getItem('install-dismissed')){
-  // don't show again this session
-}
-
-// ── HAPTIC HELPER ─────────────────────────────────────────────────────────────
-function haptic(type='light'){
-  if(!navigator.vibrate) return;
-  if(type==='light') navigator.vibrate(10);
-  else if(type==='medium') navigator.vibrate(25);
-  else if(type==='success') navigator.vibrate([10,50,10]);
-}
-
-// ── SWIPE TO OPEN SIDEBAR ─────────────────────────────────────────────────────
-(()=>{
-  let startX=0, startY=0;
-  document.addEventListener('touchstart',e=>{
-    startX=e.touches[0].clientX;
-    startY=e.touches[0].clientY;
-  },{passive:true});
-  document.addEventListener('touchend',e=>{
-    const dx=e.changedTouches[0].clientX-startX;
-    const dy=Math.abs(e.changedTouches[0].clientY-startY);
-    if(dy>40) return; // vertical swipe — ignore
-    if(dx>60 && startX<40 && !sidebarOpen){toggleSidebar();haptic('light')}
-    if(dx<-60 && sidebarOpen){closeSidebar();haptic('light')}
-  },{passive:true});
-})();
-
-marked.setOptions({breaks:true,gfm:true});
+// Device/install/haptic utilities moved to static/js/utilities/device-utils.js
 
 let sid=null, busy=false, drawerOpen=false, sidebarOpen=false;
 let attachedFiles=[], activeChatId=null;
@@ -1687,81 +1639,12 @@ let artifactCount=0;
 // UI helper utilities moved to static/js/utilities/ui-helpers.js
 
 // ── ARTIFACT RENDERER ──────────────────────────────────────────────────────
-function makeArtifact(path, content){
-  const id='artifact-'+(++artifactCount);
-  const blob=new Blob([content],{type:'text/html'});
-  const url=URL.createObjectURL(blob);
-  const ext=(path||'').split('.').pop()||'html';
-  return `<div class="artifact-wrap">
-    <div class="artifact-header">
-      <span>✨ ${esc(path||'artifact.html')}</span>
-      <div class="artifact-actions">
-        <button class="artifact-btn" onclick="toggleArtifact('${id}')">⤢ Expand</button>
-        <button class="artifact-btn" onclick="window.open('${url}','_blank')">↗ Open</button>
-        <button class="artifact-btn" onclick="copyArtifact('${id}')">⎘ Copy</button>
-      </div>
-    </div>
-    <iframe id="${id}" class="artifact-frame" src="${url}" sandbox="allow-scripts allow-same-origin"></iframe>
-  </div>`;
-}
-function toggleArtifact(id){
-  const f=document.getElementById(id);
-  f.classList.toggle('expanded');
-  f.style.maxHeight=f.classList.contains('expanded')?'800px':'500px';
-}
-function copyArtifact(id){
-  const f=document.getElementById(id);
-  const src=f.srcdoc||'';
-  navigator.clipboard.writeText(src).catch(()=>{});
-}
-
-function addSysMsg(text){
-  const msgs=document.getElementById('messages'),typing=document.getElementById('typing');
-  const el=document.createElement('div');el.className='sys-msg';el.textContent=text;
-  msgs.insertBefore(el,typing);scrollBottom();
-}
+// Artifact and system-message utilities moved to static/js/utilities/artifacts.js
 
 // ── INIT ──────────────────────────────────────────────────────────────────────
 // ── PERSONAS ──────────────────────────────────────────────────────────────────
-let activePersona = {id:'assistant',icon:'🤖',label:'Assistant',color:'#7c6af7'};
 window._providerCache = [];
-
-async function loadPersonas(){
-  const d=await fetch('/personas').then(r=>r.json()).catch(()=>({personas:[],active:'assistant'}));
-  renderPersonaStrip(d.personas||[],d.active||'assistant');
-  const found=(d.personas||[]).find(p=>p.id===d.active);
-  if(found) setActivePersonaUI(found);
-}
-
-function renderPersonaStrip(personas,activeId){
-  const strip=document.getElementById('persona-strip');
-  strip.innerHTML=personas.map(p=>`
-    <button class="persona-btn ${p.id===activeId?'active':''}" id="pb-${p.id}"
-      onclick="switchPersona('${p.id}')"
-      style="${p.id===activeId?`background:${p.color};border-color:${p.color}`:''}">
-      <span class="p-icon">${p.icon}</span>${p.label}
-    </button>`).join('');
-}
-
-async function switchPersona(id){
-  haptic('light');
-  const d=await fetch(`/personas/${id}`,{method:'POST'}).then(r=>r.json()).catch(()=>null);
-  if(!d) return;
-  await loadPersonas();
-  const personas=await fetch('/personas').then(r=>r.json()).then(d=>d.personas).catch(()=>[]);
-  const p=personas.find(x=>x.id===id);
-  if(p) setActivePersonaUI(p);
-}
-
-function setActivePersonaUI(p){
-  activePersona=p;
-  // Update theme color
-  document.querySelector('meta[name=theme-color]')?.setAttribute('content',p.color);
-  // Update accent CSS var
-  document.documentElement.style.setProperty('--accent',p.color);
-  const accentD=p.color+'cc';
-  document.documentElement.style.setProperty('--accent-d',accentD);
-}
+// Persona runtime utilities moved to static/js/utilities/personas-runtime.js
 
 async function init(){
   const [,pd,sd,cfg,safety] = await Promise.all([
@@ -1791,29 +1674,13 @@ async function init(){
   setupVoice();
 }
 
-function showMemoryBadge(){
-  const badge=document.createElement('div');
-  badge.style.cssText='font-size:.65rem;color:var(--teal);text-align:center;padding:6px;';
-  badge.textContent='🧠 Memory loaded from previous sessions';
-  document.getElementById('welcome').insertBefore(badge,
-    document.getElementById('welcome').querySelector('.chips'));
-}
-
 // Provider utilities moved to static/js/utilities/providers.js
 
 // ── SIDEBAR ────────────────────────────────────────────────────────────────────
 // Sidebar utilities moved to static/js/utilities/sidebar.js
 
 // ── MEMORY ─────────────────────────────────────────────────────────────────────
-async function loadMemoryCount(){
-  const d=await fetch('/memory').then(r=>r.json()).catch(()=>({memories:[]}));
-  document.getElementById('mem-count').textContent=(d.memories||[]).length;
-}
-async function clearMemory(){
-  if(!confirm('Clear all memory?')) return;
-  await fetch('/memory',{method:'DELETE'});
-  await loadMemoryCount();
-}
+// Memory count utilities moved to static/js/utilities/memory-projects.js
 
 // ── SETTINGS ───────────────────────────────────────────────────────────────────
 // Settings utilities moved to static/js/utilities/settings.js
@@ -2269,34 +2136,7 @@ document.addEventListener('keydown', e => {
 // Usage dashboard utilities moved to static/js/utilities/usage.js
 
 
-// ── SESSION SAFETY OVERRIDE ────────────────────────────────────────────────────
-async function refreshSessionSafetyUI() {
-  if(!sid) return;
-  const sel = document.getElementById('session-safety-sel');
-  const d = await fetch(`/session/${sid}/safety`).then(r=>r.json()).catch(()=>null);
-  if(!d) return;
-  if(sel) sel.value = d.session_profile||'';
-  updateSafetyBadge(d.effective_profile||d.global_profile||'standard', d.session_profile ? 'session' : 'global');
-}
-
-async function initSessionSafetySelector(profiles) {
-  const sel = document.getElementById('session-safety-sel');
-  if(!sel) return;
-  // populate options (keep the "global default" blank option)
-  sel.innerHTML = '<option value="">— global default —</option>'
-    + profiles.map(p=>`<option value="${p}">${p.charAt(0).toUpperCase()+p.slice(1)}</option>`).join('');
-  await refreshSessionSafetyUI();
-  sel.onchange = async () => {
-    const profile = sel.value || null;
-    const resp = await fetch(`/session/${sid}/safety`,{method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({safety_profile: profile})});
-    const data = await resp.json().catch(()=>null);
-    // reflect effective profile in header badge
-    const effective = data?.effective_profile || profile || 'standard';
-    updateSafetyBadge(effective, data?.session_profile ? 'session' : 'global');
-  };
-}
+// Session safety override utilities moved to static/js/utilities/settings.js
 
 // Provider health utilities moved to static/js/utilities/providers.js
 // ── MESSAGE REACTIONS ─────────────────────────────────────────────────────────
@@ -2322,10 +2162,13 @@ async function initSessionSafetySelector(profiles) {
 <script src="/static/js/utilities/settings.js"></script>
 <script src="/static/js/utilities/usage.js"></script>
 <script src="/static/js/utilities/source-cards.js"></script>
+<script src="/static/js/utilities/device-utils.js"></script>
+<script src="/static/js/utilities/artifacts.js"></script>
 <script src="/static/js/utilities/input-handling.js"></script>
 <script src="/static/js/utilities/ui-helpers.js"></script>
 <script src="/static/js/utilities/sidebar.js"></script>
 <script src="/static/js/utilities/theme-prefs.js"></script>
+<script src="/static/js/utilities/personas-runtime.js"></script>
 <script src="/static/js/utilities/persona-editor.js"></script>
 <script src="/static/js/utilities/interaction-ui.js"></script>
 <script src="/static/js/panels/documents.js"></script>
