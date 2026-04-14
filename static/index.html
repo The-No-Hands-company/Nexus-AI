@@ -1970,91 +1970,7 @@ async function clearMemory(){
 }
 
 // ── SETTINGS ───────────────────────────────────────────────────────────────────
-function updateSafetyBadge(profile, scope='global'){
-  const pill=document.getElementById('safety-pill');
-  const label=document.getElementById('safety-label');
-  const scopeEl=document.getElementById('safety-scope');
-  if(!pill||!label||!scopeEl) return;
-  const p=profile||'standard';
-  const s=scope||'global';
-  label.textContent=p;
-  scopeEl.textContent=s;
-  pill.setAttribute('data-profile',p);
-  pill.setAttribute('data-scope',s);
-  pill.title=`Safety profile: ${p} (${s}) — click Settings to change`;
-}
-
-function describeSafetyProfile(name, policy={}){
-  const destructive = policy.allow_destructive_input ? 'allows sandbox destructive tasks' : 'blocks destructive tasks';
-  const highStakes = policy.deny_high_stakes ? 'still blocks high-stakes workflows' : 'permits high-stakes workflows';
-  return `${name}: ${destructive}; ${highStakes}.`;
-}
-
-function populateSettings(cfg,providers,safetySettings={}){
-  const sel=document.getElementById('s-provider');
-  sel.innerHTML=[{id:'auto',label:'Auto (try all)'},...providers]
-    .map(p=>`<option value="${p.id}">${p.label||p.id}</option>`).join('');
-  sel.value=cfg.provider||'auto';
-  document.getElementById('s-model').value=cfg.model||'';
-  const t=cfg.temperature??0.2;
-  document.getElementById('s-temp').value=t;
-  document.getElementById('s-temp-val').textContent=t;
-
-  const safetySel=document.getElementById('s-safety-profile');
-  const safetyHint=document.getElementById('s-safety-hint');
-  const availableProfiles=(Array.isArray(safetySettings.available_profiles) && safetySettings.available_profiles.length)
-    ? safetySettings.available_profiles
-    : ['standard','strict','sandbox','research'];
-  const profileMap=safetySettings.profiles||{};
-  safetySel.innerHTML=availableProfiles
-    .map(name=>`<option value="${name}">${name.charAt(0).toUpperCase()+name.slice(1)}</option>`)
-    .join('');
-  safetySel.value=cfg.safety_profile||safetySettings.safety_profile||'standard';
-  updateSafetyBadge(safetySel.value);
-  const updateHint=()=>{
-    const active=safetySel.value;
-    const fallbackPolicy=active===safetySettings.safety_profile ? (safetySettings.policy||{}) : {};
-    safetyHint.textContent=describeSafetyProfile(active, profileMap[active]||fallbackPolicy);
-    updateSafetyBadge(active);
-  };
-  safetySel.onchange=updateHint;
-  updateHint();
-}
-
-async function loadSettingsModal(){
-  const [cfg,safety]=await Promise.all([
-    fetch('/settings').then(r=>r.json()).catch(()=>({})),
-    fetch('/safety/profiles').then(r=>r.json()).catch(()=>({active:'standard',profiles:{}})),
-  ]);
-  populateSettings(cfg, window._providerCache||[], {
-    safety_profile:safety.active||cfg.safety_profile||'standard',
-    available_profiles:Object.keys(safety.profiles||{}),
-    profiles:safety.profiles||{},
-    policy:(safety.profiles||{})[safety.active||cfg.safety_profile||'standard']||{},
-  });
-}
-
-async function openSettings(){
-  document.getElementById('settings-overlay').classList.add('open');
-  await loadSettingsModal();
-}
-function closeSettings(){document.getElementById('settings-overlay').classList.remove('open')}
-async function saveSettings(){
-  const resp=await fetch('/settings',{method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      provider:document.getElementById('s-provider').value,
-      model:document.getElementById('s-model').value.trim(),
-      temperature:parseFloat(document.getElementById('s-temp').value),
-      safety_profile:document.getElementById('s-safety-profile').value
-    })}).then(r=>r.json());
-  const savedProfile=resp.safety_profile||'standard';
-  document.getElementById('settings-status').textContent=
-    `Saved — ${resp.provider}${resp.model?' / '+resp.model:''} / temp ${resp.temperature} / ${savedProfile} safety`;
-  await loadSettingsModal();
-  await refreshSessionSafetyUI();
-  await refreshProviders();
-}
+// Settings utilities moved to static/js/utilities/settings.js
 
 // ── VOICE INPUT ────────────────────────────────────────────────────────────────
 function setupVoice(){
@@ -2694,76 +2610,8 @@ function showTokenCount(inputTokens, outputTokens) {
 
 
 // ── USAGE DASHBOARD ───────────────────────────────────────────────────────────
-async function openUsageModal() {
-  document.getElementById('usage-modal').classList.add('open');
-  await loadUsageStats();
-}
-function closeUsageModal() { document.getElementById('usage-modal').classList.remove('open'); }
+// Usage dashboard utilities moved to static/js/utilities/usage.js
 
-async function loadUsageStats() {
-  const days = document.getElementById('usage-days')?.value || 7;
-  const body = document.getElementById('usage-modal-body');
-  body.innerHTML = '<div style="color:var(--muted);font-size:.8rem">Loading…</div>';
-  const d = await fetch(`/usage?days=${days}`).then(r=>r.json()).catch(()=>null);
-  if (!d || d.error) { body.innerHTML = '<div style="color:var(--muted)">No usage data yet.</div>'; return; }
-
-  const stats = d.stats || {};
-  const total = stats.total || {};
-  const byProv = stats.by_provider || [];
-  const daily  = d.daily || [];
-  const maxCalls = Math.max(1, ...byProv.map(p=>p.calls));
-  const maxDaily = Math.max(1, ...daily.map(d=>d.calls));
-
-  // Summary stats
-  let html = `<div class="usage-grid">
-    <div class="usage-stat"><div class="usage-stat-val">${total.calls||0}</div><div class="usage-stat-lbl">Total requests</div></div>
-    <div class="usage-stat"><div class="usage-stat-val">${fmtNum(total.in_tok||0)}</div><div class="usage-stat-lbl">~Input tokens</div></div>
-    <div class="usage-stat"><div class="usage-stat-val">${fmtNum(total.out_tok||0)}</div><div class="usage-stat-lbl">~Output tokens</div></div>
-    <div class="usage-stat"><div class="usage-stat-val">${byProv.length}</div><div class="usage-stat-lbl">Providers used</div></div>
-  </div>`;
-
-  // By provider
-  if (byProv.length) {
-    html += '<div style="font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">By Provider</div>';
-    byProv.forEach(p => {
-      const pct  = Math.round(p.calls / maxCalls * 100);
-      const cost = p.est_cost_usd > 0 ? ` · $${p.est_cost_usd.toFixed(4)}` : ' · free';
-      html += `<div class="usage-bar-row">
-        <div class="usage-bar-label">${esc(p.provider)}</div>
-        <div class="usage-bar-track"><div class="usage-bar-fill" style="width:${pct}%"></div></div>
-        <div class="usage-bar-val">${p.calls} req${cost}</div>
-      </div>`;
-    });
-    if (stats.total_est_cost_usd !== undefined) {
-      html += `<div style="font-size:.7rem;color:var(--muted);text-align:right;margin-top:6px">
-        Total estimated cost: <strong style="color:var(--text)">$${(stats.total_est_cost_usd||0).toFixed(4)}</strong>
-      </div>`;
-    }
-  }
-
-  // Daily chart
-  if (daily.length > 1) {
-    html += '<div style="font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-top:14px;margin-bottom:4px">Daily requests</div>';
-    html += '<div class="usage-day-chart">';
-    daily.forEach(d => {
-      const h = Math.max(4, Math.round(d.calls / maxDaily * 56));
-      html += `<div class="usage-day-bar" style="height:${h}px" title="${d.day}: ${d.calls} req"></div>`;
-    });
-    const d0 = daily[0]?.day||""; const dN = daily[daily.length-1]?.day||"";
-    html += `</div><div style="display:flex;justify-content:space-between;font-size:.62rem;color:var(--muted);margin-top:3px"><span>${d0}</span><span>${dN}</span></div>`;
-  }
-
-  body.innerHTML = html;
-}
-
-function fmtNum(n) {
-  if (n >= 1000000) return (n/1000000).toFixed(1)+'M';
-  if (n >= 1000)    return (n/1000).toFixed(1)+'K';
-  return n;
-}
-
-
-// Panel modules moved to static/js/panels/*.js
 
 // ── SESSION SAFETY OVERRIDE ────────────────────────────────────────────────────
 async function refreshSessionSafetyUI() {
@@ -2866,37 +2714,16 @@ async function saveCIModal() {
 // Memory and projects utilities moved to static/js/utilities/memory-projects.js
 
 // ── SOURCE CARDS ──────────────────────────────────────────────────────────────
-function renderSourceCards(sources) {
-  if (!sources?.length) return '';
-  const cards = sources.map((s, i) => `
-    <a class="source-card" href="${esc(s.url)}" target="_blank" rel="noopener">
-      <img class="source-favicon"
-           src="https://www.google.com/s2/favicons?domain=${esc(s.domain)}&sz=16"
-           onerror="this.style.display='none'" alt="">
-      <div class="source-info">
-        <div class="source-domain">${esc(s.domain)}</div>
-        <div class="source-title">${esc(s.title)}</div>
-        <div class="source-snippet">${esc(s.snippet)}</div>
-      </div>
-      <div class="source-num">[${i+1}]</div>
-    </a>`).join('');
-  return `<div class="search-sources">${cards}</div>`;
-}
-
-// Extract sources JSON from web_search results
-function extractSources(toolResult) {
-  const m = toolResult.match(/\[SOURCES_JSON\](.*?)\[\/SOURCES_JSON\]/s);
-  if (!m) return null;
-  try { return JSON.parse(m[1]); } catch { return null; }
-}
-
-// Panel modules moved to static/js/panels/*.js
+// Source card utilities moved to static/js/utilities/source-cards.js
 
 </script>
 <script src="/static/js/api.js"></script>
 <script src="/static/js/utilities/providers.js"></script>
 <script src="/static/js/utilities/search-command.js"></script>
 <script src="/static/js/utilities/memory-projects.js"></script>
+<script src="/static/js/utilities/settings.js"></script>
+<script src="/static/js/utilities/usage.js"></script>
+<script src="/static/js/utilities/source-cards.js"></script>
 <script src="/static/js/panels/documents.js"></script>
 <script src="/static/js/panels/debate.js"></script>
 <script src="/static/js/panels/hypothesis.js"></script>
