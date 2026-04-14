@@ -2068,8 +2068,6 @@ async function newChat(){
   showTyping(false);if(drawerOpen)toggleDrawer();closeSidebar();ta.focus();
 }
 
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
-
 
 
 // ── THEME ──────────────────────────────────────────────────────────────────────
@@ -2156,6 +2154,7 @@ document.addEventListener('keydown', e => {
 
 </script>
 <script src="/static/js/api.js"></script>
+<script src="/static/js/utilities/bootstrap-helpers.js"></script>
 <script src="/static/js/utilities/providers.js"></script>
 <script src="/static/js/utilities/search-command.js"></script>
 <script src="/static/js/utilities/memory-projects.js"></script>
