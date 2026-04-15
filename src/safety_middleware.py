@@ -147,14 +147,26 @@ class SafetyPipelineMiddleware:
                     if request_verdict.action == SafetyAction.BLOCK:
                         issue = request_verdict.primary_issue()
                         error_code = issue.code if issue else "guardrail_violation"
-                        response = JSONResponse(
-                            {
-                                "error": describe_block(request_verdict),
+                        message = describe_block(request_verdict)
+                        payload = {
+                            "error": message,
+                            "type": error_code,
+                            "safety": request_verdict.to_dict(),
+                        }
+                        if path.startswith("/v1/"):
+                            payload = {
+                                "error": {
+                                    "message": message,
+                                    "type": error_code,
+                                    "code": error_code,
+                                    "status": 422,
+                                },
+                                "message": message,
                                 "type": error_code,
+                                "code": error_code,
                                 "safety": request_verdict.to_dict(),
-                            },
-                            status_code=422,
-                        )
+                            }
+                        response = JSONResponse(payload, status_code=422)
                         await response(scope, receive, send)
                         return
                     body = json.dumps(sanitized_payload).encode("utf-8")

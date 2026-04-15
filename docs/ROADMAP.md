@@ -226,7 +226,7 @@ Layer policy:
 - [x] **Dynamic agent spawning** based on task complexity and type (Sprint G)
 - [x] **Agent marketplace** — JSON-defined agents that users can import/share (Sprint G)
 - [x] **Agent-to-agent communication** — shared workspace + message passing (Sprint G)
-- [ ] **Swarm View UI** — watch the agent empire work in real-time
+- [x] **Swarm View UI** — watch the agent empire work in real-time (Sprint H)
 
 ---
 

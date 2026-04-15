@@ -5,7 +5,7 @@ from fastapi import Request, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from pydantic import ValidationError
 from ..app import app
-from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event)
+from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event, AllProvidersExhausted)
 from ..approvals import list_tool_approvals, decide_tool_approval
 from ..scheduler import (
     schedule_job,
@@ -13,9 +13,10 @@ from ..scheduler import (
     cancel_job,
     job_to_dict,
     set_run_function,
+    restore_from_db,
 )
 from ..gist_backup import restore_from_gist
-from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews)
+from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries)
 from ..personas import list_personas, set_persona, get_active_persona_name, get_persona
 from ..memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory, delete_all as delete_all_memory, get_all as get_all_memory)
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
@@ -60,15 +61,72 @@ def _api_error(message: str, code: str = "invalid_request", status_code: int = 4
     return JSONResponse({"error": message, "type": code}, status_code=status_code)
 
 
-def _apply_response_format_hint(task: str, response_format: str) -> str:
+def _v1_error(message: str, err_type: str = "invalid_request_error", status_code: int = 400, code: str = "invalid_request"):
+    return JSONResponse(
+        {
+            "error": {
+                "message": message,
+                "type": err_type,
+                "code": code,
+                "status": status_code,
+            },
+            "message": message,
+            "type": err_type,
+            "code": code,
+        },
+        status_code=status_code,
+    )
+
+
+def _normalize_response_format(response_format):
     if not response_format:
+        return {"mode": None, "schema": None}
+
+    if isinstance(response_format, str):
+        normalized = response_format.strip().lower()
+        if normalized == "json":
+            return {"mode": "json", "schema": None}
+        if normalized == "json_object":
+            return {"mode": "json", "schema": None}
+        raise ValueError("response_format must be 'json' or an object with type='json_schema'")
+
+    if not isinstance(response_format, dict):
+        raise ValueError("response_format must be a string or object")
+
+    fmt_type = str(response_format.get("type", "")).strip().lower()
+    if fmt_type == "json_object":
+        return {"mode": "json", "schema": None}
+
+    if fmt_type != "json_schema":
+        raise ValueError("response_format.type must be 'json_object' or 'json_schema'")
+
+    json_schema_cfg = response_format.get("json_schema")
+    if not isinstance(json_schema_cfg, dict):
+        raise ValueError("response_format.json_schema must be an object")
+
+    schema = json_schema_cfg.get("schema")
+    if not isinstance(schema, dict):
+        raise ValueError("response_format.json_schema.schema must be an object")
+
+    return {"mode": "json", "schema": schema}
+
+
+def _apply_response_format_hint(task: str, response_format_mode: str = "", schema: dict | None = None) -> str:
+    if not response_format_mode:
         return task
-    response_format = response_format.strip().lower()
-    if response_format == "json":
+    if response_format_mode == "json" and not schema:
         return task + (
             "\n\nRespond with strict JSON only. "
             "The response must be valid JSON and contain no extra prose or markdown."
         )
+
+    if response_format_mode == "json" and schema:
+        compact_schema = json.dumps(schema, separators=(",", ":"))
+        return task + (
+            "\n\nRespond with strict JSON only and match this JSON Schema exactly: "
+            f"{compact_schema}"
+        )
+
     return task
 
 
@@ -79,11 +137,301 @@ def _run_scheduled_task(task: str) -> str:
     return str(result.get("result", ""))[:1200]
 
 
-def _validate_json_output(text: str):
+def _json_type_matches(value, expected_type: str) -> bool:
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "null":
+        return value is None
+    return True
+
+
+def _validate_json_schema_value(value, schema: dict, path: str = "$"):
+    schema_type = schema.get("type")
+    if schema_type and not _json_type_matches(value, str(schema_type)):
+        raise ValueError(f"{path} expected type '{schema_type}'")
+
+    if "enum" in schema and value not in schema.get("enum", []):
+        raise ValueError(f"{path} must be one of the enum values")
+
+    if schema_type == "object":
+        properties = schema.get("properties", {})
+        required = schema.get("required", [])
+        if not isinstance(properties, dict):
+            raise ValueError(f"{path} schema properties must be an object")
+        if not isinstance(required, list):
+            raise ValueError(f"{path} schema required must be an array")
+
+        for key in required:
+            if key not in value:
+                raise ValueError(f"{path}.{key} is required")
+
+        additional = schema.get("additionalProperties", True)
+        if additional is False:
+            unknown = [k for k in value.keys() if k not in properties]
+            if unknown:
+                raise ValueError(f"{path} has unknown keys: {', '.join(sorted(unknown))}")
+
+        for key, child_schema in properties.items():
+            if key in value and isinstance(child_schema, dict):
+                _validate_json_schema_value(value[key], child_schema, f"{path}.{key}")
+
+    if schema_type == "array":
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for idx, item in enumerate(value):
+                _validate_json_schema_value(item, item_schema, f"{path}[{idx}]")
+
+
+def _validate_json_output(text: str, schema: dict | None = None):
+    candidate = (text or "").strip()
+    if candidate.startswith("```"):
+        lines = candidate.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+
     try:
-        return json.loads(text)
+        parsed = json.loads(candidate)
+        if schema:
+            _validate_json_schema_value(parsed, schema)
+        return parsed
     except Exception as exc:
-        raise ValueError(str(exc))
+        initial_error = exc
+
+    starts = [idx for idx, ch in enumerate(candidate) if ch in "[{"]
+    for start in starts:
+        stack = []
+        in_string = False
+        escaped = False
+        for idx in range(start, len(candidate)):
+            ch = candidate[idx]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch in "[{":
+                stack.append(ch)
+                continue
+            if ch in "]}":
+                if not stack:
+                    break
+                opener = stack.pop()
+                if (opener, ch) not in (("{", "}"), ("[", "]")):
+                    break
+                if not stack:
+                    snippet = candidate[start:idx + 1]
+                    try:
+                        parsed = json.loads(snippet)
+                        if schema:
+                            _validate_json_schema_value(parsed, schema)
+                        return parsed
+                    except Exception:
+                        break
+
+    raise ValueError(str(initial_error))
+
+
+def _provider_capability_flags(provider: dict) -> dict:
+    provider_id = str(provider.get("id", "")).lower()
+    model = str(provider.get("model", "")).lower()
+    openai_compat = bool(provider.get("openai_compat", False))
+
+    vision = provider_id in {"gemini", "ollama"} or any(token in model for token in (
+        "vision", "llava", "bakllava", "gpt-4o", "gemini"
+    ))
+    embeddings = openai_compat
+    json_mode = openai_compat
+    reasoning = provider_id in {"ollama", "claude", "grok", "gemini"} or any(token in model for token in (
+        "r1", "reason", "think"
+    ))
+    tools = True
+    return {
+        "tools": tools,
+        "vision": vision,
+        "embeddings": embeddings,
+        "json_mode": json_mode,
+        "reasoning": reasoning,
+    }
+
+
+def _provider_capabilities_list(flags: dict) -> list[str]:
+    return [name for name, enabled in flags.items() if enabled]
+
+
+def _principal_from_request(request: Request, sid: str = "", payload_user: str = "") -> str:
+    """Resolve the best-effort caller identity for quota accounting."""
+    token_user = _read_token(request)
+    if token_user:
+        return f"user:{token_user}"
+    if payload_user:
+        return f"openai_user:{str(payload_user).strip()[:80]}"
+    if sid:
+        return f"session:{sid}"
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    if forwarded:
+        return f"ip:{forwarded}"
+    if request.client and request.client.host:
+        return f"ip:{request.client.host}"
+    return "anonymous"
+
+
+def _load_rate_limit_settings() -> dict:
+    """Read persisted rate-limit policy with safe defaults."""
+    defaults = {"mode": "soft", "per_minute": 60, "per_day": 2500}
+    raw = db_load_pref("rate_limit_settings", "")
+    if not raw:
+        return dict(defaults)
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return dict(defaults)
+
+    mode = str(parsed.get("mode", defaults["mode"])).lower().strip()
+    per_minute = int(parsed.get("per_minute", defaults["per_minute"]))
+    per_day = int(parsed.get("per_day", defaults["per_day"]))
+    if mode not in ("soft", "hard"):
+        mode = defaults["mode"]
+    per_minute = max(1, min(per_minute, 100000))
+    per_day = max(1, min(per_day, 10000000))
+    return {"mode": mode, "per_minute": per_minute, "per_day": per_day}
+
+
+_rate_limit_settings = _load_rate_limit_settings()
+_rate_limit_lock = threading.Lock()
+
+
+def _evaluate_rate_limit(principal: str) -> dict:
+    """Evaluate and record quota usage for a principal.
+
+    Returns shape:
+      {"allowed": bool, "mode": "soft|hard", "limit_type": "per_minute|per_day|", ...}
+    """
+    now = time.time()
+    minute_window = 60.0
+    day_window = 86400.0
+
+    with _rate_limit_lock:
+        entry = _session_requests.get(principal, {"minute": [], "day": []})
+        minute = [t for t in entry.get("minute", []) if now - t < minute_window]
+        day = [t for t in entry.get("day", []) if now - t < day_window]
+
+        minute_limit = int(_rate_limit_settings.get("per_minute", 60))
+        day_limit = int(_rate_limit_settings.get("per_day", 2500))
+        mode = _rate_limit_settings.get("mode", "soft")
+
+        minute_over = len(minute) >= minute_limit
+        day_over = len(day) >= day_limit
+        is_over = minute_over or day_over
+
+        if not is_over:
+            minute.append(now)
+            day.append(now)
+            _session_requests[principal] = {"minute": minute, "day": day}
+            return {
+                "allowed": True,
+                "mode": mode,
+                "principal": principal,
+                "limit_type": "",
+                "limit": 0,
+                "used": 0,
+                "retry_after_seconds": 0,
+            }
+
+        # Soft mode records pressure but does not block user flow.
+        if mode == "soft":
+            minute.append(now)
+            day.append(now)
+            _session_requests[principal] = {"minute": minute, "day": day}
+            return {
+                "allowed": True,
+                "mode": mode,
+                "principal": principal,
+                "limit_type": "per_minute" if minute_over else "per_day",
+                "limit": minute_limit if minute_over else day_limit,
+                "used": len(minute) if minute_over else len(day),
+                "retry_after_seconds": 0,
+            }
+
+        # Hard mode blocks and does not count blocked requests against quota.
+        retry_after = 1
+        if minute_over and minute:
+            retry_after = max(1, int(minute_window - (now - minute[0])))
+        elif day_over and day:
+            retry_after = max(1, int(day_window - (now - day[0])))
+        _session_requests[principal] = {"minute": minute, "day": day}
+        return {
+            "allowed": False,
+            "mode": mode,
+            "principal": principal,
+            "limit_type": "per_minute" if minute_over else "per_day",
+            "limit": minute_limit if minute_over else day_limit,
+            "used": len(minute) if minute_over else len(day),
+            "retry_after_seconds": retry_after,
+        }
+
+
+def _quota_error_response(limit_result: dict) -> JSONResponse:
+    body = {
+        "error": "Quota exceeded for this user",
+        "type": "quota_exceeded",
+        "quota": {
+            "mode": limit_result.get("mode", "hard"),
+            "principal": limit_result.get("principal", "anonymous"),
+            "limit_type": limit_result.get("limit_type", "per_minute"),
+            "limit": limit_result.get("limit", 0),
+            "used": limit_result.get("used", 0),
+            "retry_after_seconds": limit_result.get("retry_after_seconds", 1),
+        },
+    }
+    headers = {"Retry-After": str(limit_result.get("retry_after_seconds", 1))}
+    return JSONResponse(body, status_code=429, headers=headers)
+
+
+def _v1_quota_error_response(limit_result: dict) -> JSONResponse:
+    message = "Quota exceeded for this user"
+    headers = {"Retry-After": str(limit_result.get("retry_after_seconds", 1))}
+    return JSONResponse(
+        {
+            "error": {
+                "message": message,
+                "type": "quota_exceeded",
+                "code": "quota_exceeded",
+                "status": 429,
+            },
+            "message": message,
+            "type": "quota_exceeded",
+            "code": "quota_exceeded",
+            "quota": {
+                "mode": limit_result.get("mode", "hard"),
+                "principal": limit_result.get("principal", "anonymous"),
+                "limit_type": limit_result.get("limit_type", "per_minute"),
+                "limit": limit_result.get("limit", 0),
+                "used": limit_result.get("used", 0),
+                "retry_after_seconds": limit_result.get("retry_after_seconds", 1),
+            },
+        },
+        status_code=429,
+        headers=headers,
+    )
 
 
 # ── auth helpers ──────────────────────────────────────────────────────────────
@@ -412,10 +760,27 @@ def v1_model_capabilities():
                 "keyless": provider.get("keyless", False),
                 "available": provider.get("available", False),
                 "rate_limited": provider.get("rate_limited", False),
-                "capabilities": ["chat", "streaming", "tool_calls", "embeddings"],
+                **_provider_capability_flags(provider),
+                "capabilities": _provider_capabilities_list(_provider_capability_flags(provider)),
             }
             for provider in providers
         ],
+    }
+
+
+@app.get("/v1/capabilities")
+def v1_capabilities():
+    """Return platform-level capability metadata for OpenAI-compatible clients."""
+    providers = get_providers_list()
+    flags = [_provider_capability_flags(provider) for provider in providers]
+    return {
+        "object": "capabilities",
+        "provider_count": len(providers),
+        "tools": any(flag["tools"] for flag in flags),
+        "vision": any(flag["vision"] for flag in flags),
+        "embeddings": any(flag["embeddings"] for flag in flags),
+        "json_mode": any(flag["json_mode"] for flag in flags),
+        "reasoning": any(flag["reasoning"] for flag in flags),
     }
 
 @app.post("/v1/embeddings")
@@ -423,18 +788,18 @@ async def v1_embeddings(request: Request):
     try:
         payload = V1EmbeddingsRequest(**(await request.json()))
     except ValidationError:
-        return _api_error("Invalid embeddings request", "validation_error", 422)
+        return _v1_error("Invalid embeddings request", "validation_error", 422, "validation_error")
 
     inputs = [payload.input] if isinstance(payload.input, str) else payload.input
     if not inputs:
-        return _api_error("input is required", "validation_error", 422)
+        return _v1_error("input is required", "validation_error", 422, "validation_error")
 
     try:
         embeddings = get_rag_system().embedding_model.embed_batch(inputs)
         if hasattr(embeddings, "tolist"):
             embeddings = embeddings.tolist()
     except Exception as exc:
-        return _api_error(f"Failed to generate embeddings: {exc}", "model_error", 500)
+        return _v1_error(f"Failed to generate embeddings: {exc}", "model_error", 500, "model_error")
 
     return {
         "object": "list",
@@ -450,22 +815,28 @@ async def v1_chat_completions(request: Request):
     try:
         payload = V1ChatCompletionsRequest(**(await request.json()))
     except ValidationError:
-        return _api_error("Invalid chat completions request", "validation_error", 422)
+        return _v1_error("Invalid chat completions request", "validation_error", 422, "validation_error")
 
     messages = payload.messages
     stream = payload.stream
     model = payload.model
     response_format = payload.response_format
+    payload_user = payload.user or ""
+
+    principal = _principal_from_request(request, payload_user=payload_user)
+    rate_result = _evaluate_rate_limit(principal)
+    if not rate_result.get("allowed", True):
+        return _v1_quota_error_response(rate_result)
 
     if not messages:
-        return _api_error("messages is required", "validation_error", 422)
+        return _v1_error("messages is required", "validation_error", 422, "validation_error")
 
     # Separate system messages from conversation turns
     system_parts = [m.content for m in messages if m.role == "system"]
     turns = [m for m in messages if m.role != "system"]
 
     if not turns or turns[-1].role != "user":
-        return _api_error("Last message must be role=user", "validation_error", 422)
+        return _v1_error("Last message must be role=user", "validation_error", 422, "validation_error")
 
     # Extract the task (last user message — may be a string or content array)
     raw_task = turns[-1].content
@@ -490,9 +861,16 @@ async def v1_chat_completions(request: Request):
             "profile": _config.get("safety_profile", "standard"),
             "verdict": {"allowed": False, "reason": exc.reason, "code": exc.code, "detail": exc.detail},
         })
-        return _api_error(exc.reason, exc.code, 422)
+        return _v1_error(exc.reason, exc.code, 422, exc.code)
 
-    task = _apply_response_format_hint(task, response_format or "")
+    try:
+        response_format_cfg = _normalize_response_format(response_format)
+    except ValueError as exc:
+        return _v1_error(str(exc), "validation_error", 422, "validation_error")
+
+    response_format_mode = response_format_cfg.get("mode")
+    response_schema = response_format_cfg.get("schema")
+    task = _apply_response_format_hint(task, response_format_mode or "", response_schema)
 
     # History = all turns except the last user message, in Nexus AI internal format
     history = [{"role": m.role, "content": m.content if isinstance(m.content, str)
@@ -532,14 +910,19 @@ async def v1_chat_completions(request: Request):
 
                     if etype == "done":
                         content = evt.get("content", "")
-                        if response_format == "json":
+                        if response_format_mode == "json":
                             try:
-                                _validate_json_output(content)
-                                delta_text = content
+                                validated = _validate_json_output(content, response_schema)
+                                delta_text = json.dumps(validated)
                             except ValueError as exc:
-                                delta_text = (
-                                    f"\nError: response_format=json required valid JSON but model output failed to parse: {exc}"
-                                )
+                                delta_text = json.dumps({
+                                    "error": {
+                                        "message": f"response_format=json required valid JSON but model output failed to parse: {exc}",
+                                        "type": "invalid_response_format",
+                                        "code": "invalid_response_format",
+                                        "status": 422,
+                                    }
+                                })
                             finish = "stop"
                         else:
                             delta_text = content
@@ -571,15 +954,16 @@ async def v1_chat_completions(request: Request):
     sid = f"v1-{uuid.uuid4().hex[:8]}"
     result = run_agent_task(task, history, [], sid=sid)
     output = result.get("result", "")
-    if response_format == "json":
+    if response_format_mode == "json":
         try:
-            validated = _validate_json_output(output)
+            validated = _validate_json_output(output, response_schema)
             output = json.dumps(validated)
         except ValueError:
-            return _api_error(
+            return _v1_error(
                 "response_format=json required valid JSON but model output failed to parse",
                 "invalid_response_format",
                 422,
+                "invalid_response_format",
             )
 
     return {
@@ -662,6 +1046,38 @@ async def update_safety_settings(request: Request):
     }
 
 
+@app.get("/settings/rate-limits")
+def get_rate_limit_settings():
+    return dict(_rate_limit_settings)
+
+
+@app.post("/settings/rate-limits")
+async def update_rate_limit_settings(request: Request):
+    data = await request.json()
+    mode = str(data.get("mode", _rate_limit_settings.get("mode", "soft"))).lower().strip()
+    per_minute = data.get("per_minute", _rate_limit_settings.get("per_minute", 60))
+    per_day = data.get("per_day", _rate_limit_settings.get("per_day", 2500))
+
+    if mode not in ("soft", "hard"):
+        return _api_error("mode must be one of: soft, hard", "validation_error", 422)
+    try:
+        per_minute = int(per_minute)
+        per_day = int(per_day)
+    except Exception:
+        return _api_error("per_minute and per_day must be integers", "validation_error", 422)
+    if per_minute < 1 or per_day < 1:
+        return _api_error("per_minute and per_day must be >= 1", "validation_error", 422)
+
+    updated = {
+        "mode": mode,
+        "per_minute": min(per_minute, 100000),
+        "per_day": min(per_day, 10000000),
+    }
+    _rate_limit_settings.update(updated)
+    db_save_pref("rate_limit_settings", json.dumps(updated))
+    return dict(_rate_limit_settings)
+
+
 @app.get("/safety/profiles")
 def list_safety_profiles():
     return {
@@ -718,15 +1134,23 @@ def get_safety_audit(
         allowed = ", ".join(_SEVERITY_ORDER.keys())
         return _api_error(f"severity must be one of: {allowed}", "validation_error", 422)
 
-    filtered: list = list(safety_log)
-    if session_id:
-        filtered = [
-            event for event in filtered
-            if str(event.get("session") or "") == session_id
-            or str(event.get("session_id") or "") == session_id
-        ]
-    if event_type:
-        filtered = [event for event in filtered if event.get("type") == event_type]
+    # Prefer persisted entries from the database; fall back to in-memory for entries
+    # that may not yet have been flushed (e.g., very recent push within the same request).
+    try:
+        db_entries = db_load_safety_audit_entries(limit=5000, session_id=session_id, event_type=event_type)
+    except Exception:
+        db_entries = []
+
+    # Merge: db already filters by session_id/event_type; supplement with any in-memory events
+    # that are not yet persisted (i.e., more recent than the newest db entry's ts).
+    newest_db_ts = db_entries[-1].get("ts", 0.0) if db_entries else 0.0
+    fresh_in_memory = [
+        ev for ev in safety_log
+        if float(ev.get("ts", 0)) > newest_db_ts
+        and (not session_id or str(ev.get("session") or ev.get("session_id") or "") == session_id)
+        and (not event_type or ev.get("type") == event_type)
+    ]
+    filtered: list = db_entries + fresh_in_memory
 
     events_with_severity = []
     for event in filtered:
@@ -1615,6 +2039,161 @@ def _extract_document_text(path: str, file_type: str = "") -> tuple[str, str]:
     return f"❌ Unsupported file type: {ext or 'unknown'}", ext
 
 
+def _extract_document_segments(
+    path: str,
+    file_type: str = "",
+    filename: str = "",
+) -> list[dict]:
+    """Extract document text as layout-aware segments with per-page/section metadata.
+
+    Returns a list of dicts: {"text": str, "metadata": {"source": ..., "type": ..., ...}}
+    For PDFs, each segment is one page.  For DOCX, one segment per section.
+    For XLSX, one segment per sheet.  For PPTX, one segment per slide.
+    """
+    ext = file_type.lower().lstrip(".") if file_type else ""
+    if not ext and path:
+        ext = path.rsplit(".", 1)[-1].lower() if "." in path else ""
+
+    name = filename or (path.split("/")[-1] if path else "document")
+    base_meta: dict = {"source": name, "type": ext or "text"}
+
+    if ext == "pdf":
+        try:
+            import pypdf
+            full = path if os.path.isabs(path) else os.path.join("/tmp", path)
+            reader = pypdf.PdfReader(full)
+            total = len(reader.pages)
+            segments = []
+            for i, page in enumerate(reader.pages):
+                text = (page.extract_text() or "").strip()
+                if text:
+                    segments.append({
+                        "text": text,
+                        "metadata": {**base_meta, "page": i + 1, "total_pages": total},
+                    })
+            if not segments:
+                return [{"text": "❌ No extractable text found (may be a scanned PDF)", "metadata": base_meta}]
+            return segments
+        except ImportError:
+            return [{"text": "❌ pypdf not installed. Run: pip install pypdf", "metadata": base_meta}]
+        except Exception as e:
+            return [{"text": f"❌ PDF read failed: {e}", "metadata": base_meta}]
+
+    if ext in ("docx", "doc"):
+        try:
+            from docx import Document
+            full = path if os.path.isabs(path) else os.path.join("/tmp", path)
+            doc = Document(full)
+            segments: list[dict] = []
+            current_parts: list[str] = []
+            current_heading: str | None = None
+            section_idx = 0
+
+            def _flush(heading: str | None, parts: list[str], idx: int) -> None:
+                text = "\n\n".join(parts).strip()
+                if not text:
+                    return
+                meta: dict = {**base_meta, "section": idx}
+                if heading:
+                    meta["heading"] = heading
+                segments.append({"text": text, "metadata": meta})
+
+            for para in doc.paragraphs:
+                style = para.style.name if para.style else ""
+                if style.startswith("Heading ") and para.text.strip():
+                    _flush(current_heading, current_parts, section_idx)
+                    section_idx += 1
+                    current_parts = []
+                    current_heading = para.text.strip()
+                    try:
+                        level = int(style.split()[-1])
+                    except (ValueError, IndexError):
+                        level = 1
+                    current_parts.append(f"{'#' * min(level, 4)} {para.text.strip()}")
+                elif para.text.strip():
+                    current_parts.append(para.text.strip())
+
+            for tbl_idx, table in enumerate(doc.tables):
+                rows = []
+                for row in table.rows:
+                    cells = [cell.text.strip() for cell in row.cells]
+                    if any(cells):
+                        rows.append(" | ".join(cells))
+                if rows:
+                    current_parts.append(f"[Table {tbl_idx + 1}]\n" + "\n".join(rows[:100]))
+
+            _flush(current_heading, current_parts, section_idx)
+            if not segments:
+                return [{"text": "❌ No extractable text found in document.", "metadata": base_meta}]
+            return segments
+        except ImportError:
+            return [{"text": "❌ python-docx not installed. Run: pip install python-docx", "metadata": base_meta}]
+        except Exception as e:
+            return [{"text": f"❌ DOCX read failed: {e}", "metadata": base_meta}]
+
+    if ext in ("xlsx", "xls"):
+        try:
+            import openpyxl
+            full = path if os.path.isabs(path) else os.path.join("/tmp", path)
+            wb = openpyxl.load_workbook(full, read_only=True, data_only=True)
+            segments = []
+            for sheet_name in wb.sheetnames[:5]:
+                ws = wb[sheet_name]
+                lines = [f"### Sheet: {sheet_name}"]
+                for row in ws.iter_rows(max_row=200, values_only=True):
+                    cells = [str(c) if c is not None else "" for c in row]
+                    if any(c.strip() for c in cells):
+                        lines.append(" | ".join(cells))
+                if ws.max_row and ws.max_row > 200:
+                    lines.append(f"… ({ws.max_row - 200} more rows)")
+                segments.append({"text": "\n".join(lines), "metadata": {**base_meta, "sheet": sheet_name}})
+            wb.close()
+            return segments if segments else [{"text": "❌ No data found in workbook.", "metadata": base_meta}]
+        except ImportError:
+            return [{"text": "❌ openpyxl not installed. Run: pip install openpyxl", "metadata": base_meta}]
+        except Exception as e:
+            return [{"text": f"❌ XLSX read failed: {e}", "metadata": base_meta}]
+
+    if ext in ("pptx", "ppt"):
+        try:
+            from pptx import Presentation
+            full = path if os.path.isabs(path) else os.path.join("/tmp", path)
+            prs = Presentation(full)
+            total = len(prs.slides)
+            segments = []
+            for i, slide in enumerate(prs.slides):
+                texts = [s.text.strip() for s in slide.shapes if hasattr(s, "text") and s.text.strip()]
+                if texts:
+                    segments.append({
+                        "text": "\n".join(texts),
+                        "metadata": {**base_meta, "slide": i + 1, "total_slides": total},
+                    })
+            return segments if segments else [{"text": "❌ No text found in presentation.", "metadata": base_meta}]
+        except ImportError:
+            return [{"text": "❌ python-pptx not installed. Run: pip install python-pptx", "metadata": base_meta}]
+        except Exception as e:
+            return [{"text": f"❌ PPTX read failed: {e}", "metadata": base_meta}]
+
+    if ext in ("txt", "md", "csv", "json", "yaml", "yml", "toml", "ini"):
+        try:
+            full = path if os.path.isabs(path) else os.path.join("/tmp", path)
+            with open(full, "r", encoding="utf-8", errors="replace") as f:
+                raw = f.read()
+            if len(raw) <= 4000:
+                return [{"text": raw, "metadata": base_meta}]
+            # Split into overlapping sections for large text files
+            chunk, overlap = 3000, 200
+            return [
+                {"text": raw[i: i + chunk], "metadata": {**base_meta, "section": idx}}
+                for idx, i in enumerate(range(0, len(raw), chunk - overlap))
+                if raw[i: i + chunk].strip()
+            ]
+        except Exception as e:
+            return [{"text": f"❌ Failed to read {path}: {e}", "metadata": base_meta}]
+
+    return [{"text": f"❌ Unsupported file type: {ext or 'unknown'}", "metadata": base_meta}]
+
+
 @app.post("/documents/ingest")
 async def documents_ingest(request: Request):
     """Extract text from a document and ingest it into the RAG store.
@@ -1639,23 +2218,45 @@ async def documents_ingest(request: Request):
     if not text and not path:
         return JSONResponse({"error": "path or text is required"}, status_code=400)
 
-    detected_type = ftype
+    rag = get_rag_system()
+    chunks_stored = 0
+
     if not text and path:
-        text, detected_type = _extract_document_text(path, ftype)
-        if text.startswith("❌"):
-            return JSONResponse({"error": text}, status_code=400)
-
-    if len(text) > 500_000:
-        text = text[:500_000]
-
-    doc_meta = {"source": filename, "type": detected_type, **metadata}
-    try:
-        count = get_rag_system().ingest(text, metadata=doc_meta, doc_id_prefix=filename)
+        # Layout-aware extraction: each page/section ingested with positional metadata
+        segments = _extract_document_segments(path, ftype, filename=filename)
+        errors = [s for s in segments if s["text"].startswith("❌")]
+        valid = [s for s in segments if not s["text"].startswith("❌")]
+        if not valid:
+            return JSONResponse({"error": errors[0]["text"] if errors else "No content extracted"}, status_code=400)
+        detected_type = valid[0]["metadata"].get("type", ftype)
+        total_chars = sum(len(s["text"]) for s in valid)
+        for seg in valid:
+            seg_meta = {**seg["metadata"], **metadata}
+            try:
+                chunks_stored += rag.ingest(seg["text"], metadata=seg_meta, doc_id_prefix=filename)
+            except Exception:
+                pass
         return {
             "filename": filename,
             "type": detected_type,
-            "ingested_chunks": count,
+            "ingested_chunks": chunks_stored,
+            "char_count": total_chars,
+            "segments": len(valid),
+            "status": "ok",
+        }
+
+    # Text-direct path
+    if len(text) > 500_000:
+        text = text[:500_000]
+    doc_meta = {"source": filename, "type": ftype or "text", **metadata}
+    try:
+        chunks_stored = rag.ingest(text, metadata=doc_meta, doc_id_prefix=filename)
+        return {
+            "filename": filename,
+            "type": ftype or "text",
+            "ingested_chunks": chunks_stored,
             "char_count": len(text),
+            "segments": 1,
             "status": "ok",
         }
     except Exception as e:
@@ -1670,6 +2271,10 @@ async def documents_understand(request: Request):
       { "path": "/tmp/report.pdf", "question": "What are the key findings?", "file_type": "pdf" }
       OR
       { "text": "...", "question": "Summarise this." }
+
+    For documents larger than ~8 000 chars, the endpoint uses a temporary RAG
+    pipeline (ingest → query) to surface the most relevant sections before
+    answering, rather than truncating to the first 12 000 chars.
     """
     body = {}
     try:
@@ -1699,19 +2304,50 @@ async def documents_understand(request: Request):
         if text.startswith("❌"):
             return JSONResponse({"error": text}, status_code=400)
 
-    # Truncate to stay within context
-    excerpt = text[:12000]
+    _UNDERSTAND_RAG_THRESHOLD = 8000
+
+    rag_backed = False
+    excerpt = ""
+
+    if len(text) > _UNDERSTAND_RAG_THRESHOLD:
+        # Use a fresh in-memory RAG instance so we don't pollute the global store
+        try:
+            from ..rag.rag_system import RAGSystem as _RAGSystem
+            _tmp_rag = _RAGSystem()
+            chunk, overlap = 3000, 200
+            for idx, offset in enumerate(range(0, min(len(text), 90000), chunk - overlap)):
+                chunk_text = text[offset: offset + chunk]
+                if chunk_text.strip():
+                    _tmp_rag.ingest(
+                        chunk_text,
+                        metadata={"source": filename, "type": detected_type or "text", "section": idx},
+                        doc_id_prefix=f"_und_{filename}",
+                    )
+            results = _tmp_rag.query(question, top_k=5)
+            if results:
+                excerpt = "\n\n---\n\n".join(r["document"] for r in results)
+                rag_backed = True
+        except Exception:
+            pass  # fall through to direct path
+
+    if not excerpt:
+        excerpt = text[:12000]
+
+    context_label = "relevant excerpts from" if rag_backed else "the content of"
     prompt = (
-        f"The following is the content of a document ({detected_type or 'text'}) "
-        f"named '{filename}':\n\n"
+        f"The following is {context_label} a document "
+        f"({detected_type or 'text'}) named '{filename}':\n\n"
         f"---\n{excerpt}\n---\n\n"
         f"Question: {question}\n\n"
         "Please answer based only on the document content above."
     )
 
-    resp, provider = call_llm_with_fallback(
-        [{"role": "user", "content": prompt}], question
-    )
+    try:
+        resp, provider = call_llm_with_fallback(
+            [{"role": "user", "content": prompt}], question
+        )
+    except AllProvidersExhausted as exc:
+        return _api_error(str(exc), "no_providers", 503)
     answer = resp.get("content") or str(resp)
 
     return {
@@ -1722,6 +2358,7 @@ async def documents_understand(request: Request):
         "provider": provider,
         "excerpt_chars": len(excerpt),
         "total_chars": len(text),
+        "rag_backed": rag_backed,
     }
 
 
@@ -2185,22 +2822,6 @@ def delete_custom_persona_endpoint(pid: str):
 
 
 # ── usage dashboard ───────────────────────────────────────────────────────────
-# Per-session rate limiting
-RATE_LIMIT_WINDOW = 60   # seconds
-RATE_LIMIT_MAX    = int(os.getenv("SESSION_RATE_LIMIT", "30"))   # req/min per session
-
-def _check_rate_limit(sid: str) -> bool:
-    """Returns True if request is allowed, False if rate limited."""
-    if not sid:
-        return True
-    now    = time.time()
-    times  = _session_requests.get(sid, [])
-    recent = [t for t in times if now - t < RATE_LIMIT_WINDOW]
-    if len(recent) >= RATE_LIMIT_MAX:
-        return False
-    recent.append(now)
-    _session_requests[sid] = recent
-    return True
 
 
 @app.get("/usage")
@@ -2325,6 +2946,11 @@ async def agent_post(request: Request):
     if not task:
         return _api_error("task is required", "validation_error", 422)
 
+    principal = _principal_from_request(request, sid=sid or "")
+    rate_result = _evaluate_rate_limit(principal)
+    if not rate_result.get("allowed", True):
+        return _quota_error_response(rate_result)
+
     try:
         task = check_user_task(task, policy_profile=get_session_safety_profile(sid or ""))
     except GuardrailViolation as exc:
@@ -2355,6 +2981,11 @@ async def agent_stream(request: Request):
     if not task:
         return _api_error("task is required", "validation_error", 422)
 
+    principal = _principal_from_request(request, sid=sid or "")
+    rate_result = _evaluate_rate_limit(principal)
+    if not rate_result.get("allowed", True):
+        return _quota_error_response(rate_result)
+
     try:
         task = check_user_task(task, policy_profile=get_session_safety_profile(sid or ""))
     except GuardrailViolation as exc:
@@ -2369,11 +3000,6 @@ async def agent_stream(request: Request):
         return _api_error(exc.reason, exc.code, 422)
 
     execution_traces[trace_id] = []
-
-    # Rate limit check
-    import time as _time
-    if sid and not _check_rate_limit(sid):
-        return JSONResponse({"error": f"Rate limit exceeded: max {RATE_LIMIT_MAX} requests/min per session."}, status_code=429)
 
     history  = sessions.get(sid,[]) if sid else []
     loop     = asyncio.get_event_loop()
@@ -3292,6 +3918,7 @@ async def resolve_approval(approval_id: str, request: Request):
 
 def startup_event() -> None:
     set_run_function(_run_scheduled_task)
+    restore_from_db()
     asyncio.create_task(_register_with_nexus_cloud())
     asyncio.create_task(_heartbeat_loop())
 

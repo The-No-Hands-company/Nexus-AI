@@ -16,7 +16,6 @@ Registry linkage:
 ## A) Safety and Policy
 
 - `NAI-SAFETY-RUNTIME-00001` Policy severity profiles by tenant/environment (dev/stage/prod).
-- `NAI-SAFETY-CONTRACT-00002` Structured safety audit persistence and query API.
 - `NAI-SAFETY-RUNTIME-00003` Domain guards (medical/legal/finance) with selectable warn/block modes.
 - `NAI-SAFETY-RUNTIME-00004` High-risk approval UX in frontend (approve/reject workflow cards).
 - `NAI-SAFETY-EVAL-00005` Safety regression benchmark suite with trend scoring.
@@ -50,7 +49,6 @@ Registry linkage:
 - `NAI-PERF-RUNTIME-00041` Streaming latency SLO enforcement and adaptive fallback.
 - `NAI-PERF-OBS-00042` End-to-end waterfall traces (router -> tool -> response).
 - `NAI-RELIABILITY-RUNTIME-00043` Durable job queue for background workflows.
-- `NAI-RELIABILITY-RUNTIME-00044` Idempotent resume semantics for interrupted tool chains.
 
 ## F) API and Enterprise Readiness
 
@@ -68,7 +66,12 @@ Registry linkage:
 
 ## Next Prioritized Slice
 
-1. `NAI-SAFETY-RUNTIME-00002` Safety audit persistence and query API.
-2. `NAI-SAFETY-RUNTIME-00004` HITL approval frontend workflow.
+1. `NAI-SAFETY-RUNTIME-00004` HITL approval frontend workflow.
+2. `NAI-RELIABILITY-RUNTIME-00043` Durable job queue for background workflows.
 3. `NAI-API-CONTRACT-00051` Per-user quota/rate-limit system.
 4. `NAI-MULTIMODAL-TOOLS-00011` Production document understanding path.
+
+## Recently Resolved
+
+- `NAI-SAFETY-CONTRACT-00002` Structured safety audit persistence and query API.
+- `NAI-RELIABILITY-RUNTIME-00044` Idempotent resume semantics for interrupted tool chains via durable HITL approval state.

@@ -58,10 +58,180 @@ def init_db() -> None:
             tags        TEXT NOT NULL    -- JSON array
         );
 
+        CREATE TABLE IF NOT EXISTS safety_audit (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          REAL NOT NULL,
+            event_type  TEXT NOT NULL,
+            session_id  TEXT,
+            payload     TEXT NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS hitl_approvals (
+            id          TEXT PRIMARY KEY,
+            session_id  TEXT NOT NULL DEFAULT '',
+            action      TEXT NOT NULL,
+            signature   TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            note        TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_chats_updated ON chats(updated_at DESC);
         CREATE INDEX IF NOT EXISTS idx_memory_created ON memory(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_safety_audit_ts ON safety_audit(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_safety_audit_type ON safety_audit(event_type);
+        CREATE INDEX IF NOT EXISTS idx_safety_audit_session ON safety_audit(session_id);
+        CREATE INDEX IF NOT EXISTS idx_hitl_session ON hitl_approvals(session_id);
+        CREATE INDEX IF NOT EXISTS idx_hitl_status ON hitl_approvals(status);
+
+        CREATE TABLE IF NOT EXISTS scheduled_jobs (
+            id            TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            task          TEXT NOT NULL,
+            schedule      TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'active',
+            created_at    TEXT NOT NULL,
+            interval_secs INTEGER,
+            next_run      TEXT,
+            last_run      TEXT,
+            run_count     INTEGER NOT NULL DEFAULT 0,
+            logs          TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE INDEX IF NOT EXISTS idx_sched_status ON scheduled_jobs(status);
     """)
     c.commit()
+
+def _ensure_safety_audit_table() -> None:
+    _conn().executescript("""
+        CREATE TABLE IF NOT EXISTS safety_audit (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          REAL NOT NULL,
+            event_type  TEXT NOT NULL,
+            session_id  TEXT,
+            payload     TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_safety_audit_ts ON safety_audit(ts DESC);
+        CREATE INDEX IF NOT EXISTS idx_safety_audit_type ON safety_audit(event_type);
+        CREATE INDEX IF NOT EXISTS idx_safety_audit_session ON safety_audit(session_id);
+    """)
+    _conn().commit()
+
+
+def _ensure_hitl_approvals_table() -> None:
+    _conn().executescript("""
+        CREATE TABLE IF NOT EXISTS hitl_approvals (
+            id          TEXT PRIMARY KEY,
+            session_id  TEXT NOT NULL DEFAULT '',
+            action      TEXT NOT NULL,
+            signature   TEXT NOT NULL,
+            status      TEXT NOT NULL DEFAULT 'pending',
+            note        TEXT NOT NULL DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_hitl_session ON hitl_approvals(session_id);
+        CREATE INDEX IF NOT EXISTS idx_hitl_status ON hitl_approvals(status);
+    """)
+    _conn().commit()
+
+
+def create_hitl_approval(
+    approval_id: str,
+    session_id: str,
+    action: dict,
+    signature: str,
+    created_at: str,
+    updated_at: str,
+) -> None:
+    _ensure_hitl_approvals_table()
+    _conn().execute(
+        """INSERT INTO hitl_approvals(id, session_id, action, signature, status, note, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'pending', '', ?, ?)""",
+        (
+            approval_id,
+            session_id or "",
+            json.dumps(action or {}, ensure_ascii=False),
+            signature,
+            created_at,
+            updated_at,
+        ),
+    )
+    _conn().commit()
+    _schedule_push()
+
+
+def list_hitl_approvals(session_id: str = "") -> list[dict]:
+    _ensure_hitl_approvals_table()
+    if session_id:
+        rows = _conn().execute(
+            """SELECT id, session_id, action, signature, status, note, created_at, updated_at
+               FROM hitl_approvals
+               WHERE session_id=?
+               ORDER BY created_at DESC""",
+            (session_id,),
+        ).fetchall()
+    else:
+        rows = _conn().execute(
+            """SELECT id, session_id, action, signature, status, note, created_at, updated_at
+               FROM hitl_approvals
+               ORDER BY created_at DESC"""
+        ).fetchall()
+
+    result: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["action"] = json.loads(item.get("action") or "{}")
+        except Exception:
+            item["action"] = {}
+        result.append(item)
+    return result
+
+
+def load_hitl_approval(approval_id: str) -> dict | None:
+    _ensure_hitl_approvals_table()
+    row = _conn().execute(
+        """SELECT id, session_id, action, signature, status, note, created_at, updated_at
+           FROM hitl_approvals
+           WHERE id=?""",
+        (approval_id,),
+    ).fetchone()
+    if not row:
+        return None
+    item = dict(row)
+    try:
+        item["action"] = json.loads(item.get("action") or "{}")
+    except Exception:
+        item["action"] = {}
+    return item
+
+
+def update_hitl_approval_decision(approval_id: str, status: str, note: str, updated_at: str) -> dict | None:
+    _ensure_hitl_approvals_table()
+    _conn().execute(
+        "UPDATE hitl_approvals SET status=?, note=?, updated_at=? WHERE id=?",
+        (status, note or "", updated_at, approval_id),
+    )
+    _conn().commit()
+    _schedule_push()
+    return load_hitl_approval(approval_id)
+
+
+def consume_hitl_approval(approval_id: str, updated_at: str) -> None:
+    _ensure_hitl_approvals_table()
+    _conn().execute(
+        "UPDATE hitl_approvals SET status='consumed', updated_at=? WHERE id=?",
+        (updated_at, approval_id),
+    )
+    _conn().commit()
+    _schedule_push()
+
+
+def clear_hitl_approvals() -> None:
+    _ensure_hitl_approvals_table()
+    _conn().execute("DELETE FROM hitl_approvals")
+    _conn().commit()
 
 
 # ── CHATS ─────────────────────────────────────────────────────────────────────
@@ -294,6 +464,65 @@ def delete_memory_entry(entry_id: int) -> None:
     _conn().execute("DELETE FROM memory WHERE id=?", (entry_id,))
     _conn().commit()
     _schedule_push()
+
+
+# ── SAFETY AUDIT LOG ─────────────────────────────────────────────────────────
+
+def add_safety_audit_entry(event: dict) -> None:
+    _ensure_safety_audit_table()
+    payload = dict(event or {})
+    ts = float(payload.get("ts") or datetime.now(timezone.utc).timestamp())
+    event_type = str(payload.get("type") or "unknown")
+    session_id = str(payload.get("session_id") or payload.get("session") or "")
+    _conn().execute(
+        "INSERT INTO safety_audit(ts, event_type, session_id, payload) VALUES(?,?,?,?)",
+        (ts, event_type, session_id, json.dumps(payload, ensure_ascii=False)),
+    )
+    # Keep table bounded to avoid unbounded local growth.
+    _conn().execute("""
+        DELETE FROM safety_audit WHERE id NOT IN (
+            SELECT id FROM safety_audit ORDER BY id DESC LIMIT 5000
+        )
+    """)
+    _conn().commit()
+    _schedule_push()
+
+
+def load_safety_audit_entries(limit: int = 200, session_id: str = "", event_type: str = "") -> list[dict]:
+    _ensure_safety_audit_table()
+    where = []
+    params: list = []
+    if session_id:
+        where.append("session_id = ?")
+        params.append(session_id)
+    if event_type:
+        where.append("event_type = ?")
+        params.append(event_type)
+
+    where_sql = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = _conn().execute(
+        f"""
+        SELECT payload FROM safety_audit
+        {where_sql}
+        ORDER BY ts DESC, id DESC
+        LIMIT ?
+        """,
+        (*params, max(1, int(limit))),
+    ).fetchall()
+
+    entries: list[dict] = []
+    for row in reversed(rows):
+        try:
+            entries.append(json.loads(row["payload"]))
+        except Exception:
+            continue
+    return entries
+
+
+def clear_safety_audit_entries() -> None:
+    _ensure_safety_audit_table()
+    _conn().execute("DELETE FROM safety_audit")
+    _conn().commit()
 
 
 # ── PINNED CHATS ──────────────────────────────────────────────────────────────
@@ -1207,3 +1436,89 @@ try:
     init_self_review_table()
 except Exception:
     pass
+
+
+# ── SCHEDULED JOBS ────────────────────────────────────────────────────────────
+
+def _ensure_scheduled_jobs_table() -> None:
+    _conn().executescript("""
+        CREATE TABLE IF NOT EXISTS scheduled_jobs (
+            id            TEXT PRIMARY KEY,
+            name          TEXT NOT NULL,
+            task          TEXT NOT NULL,
+            schedule      TEXT NOT NULL,
+            status        TEXT NOT NULL DEFAULT 'active',
+            created_at    TEXT NOT NULL,
+            interval_secs INTEGER,
+            next_run      TEXT,
+            last_run      TEXT,
+            run_count     INTEGER NOT NULL DEFAULT 0,
+            logs          TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE INDEX IF NOT EXISTS idx_sched_status ON scheduled_jobs(status);
+    """)
+    _conn().commit()
+
+
+def upsert_scheduled_job(job: dict) -> None:
+    """Persist (insert or update) a scheduled job row."""
+    _ensure_scheduled_jobs_table()
+    _conn().execute(
+        """
+        INSERT INTO scheduled_jobs
+            (id, name, task, schedule, status, created_at, interval_secs,
+             next_run, last_run, run_count, logs)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, task=excluded.task, schedule=excluded.schedule,
+            status=excluded.status, interval_secs=excluded.interval_secs,
+            next_run=excluded.next_run, last_run=excluded.last_run,
+            run_count=excluded.run_count, logs=excluded.logs
+        """,
+        (
+            job["id"],
+            job["name"],
+            job["task"],
+            job["schedule"],
+            job["status"],
+            job["created_at"],
+            job.get("interval_secs"),
+            job.get("next_run"),
+            job.get("last_run"),
+            job.get("run_count", 0),
+            json.dumps(job.get("logs") or []),
+        ),
+    )
+    _conn().commit()
+
+
+def load_scheduled_jobs() -> list[dict]:
+    """Return all persisted scheduled jobs (any status)."""
+    _ensure_scheduled_jobs_table()
+    rows = _conn().execute(
+        "SELECT id,name,task,schedule,status,created_at,interval_secs,"
+        "next_run,last_run,run_count,logs FROM scheduled_jobs"
+    ).fetchall()
+    result = []
+    for row in rows:
+        d = dict(row)
+        try:
+            d["logs"] = json.loads(d.get("logs") or "[]")
+        except Exception:
+            d["logs"] = []
+        result.append(d)
+    return result
+
+
+def delete_scheduled_job(job_id: str) -> None:
+    """Remove a scheduled job from the DB."""
+    _ensure_scheduled_jobs_table()
+    _conn().execute("DELETE FROM scheduled_jobs WHERE id=?", (job_id,))
+    _conn().commit()
+
+
+def clear_scheduled_jobs() -> None:
+    """Delete all scheduled jobs — used in tests only."""
+    _ensure_scheduled_jobs_table()
+    _conn().execute("DELETE FROM scheduled_jobs")
+    _conn().commit()

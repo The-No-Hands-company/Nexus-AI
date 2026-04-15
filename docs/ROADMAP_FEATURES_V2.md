@@ -147,36 +147,36 @@ Source safety rule:
 
 ### Phase 1 - Super Intelligence Layer
 
-- [ ] Graph-of-Thought reasoning
-- [ ] Self-critique loop
-- [ ] Cross-model consensus
-- [ ] Mixture-of-Experts routing
-- [ ] Add 20+ more Ollama/cloud models by default
-- [ ] Auto-select best Ollama model by task type
-- [ ] Model benchmark dashboard for new pulls
-- [ ] Long-context summarization (multi-step compression)
-- [ ] Persistent vector store filters (date/tags/persona)
-- [ ] Memory pruning for low-value/outdated items
-- [ ] Streaming token counter in UI
-- [ ] Live confidence/reasoning trace badge in UI
-- [ ] Per-message feedback stored as training signal
+- [x] Graph-of-Thought reasoning (Sprint D)
+- [x] Self-critique loop (Sprint C)
+- [x] Cross-model consensus (Sprint D)
+- [x] Mixture-of-Experts routing (Sprint C)
+- [x] Add 20+ more Ollama/cloud models by default (Sprint F)
+- [x] Auto-select best Ollama model by task type (Sprint F)
+- [x] Model benchmark dashboard for new pulls (Sprint D)
+- [x] Long-context summarization (multi-step compression) (Sprint D)
+- [x] Persistent vector store filters (date/tags/persona) (Sprint E)
+- [x] Memory pruning for low-value/outdated items (Sprint C)
+- [x] Streaming token counter in UI (Sprint E)
+- [x] Live confidence/reasoning trace badge in UI (Sprint E)
+- [x] Per-message feedback stored as training signal (Sprint E)
 
 ### Phase 2 - Multi-Agent Empire
 
-- [ ] Hierarchical orchestration (Planner -> Executor -> Reviewer -> Verifier)
-- [ ] Specialist agent library:
-- [ ] Architect Agent
-- [ ] Security Auditor Agent
-- [ ] UI/UX Designer Agent
-- [ ] Data Scientist Agent
-- [ ] Legal/Compliance Agent
-- [ ] Product Manager Agent
-- [ ] Debugger Agent
-- [ ] Documentation Agent
-- [ ] Dynamic agent spawning
-- [ ] Agent marketplace (import/share)
-- [ ] Agent-to-agent communication workspace
-- [ ] Swarm View UI
+- [x] Hierarchical orchestration (Planner -> Executor -> Reviewer -> Verifier) (Sprint F)
+- [x] Specialist agent library: (Sprint F)
+- [x] Architect Agent
+- [x] Security Auditor Agent
+- [x] UI/UX Designer Agent
+- [x] Data Scientist Agent
+- [x] Legal/Compliance Agent
+- [x] Product Manager Agent
+- [x] Debugger Agent
+- [x] Documentation Agent
+- [x] Dynamic agent spawning (Sprint G)
+- [x] Agent marketplace (import/share) (Sprint G)
+- [x] Agent-to-agent communication workspace (Sprint G)
+- [x] Swarm View UI (Sprint H)
 
 ### Phase 3 - Multi-Modal and Sensory
 
@@ -191,12 +191,12 @@ Source safety rule:
 
 ### Phase 4 - Sovereign AI Operating System
 
-- [ ] Autonomous background agents (schedule/webhook)
-- [ ] Long-term memory graph (vector + structured KG)
+- [x] Autonomous background agents (schedule/webhook) (Sprint I)
+- [x] Long-term memory graph (vector + structured KG) (Sprint I)
 - [ ] Per-user rate limits and quotas
 - [ ] Fine-tuning/LoRA adapter management
-- [ ] Self-improvement loop
-- [ ] Diff viewer for file edits
+- [x] Self-improvement loop (Sprint J)
+- [x] Diff viewer for file edits (Sprint H)
 - [ ] Native SQLite/PostgreSQL tools with introspection
 
 ### Phase 5 - Enterprise and Ecosystem Scale
@@ -239,10 +239,10 @@ Source safety rule:
 
 #### Sprint C
 
-- [ ] Add generator-critic research flow with citation confidence
-- [ ] Add checkpointed long-run execution with resumability
+- [x] Add generator-critic research flow with citation confidence
+- [x] Add checkpointed long-run execution with resumability
 - [x] Add optional HITL checkpoints (default off)
-- [ ] Keep default UX path unchanged
+- [x] Keep default UX path unchanged
 
 ## A2. External Capability Synthesis (Legacy Carried Over)
 

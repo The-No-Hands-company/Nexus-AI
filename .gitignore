@@ -36,6 +36,18 @@ env.old/
 .idea/
 *.swp
 *.swo
+*.code-workspace
+
+# ─── Autonomy Control Plane (Thin Wrapper / Thick Kernel design) ─────────────
+# These directories form the LOCAL-ONLY autonomous execution infrastructure:
+#   .github/skills/   — 69 nexus-ai-* SKILL.md agent definitions (not portable code)
+#   .github/prompts/  — 34 SOP .prompt.md files (operator-specific, env-specific)
+#
+# Design intent: The Kernel (nexus-ai-kernel-orchestrator) and all specialist agents
+# live here and are intentionally NOT committed. Each deployment environment generates
+# its own agent pack. Do NOT remove these gitignore lines.
+.github/skills/
+.github/prompts/
 
 # Test
 .pytest_cache/
@@ -67,9 +79,20 @@ logs/
 ehthumbs.db
 Thumbs.db
 
-# Local development artefacts — not part of the distributable source
-# Feature registries, sprint tickets, and generation scripts are working-env
-# files only; they are not needed by other developers building Nexus-AI.
+# ─── Local Planning Assets (local-only, autonomy planner input) ──────────────
+# These directories contain working-environment files used by the autonomy
+# engine as planner inputs. They are LOCAL-ONLY:
+#   docs/registry/       — Feature registries (v2, v3, sprint seeds). Generated
+#                          by scripts/build_operational_registry.py. Regenerate
+#                          locally; do not commit generated CSVs/JSOLs.
+#   docs/sprint-tickets/ — Sprint board and ticket stubs. Lifecycle-managed by
+#                          the autonomy engine. Not portable across deployments.
+#   scripts/             — Audit/build helper scripts. Local tooling only.
+#
+# NOTE: The autonomy planner references specific filenames in these dirs.
+# If a referenced file is missing, create a stub locally; do not remove the
+# gitignore entries to work around missing stubs.
 docs/registry/
 docs/sprint-tickets/
 scripts/
+.nexus/
