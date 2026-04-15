@@ -783,6 +783,32 @@ def v1_capabilities():
         "reasoning": any(flag["reasoning"] for flag in flags),
     }
 
+
+def _normalize_embeddings_input(raw_input):
+    if isinstance(raw_input, str):
+        text = raw_input
+        return [text], max(1, len(text.split()))
+
+    if not isinstance(raw_input, list) or not raw_input:
+        raise ValueError("input is required")
+
+    if all(isinstance(item, str) for item in raw_input):
+        texts = raw_input
+        token_count = sum(max(1, len(item.split())) for item in texts)
+        return texts, token_count
+
+    if all(isinstance(item, int) for item in raw_input):
+        token_ids = raw_input
+        return [" ".join(str(token) for token in token_ids)], max(1, len(token_ids))
+
+    if all(isinstance(item, list) and all(isinstance(token, int) for token in item) for item in raw_input):
+        token_batches = raw_input
+        texts = [" ".join(str(token) for token in token_batch) for token_batch in token_batches]
+        token_count = sum(max(1, len(token_batch)) for token_batch in token_batches)
+        return texts, token_count
+
+    raise ValueError("input must be a string, list of strings, token array, or list of token arrays")
+
 @app.post("/v1/embeddings")
 async def v1_embeddings(request: Request):
     try:
@@ -790,9 +816,10 @@ async def v1_embeddings(request: Request):
     except ValidationError:
         return _v1_error("Invalid embeddings request", "validation_error", 422, "validation_error")
 
-    inputs = [payload.input] if isinstance(payload.input, str) else payload.input
-    if not inputs:
-        return _v1_error("input is required", "validation_error", 422, "validation_error")
+    try:
+        inputs, prompt_tokens = _normalize_embeddings_input(payload.input)
+    except ValueError as exc:
+        return _v1_error(str(exc), "validation_error", 422, "validation_error")
 
     try:
         embeddings = get_rag_system().embedding_model.embed_batch(inputs)
@@ -801,7 +828,6 @@ async def v1_embeddings(request: Request):
     except Exception as exc:
         return _v1_error(f"Failed to generate embeddings: {exc}", "model_error", 500, "model_error")
 
-    prompt_tokens = sum(max(1, len(str(item).split())) for item in inputs)
     return {
         "object": "list",
         "data": [
