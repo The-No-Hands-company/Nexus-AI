@@ -125,6 +125,7 @@ def schedule_job(name: str, task: str, schedule: str) -> ScheduledJob:
     )
     with _lock:
         _jobs[job.id] = job
+    _persist_job(job)
     _ensure_runner()
     return job
 
@@ -145,7 +146,8 @@ def cancel_job(job_id: str) -> bool:
         if not job:
             return False
         job.status = "cancelled"
-        return True
+    _persist_job(job)
+    return True
 
 
 def pause_job(job_id: str) -> bool:
@@ -154,7 +156,8 @@ def pause_job(job_id: str) -> bool:
         if not job:
             return False
         job.status = "paused"
-        return True
+    _persist_job(job)
+    return True
 
 
 def resume_job(job_id: str) -> bool:
@@ -163,15 +166,18 @@ def resume_job(job_id: str) -> bool:
         if not job:
             return False
         job.status = "active"
-        return True
+    _persist_job(job)
+    return True
 
 
 def delete_job(job_id: str) -> bool:
     with _lock:
         if job_id in _jobs:
             del _jobs[job_id]
-            return True
-        return False
+        else:
+            return False
+    _delete_job_from_db(job_id)
+    return True
 
 
 # ── Runner internals ──────────────────────────────────────────────────────────
@@ -216,6 +222,7 @@ def _run_job(job: ScheduledJob) -> None:
         job.next_run = _compute_next_run(job.schedule, job.interval_secs, now)
         if log_status == "error":
             job.status = "error"
+    _persist_job(job)
 
 
 def _scheduler_loop() -> None:
@@ -246,6 +253,79 @@ def _ensure_runner() -> None:
 def stop_runner() -> None:
     global _running
     _running = False
+
+
+# ── DB persistence helpers ───────────────────────────────────────────────────
+
+def _persist_job(job: ScheduledJob) -> None:
+    """Write job state to SQLite (fire-and-forget, suppresses errors)."""
+    try:
+        from src.db import upsert_scheduled_job
+        upsert_scheduled_job({
+            "id": job.id,
+            "name": job.name,
+            "task": job.task,
+            "schedule": job.schedule,
+            "status": job.status,
+            "created_at": job.created_at,
+            "interval_secs": job.interval_secs,
+            "next_run": job.next_run,
+            "last_run": job.last_run,
+            "run_count": job.run_count,
+            "logs": [{"run_at": l.run_at, "status": l.status, "summary": l.summary}
+                     for l in job.logs],
+        })
+    except Exception:
+        pass  # never crash the scheduler over a persistence failure
+
+
+def _delete_job_from_db(job_id: str) -> None:
+    try:
+        from src.db import delete_scheduled_job
+        delete_scheduled_job(job_id)
+    except Exception:
+        pass
+
+
+def restore_from_db() -> None:
+    """Reload persisted jobs from SQLite into the in-memory registry.
+
+    Call once at app startup.  Jobs in status 'paused' or 'active' are loaded
+    as-is.  Jobs in status 'cancelled' or 'error' are loaded but won't be
+    dispatched by the loop (status guard in _scheduler_loop).  Deleted jobs
+    are not present in the table and will not appear.
+    """
+    try:
+        from src.db import load_scheduled_jobs
+        rows = load_scheduled_jobs()
+    except Exception:
+        return
+
+    with _lock:
+        for row in rows:
+            if row["id"] in _jobs:
+                continue  # already in memory (e.g. created during this process)
+            job = ScheduledJob(
+                id=row["id"],
+                name=row["name"],
+                task=row["task"],
+                schedule=row["schedule"],
+                status=row["status"],
+                created_at=row["created_at"],
+                interval_secs=row.get("interval_secs"),
+                next_run=row.get("next_run"),
+                last_run=row.get("last_run"),
+                run_count=row.get("run_count", 0),
+                logs=[
+                    JobLog(run_at=l["run_at"], status=l["status"], summary=l["summary"])
+                    for l in (row.get("logs") or [])
+                    if isinstance(l, dict)
+                ],
+            )
+            _jobs[job.id] = job
+
+    if any(j.status == "active" for j in _jobs.values()):
+        _ensure_runner()
 
 
 # ── Serialisation helpers ─────────────────────────────────────────────────────

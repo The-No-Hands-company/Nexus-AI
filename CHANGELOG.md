@@ -7,12 +7,55 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Added
-- Sprint G: `simulate` tool — lightweight swarm prediction engine (inspired by MiroFish)
-- Sprint G: Dynamic agent spawning based on task type and complexity
-- Sprint G: Agent marketplace — JSON-defined agents importable/exportable via API
-- Sprint G: Agent-to-agent message passing via shared workspace
-- Sprint H: Vision-aware Ollama routing + `file_diff` SSE + DB `inspect_db` tool + Swarm View panel/API
-- Sprint I: Autonomous scheduler (`cron_schedule`/`cron_list`/`cron_cancel`), `/scheduler/jobs` API, command palette (Cmd+K), and `/safety/pii-scan`
+- Sprint J (NAI-SAFETY-CONTRACT-00002): Durable SQLite-backed safety audit storage — `add_safety_audit_entry()`, `load_safety_audit_entries()`, `clear_safety_audit_entries()` in `src/db.py`
+- Sprint J: `_push_safety_event()` (`src/agent.py`) now persists every audit event to the `safety_audit` table — survives process restarts
+- Sprint J: `GET /safety/audit` merges DB-persisted history with fresh in-memory events for zero-loss audit trail
+- Sprint J: `src/db.py` auto-creates `safety_audit` table on first access via `_ensure_safety_audit_table()`
+- Sprint J: `tests/test_v1_contracts.py` — `TestSafetyAuditPersistence` (5 new tests: block event persisted, visibility after in-memory clear, session filter from DB, severity filter from DB, PII scan persisted); **281 tests total**
+- Sprint J (NAI-RELIABILITY-RUNTIME-00044): Durable HITL approval storage in `hitl_approvals` table with DB-backed create/list/decide/consume helpers in `src/db.py`
+- Sprint J: `src/approvals.py` migrated from in-memory-only approval state to persistent DB-backed state with cache hydration on startup
+- Sprint J: `src/agent.py` now delegates approval creation/listing/decision to `src/approvals.py` to avoid runtime drift in approval semantics
+- Sprint J: `tests/test_v1_contracts.py` — `TestHITLApprovalPersistence` validates listing, decision state, and consume flow after in-memory cache clears
+
+---
+
+## [0.9.0] - 2026-05-01 — Sprint I: Scheduler, PII Scanner, Knowledge Graph
+
+### Added
+- `src/scheduler.py`: `ScheduledJob`, `schedule_job`, `list_jobs`, `cancel_job`, `pause_job`, `resume_job`, `_cron_matches`, `_scheduler_loop` — full background cron scheduler
+- `src/knowledge_graph.py`: SQLite-backed KG — `kg_store`, `kg_query`, `kg_get`, `kg_relate`, `kg_list_entities`, `kg_delete`, `kg_to_context_string`
+- `src/api/routes.py`: `GET /scheduler/jobs`, `POST /scheduler/jobs`, `POST /scheduler/jobs/{job_id}/cancel`
+- `src/api/routes.py`: `POST /kg/store`, `GET /kg/query`, `GET /kg/entities`, `GET /kg/entities/{name}`, `DELETE /kg/entities/{name}`
+- `src/api/routes.py`: `POST /safety/pii-scan` — PII detection and redaction endpoint
+- `src/api/routes.py`: `POST /safety/prompt-injection` — prompt injection scan with explain mode
+- `src/api/routes.py`: Command palette support (inline Cmd+K search across all operations)
+- `tests/test_v1_contracts.py`: `TestSprintI` — scheduler, PII scan, KG endpoints
+
+---
+
+## [0.8.0] - 2026-04-30 — Sprint H: File Diff, Swarm View, Vision Routing
+
+### Added
+- `src/execution_trace.py`: `save_file_diff`, `get_file_diffs`, `get_file_diff_detail` — per-trace diff storage
+- `src/api/routes.py`: `POST /diff`, `GET /diff/history`, `GET /diff/{diff_id}` — file diff endpoints
+- `src/api/routes.py`: `GET /swarm/activity` — real-time swarm activity feed (circular buffer)
+- `src/agent.py`: `OLLAMA_MODEL_REGISTRY` extended with vision model (`llava`, `bakllava`) routing
+- `src/tools_builtin.py`: `inspect_db` tool — schema and row introspection for SQLite targets
+- `static/js/panels/swarm.js`: Swarm View panel with polling, colour-coded action feed, event count
+- `tests/test_v1_contracts.py`: `TestSprintH` — diff viewer, swarm activity, `inspect_db`
+
+---
+
+## [0.7.0] - 2026-04-28 — Sprint G: Simulation, Dynamic Spawning, Agent Marketplace
+
+### Added
+- `src/simulation.py`: `SimulationEngine`, `PersonaAgent`, `RoundSummary`, `SimulationResult` — run parallel multi-agent debates with LLM-backed synthesis
+- `src/agent_bus.py`: `AgentBus`, `AgentMessage` — agent-to-agent message passing with inbox/unread/log
+- `src/api/routes.py`: `POST /simulate` — trigger simulation with configurable personas and task
+- `src/api/routes.py`: `GET /marketplace/agents`, `POST /marketplace/agents`, `DELETE /marketplace/agents/{id}` — agent marketplace CRUD
+- `src/api/routes.py`: `GET /agents/bus/log`, `GET /agents/bus/{agent_id}`, `POST /agents/bus` — agent bus API
+- `src/autonomy.py`: dynamic agent spawning logic based on task complexity tier and required specialist type
+- `tests/test_v1_contracts.py`: `TestSprintG` — simulation, marketplace, agent bus
 
 ---
 

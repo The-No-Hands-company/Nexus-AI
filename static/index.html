@@ -890,6 +890,47 @@
       .pill-providers span{display:none}.pill-providers{padding:4px 8px}
       .pill-safety span{display:none}.pill-safety{padding:4px 8px}
       #welcome h2{font-size:1.25rem}.bubble{font-size:.84rem}}
+
+    /* ── HITL APPROVAL CARDS ── */
+    .approval-card{
+      margin:8px 0;border:1px solid color-mix(in srgb,var(--amber) 45%,var(--border));
+      border-radius:10px;background:color-mix(in srgb,var(--amber) 6%,var(--surface2));
+      padding:12px 14px;animation:fadeUp .2s ease}
+    .approval-card-header{
+      display:flex;align-items:center;gap:7px;
+      font-size:.72rem;font-weight:700;color:var(--amber);
+      text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px}
+    .approval-card-action{
+      font-size:.8rem;color:var(--text);margin-bottom:10px;line-height:1.5;
+      font-family:monospace;background:var(--bg);padding:6px 10px;
+      border-radius:6px;white-space:pre-wrap;word-break:break-all;max-height:120px;overflow-y:auto}
+    .approval-card-btns{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+    .btn-approve{
+      background:color-mix(in srgb,var(--green) 14%,transparent);
+      color:var(--green);border:1px solid color-mix(in srgb,var(--green) 38%,transparent);
+      border-radius:7px;padding:6px 16px;font-size:.78rem;font-weight:600;
+      cursor:pointer;transition:all .14s}
+    .btn-approve:hover{background:color-mix(in srgb,var(--green) 24%,transparent)}
+    .btn-approve:disabled,.btn-reject:disabled{opacity:.45;cursor:not-allowed}
+    .btn-reject{
+      background:color-mix(in srgb,var(--red) 10%,transparent);
+      color:var(--red);border:1px solid color-mix(in srgb,var(--red) 30%,transparent);
+      border-radius:7px;padding:6px 16px;font-size:.78rem;font-weight:600;
+      cursor:pointer;transition:all .14s}
+    .btn-reject:hover{background:color-mix(in srgb,var(--red) 20%,transparent)}
+    .approval-resolved{
+      font-size:.73rem;font-weight:600;padding:3px 10px;
+      border-radius:5px;display:inline-flex;align-items:center;gap:4px}
+    .approval-resolved.approved{
+      color:var(--green);background:color-mix(in srgb,var(--green) 10%,transparent)}
+    .approval-resolved.rejected{
+      color:var(--red);background:color-mix(in srgb,var(--red) 10%,transparent)}
+    /* approvals badge on overflow button */
+    #approvals-badge{
+      display:none;background:var(--amber);color:#000;
+      font-size:.58rem;font-weight:800;border-radius:99px;
+      padding:1px 5px;margin-left:3px;vertical-align:middle}
+    #approvals-badge.visible{display:inline}
   </style>
 </head>
 <body>
@@ -988,6 +1029,7 @@
       <button onclick="openDebatePanel();toggleOverflow()">⚔️ Debate</button>
       <button onclick="openHypothesisPanel();toggleOverflow()">🔬 Hypothesis</button>
       <button onclick="openAdaptiveRoutingPanel();toggleOverflow()">🎯 Adaptive routing</button>
+      <button onclick="openApprovalsPanel();toggleOverflow()">⚠️ Approvals<span id="approvals-badge"></span></button>
     </div>
   </div>
 </header>
@@ -1624,6 +1666,32 @@
   </div>
 </div>
 
+<!-- ── HITL Approvals Panel ─────────────────────────────────────────────── -->
+<div id="approvals-panel" style="position:fixed;bottom:80px;right:20px;width:460px;max-height:580px;background:var(--surface);border:1px solid color-mix(in srgb,var(--amber) 35%,var(--border));border-radius:12px;display:none;flex-direction:column;z-index:50;box-shadow:0 8px 32px rgba(0,0,0,.45);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--amber);">⚠️ HITL Approvals</span>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span id="approvals-panel-count" style="font-size:.7rem;color:var(--muted);"></span>
+      <button class="panel-btn" onclick="closeApprovalsPanel()" title="Close">✕</button>
+    </div>
+  </div>
+  <!-- HITL mode selector -->
+  <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;">
+    <span style="font-size:.78rem;color:var(--muted);flex-shrink:0;">HITL mode:</span>
+    <select id="hitl-mode-select" onchange="saveHitlMode(this.value)"
+      style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.8rem;">
+      <option value="off">Off — no interception</option>
+      <option value="warn">Warn — log high-risk tools</option>
+      <option value="block">Block — require approval</option>
+    </select>
+    <button class="btn-ghost" style="height:32px;font-size:.78rem;padding:0 12px;" onclick="loadApprovals()">↻ Refresh</button>
+  </div>
+  <div id="approvals-feed" style="flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:80px;"></div>
+  <div style="padding:8px 14px;border-top:1px solid var(--border);font-size:.65rem;color:var(--muted);">
+    Pending approvals are held until you decide. Rejected actions are not executed.
+  </div>
+</div>
+
 <script>
 marked.setOptions({breaks:true,gfm:true});
 
@@ -1892,6 +1960,25 @@ async function send(){
           tag.textContent=`🔒 Sandbox: ${esc(evt.repo||'session workdir')}`;
           agentBub.appendChild(tag);scrollBottom();
 
+        } else if(evt.type==='approval_required'){haptic('medium');
+          // Render inline approval card — user must approve/reject before tool executes
+          const apprCard=document.createElement('div');apprCard.className='approval-card';
+          const apprId=evt.approval_id||'';
+          const actionData=evt.action||{};
+          const actionStr=JSON.stringify(actionData,null,2);
+          apprCard.innerHTML=`
+            <div class="approval-card-header">⚠️ Action requires approval</div>
+            <div class="approval-card-action">${esc(actionStr)}</div>
+            <div class="approval-card-btns">
+              <button class="btn-approve" data-id="${esc(apprId)}" onclick="inlineApprove('${esc(apprId)}',true,this.closest('.approval-card'))">✓ Approve</button>
+              <button class="btn-reject" data-id="${esc(apprId)}" onclick="inlineApprove('${esc(apprId)}',false,this.closest('.approval-card'))">✕ Reject</button>
+              <span style="font-size:.72rem;color:var(--muted);">${esc(evt.note||'Waiting for decision…')}</span>
+            </div>`;
+          if(!toolContainer){toolContainer=document.createElement('div');agentBub.appendChild(toolContainer);}
+          toolContainer.appendChild(apprCard);
+          updateApprovalsBadge();
+          scrollBottom();
+
         } else if(evt.type==='tool'){haptic('light');
           if(!toolContainer){toolContainer=document.createElement('div');agentBub.appendChild(toolContainer)}
           // Deduplicate: if the last tool step has the same action+label, increment its counter
@@ -2151,6 +2238,117 @@ document.addEventListener('keydown', e => {
 
 // ── SOURCE CARDS ──────────────────────────────────────────────────────────────
 // Source card utilities moved to static/js/utilities/source-cards.js
+
+// ── HITL APPROVALS PANEL ──────────────────────────────────────────────────────
+function openApprovalsPanel(){
+  const p=document.getElementById('approvals-panel');
+  p.style.display='flex';
+  loadHitlMode();
+  loadApprovals();
+}
+function closeApprovalsPanel(){
+  document.getElementById('approvals-panel').style.display='none';
+}
+async function loadHitlMode(){
+  try{
+    const r=await fetch('/settings/hitl');
+    if(!r.ok) return;
+    const d=await r.json();
+    const sel=document.getElementById('hitl-mode-select');
+    if(sel) sel.value=d.hitl_approval_mode||'off';
+  }catch(e){console.warn('loadHitlMode:',e)}
+}
+async function saveHitlMode(mode){
+  try{
+    await fetch('/settings/hitl',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hitl_approval_mode:mode})});
+  }catch(e){console.warn('saveHitlMode:',e)}
+}
+async function loadApprovals(){
+  const feed=document.getElementById('approvals-feed');
+  const count=document.getElementById('approvals-panel-count');
+  if(!feed) return;
+  feed.innerHTML='<div style="color:var(--muted);font-size:.78rem;padding:8px 0;">Loading…</div>';
+  try{
+    const r=await fetch('/approvals');
+    if(!r.ok){feed.innerHTML='<div style="color:var(--red);font-size:.78rem;">Failed to load approvals.</div>';return;}
+    const d=await r.json();
+    const items=d.items||[];
+    if(count) count.textContent=`${items.length} item${items.length!==1?'s':''}`;
+    feed.innerHTML='';
+    if(!items.length){
+      feed.innerHTML='<div style="color:var(--muted);font-size:.78rem;padding:8px 0;">No pending approvals.</div>';
+      updateApprovalsBadge(0); return;
+    }
+    const pending=items.filter(i=>i.status==='pending').length;
+    updateApprovalsBadge(pending);
+    items.forEach(item=>{
+      const card=document.createElement('div');card.className='approval-card';
+      const actionStr=JSON.stringify(item.action||{},null,2);
+      const ts=item.created_at?new Date(item.created_at).toLocaleTimeString():'';
+      const isPending=item.status==='pending';
+      card.innerHTML=`
+        <div class="approval-card-header">⚠️ ${esc(item.action?.action||'action')} <span style="font-weight:400;text-transform:none;font-size:.65rem;color:var(--muted);margin-left:auto">${esc(ts)}</span></div>
+        <div class="approval-card-action">${esc(actionStr)}</div>
+        <div class="approval-card-btns">
+          ${isPending
+            ?`<button class="btn-approve" onclick="panelApprove('${esc(item.id)}',true,this.closest('.approval-card'))">✓ Approve</button>
+               <button class="btn-reject" onclick="panelApprove('${esc(item.id)}',false,this.closest('.approval-card'))">✕ Reject</button>`
+            :`<span class="approval-resolved ${esc(item.status)}">${item.status==='approved'?'✓ Approved':'✕ Rejected'}</span>${item.note?`<span style="font-size:.7rem;color:var(--muted);">${esc(item.note)}</span>`:''}`
+          }
+        </div>`;
+      feed.appendChild(card);
+    });
+  }catch(e){
+    if(feed) feed.innerHTML='<div style="color:var(--red);font-size:.78rem;">Error loading approvals.</div>';
+    console.warn('loadApprovals:',e);
+  }
+}
+async function panelApprove(approvalId, approved, card){
+  await _resolveApproval(approvalId, approved, card);
+  // Refresh panel list
+  setTimeout(loadApprovals,300);
+}
+async function inlineApprove(approvalId, approved, card){
+  await _resolveApproval(approvalId, approved, card);
+  updateApprovalsBadge();
+}
+async function _resolveApproval(approvalId, approved, card){
+  if(!approvalId) return;
+  // Disable buttons immediately
+  card.querySelectorAll('button').forEach(b=>{b.disabled=true;});
+  try{
+    const r=await fetch(`/approvals/${encodeURIComponent(approvalId)}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({approved,note:approved?'Approved via UI':'Rejected via UI'})
+    });
+    const d=await r.json();
+    const btnsDiv=card.querySelector('.approval-card-btns');
+    if(btnsDiv){
+      btnsDiv.innerHTML=`<span class="approval-resolved ${approved?'approved':'rejected'}">${approved?'✓ Approved':'✕ Rejected'}</span>`;
+    }
+  }catch(e){
+    card.querySelectorAll('button').forEach(b=>{b.disabled=false;});
+    console.warn('_resolveApproval:',e);
+  }
+}
+async function updateApprovalsBadge(count){
+  const badge=document.getElementById('approvals-badge');
+  if(!badge) return;
+  if(count===undefined){
+    try{
+      const r=await fetch('/approvals');
+      const d=await r.json();
+      count=(d.items||[]).filter(i=>i.status==='pending').length;
+    }catch{count=0;}
+  }
+  if(count>0){
+    badge.textContent=count>99?'99+':String(count);
+    badge.classList.add('visible');
+  } else {
+    badge.classList.remove('visible');
+  }
+}
 
 </script>
 <script src="/static/js/api.js"></script>

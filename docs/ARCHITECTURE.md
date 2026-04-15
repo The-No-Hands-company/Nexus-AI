@@ -9,6 +9,7 @@
 - [Overview](#overview)
 - [High-Level Component Map](#high-level-component-map)
 - [Request Lifecycle](#request-lifecycle)
+- [Autonomous Runtime Loop](#autonomous-runtime-loop)
 - [Component Deep-Dives](#component-deep-dives)
   - [main.py — API Gateway](#mainpy--api-gateway)
   - [agent.py — Agent Loop](#agentpy--agent-loop)
@@ -127,6 +128,36 @@ Nexus-AI/
    └── emit structured events: plan, subtask, tool, result
    └── emit autonomy_done when all subtasks complete
 ```
+
+---
+
+## Autonomous Runtime Loop
+
+Nexus AI now models autonomous development as a closed loop with explicit handoff boundaries:
+
+```
+Supervisor -> Orchestrator -> Autonomizers -> Enforcers -> Orchestrator -> Supervisor
+```
+
+### Layer Map
+
+| Layer | Primary Responsibility | Skill Roles |
+|---|---|---|
+| Supervisor | Set mission intent, policy, risk tolerance, and release priorities | Human operator (project owner) |
+| Orchestrator | Plan, decompose, schedule, arbitrate conflicts, maintain world state | `nexus-ai-state-machine-governor`, `nexus-ai-task-decomposer`, `nexus-ai-conflict-resolution-lead`, `nexus-ai-resource-scheduler` |
+| Autonomizers | Execute implementation loops, self-correct, monitor drift, and report telemetry | `nexus-ai-self-correcting-coder`, `nexus-ai-ci-cd-autopilot`, `nexus-ai-dependency-watcher`, `nexus-ai-synthetic-user-simulator`, `nexus-ai-telemetry-visualizer`, `nexus-ai-intent-alignment-verifier`, `nexus-ai-ask-for-help-protocol` |
+| Enforcers | Validate safety, security, privacy, and compliance constraints before promotion | Existing guardrail and policy skills such as `nexus-ai-guardrails-enforcer`, `nexus-ai-red-teamer`, `nexus-ai-privacy-preserving-engineer`, `nexus-ai-compliance-officer` |
+
+### Loop Semantics
+
+1. Supervisor sets objective and policy constraints.
+2. Orchestrator converts objective into atomic tasks, assigns model budget, and defines acceptance checks.
+3. Autonomizers execute tasks in iterative build-test-fix loops and emit structured telemetry.
+4. Enforcers gate progress by running safety/compliance checks and blocking unsafe transitions.
+5. Orchestrator updates world state (`complete`, `buggy`, `blocked`, `next`) and either re-plans or escalates.
+6. Supervisor receives summarized status, approves directional changes, or revises intent.
+
+This design keeps planning authority centralized, execution specialized, and governance explicit.
 
 ---
 

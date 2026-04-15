@@ -4,7 +4,7 @@ unit converter, regex tester, base64, JSON formatter, color info.
 """
 import os, re, json, math, base64 as b64lib
 from datetime import datetime
-from .model_router import ModelRouter
+from .providers.model_router import ModelRouter
 from .scheduler import (
     schedule_job,
     list_jobs,
@@ -405,6 +405,9 @@ def dispatch_builtin(action: dict) -> dict | None:
         r = tool_write_csv(action.get("path", ""), action.get("data", []),
                            action.get("workdir", "/tmp"))
         return _tool_trace(action, r, {"path": action.get("path", "")})
+    if kind == "read_pdf":
+        r = tool_read_pdf(action.get("path", ""), action.get("workdir", "/tmp"))
+        return _tool_trace(action, r, {"path": action.get("path", "")})
     if kind == "read_docx":
         r = tool_read_docx(action.get("path", ""), action.get("workdir", "/tmp"))
         return _tool_trace(action, r, {"path": action.get("path", "")})
@@ -524,7 +527,7 @@ def tool_read_pdf(path: str, workdir: str = "/tmp") -> str:
         import pypdf
         reader = pypdf.PdfReader(full)
         pages  = []
-        for i, page in enumerate(reader.pages[:20]):   # first 20 pages
+        for i, page in enumerate(reader.pages[:50]):   # first 50 pages (production limit)
             text = page.extract_text() or ""
             if text.strip():
                 pages.append(f"[Page {i+1}]\n{text.strip()}")
@@ -532,8 +535,8 @@ def tool_read_pdf(path: str, workdir: str = "/tmp") -> str:
             return "❌ No extractable text found (may be a scanned PDF)"
         total = len(reader.pages)
         content = "\n\n".join(pages)
-        if len(content) > 6000:
-            content = content[:6000] + f"\n\n… (truncated, {total} pages total)"
+        if len(content) > 12000:
+            content = content[:12000] + f"\n\n… (truncated, {total} pages total)"
         return content
     except ImportError:
         return "❌ pypdf not installed. Run: pip install pypdf"
@@ -562,7 +565,7 @@ def tool_diff(original: str, modified: str, filename: str = "file") -> str:
 # ── OFFICE DOCUMENT READERS ───────────────────────────────────────────────────
 
 def tool_read_docx(path: str, workdir: str = "/tmp") -> str:
-    """Extract text from a Word (.docx) file."""
+    """Extract text from a Word (.docx) file, including heading structure and tables."""
     import os as _os
     full = _os.path.join(workdir, path) if not _os.path.isabs(path) else path
     if not _os.path.exists(full):
@@ -570,10 +573,33 @@ def tool_read_docx(path: str, workdir: str = "/tmp") -> str:
     try:
         from docx import Document
         doc = Document(full)
-        paragraphs = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
-        content = "\n\n".join(paragraphs)
-        if len(content) > 6000:
-            content = content[:6000] + f"\n\n… (truncated, {len(doc.paragraphs)} paragraphs total)"
+        parts = []
+        # Paragraphs with heading structure
+        for para in doc.paragraphs:
+            if not para.text.strip():
+                continue
+            style = para.style.name if para.style else ""
+            if style.startswith("Heading "):
+                try:
+                    level = int(style.split()[-1])
+                except (ValueError, IndexError):
+                    level = 1
+                marker = "#" * min(level, 4)
+                parts.append(f"{marker} {para.text.strip()}")
+            else:
+                parts.append(para.text.strip())
+        # Tables
+        for tbl_idx, table in enumerate(doc.tables):
+            rows = []
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                if any(cells):
+                    rows.append(" | ".join(cells))
+            if rows:
+                parts.append(f"[Table {tbl_idx + 1}]\n" + "\n".join(rows[:100]))
+        content = "\n\n".join(parts)
+        if len(content) > 8000:
+            content = content[:8000] + f"\n\n… (truncated, {len(doc.paragraphs)} paragraphs, {len(doc.tables)} tables)"
         return content if content else "❌ No extractable text found in document."
     except ImportError:
         return "❌ python-docx not installed. Run: pip install python-docx"
@@ -591,17 +617,17 @@ def tool_read_xlsx(path: str, workdir: str = "/tmp") -> str:
         import openpyxl
         wb = openpyxl.load_workbook(full, read_only=True, data_only=True)
         lines = []
-        for sheet_name in wb.sheetnames[:3]:   # first 3 sheets
+        for sheet_name in wb.sheetnames[:5]:   # first 5 sheets (production limit)
             ws = wb[sheet_name]
             lines.append(f"### Sheet: {sheet_name}")
             row_count = 0
-            for row in ws.iter_rows(max_row=50, values_only=True):
+            for row in ws.iter_rows(max_row=200, values_only=True):   # 200 rows per sheet
                 cells = [str(c) if c is not None else "" for c in row]
                 if any(cells):
                     lines.append(" | ".join(cells))
                     row_count += 1
-            if ws.max_row and ws.max_row > 50:
-                lines.append(f"… ({ws.max_row - 50} more rows in sheet)")
+            if ws.max_row and ws.max_row > 200:
+                lines.append(f"… ({ws.max_row - 200} more rows in sheet)")
         wb.close()
         content = "\n".join(lines)
         return content if content.strip() else "❌ No data found in workbook."

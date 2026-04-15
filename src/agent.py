@@ -1,5 +1,4 @@
 import os, re, json, glob, time, subprocess, threading, resource
-import uuid
 from functools import lru_cache
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Iterator, Optional
@@ -9,12 +8,12 @@ from .personas import build_system_prompt, get_active_persona_name, get_persona
 from .thinking import build_tot_prompt, parse_tot_response, build_critique_prompt, parse_critique_response, build_got_prompt, parse_got_response
 from .context_window import ContextWindowManager
 from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk, get_ensemble_enabled, set_ensemble_enabled
-from .db import load_custom_instructions, log_usage, init_usage_table
+from .db import load_custom_instructions, log_usage, init_usage_table, add_safety_audit_entry
 from .knowledge_graph import kg_to_context_string
 from .execution_trace import save_checkpoint as _save_checkpoint
 from .safety_pipeline import SAFETY_POLICY_PROFILES, describe_block, screen_output, screen_tool_action
 from .safety_types import SafetyAction
-from .approvals import pending_approvals, consume_approved_action
+from .approvals import create_tool_approval, list_tool_approvals, decide_tool_approval, consume_approved_action
 from .memory import add_memory, summarize_history as _summarize_history, get_memory_context
 try:
     init_usage_table()
@@ -53,63 +52,6 @@ def update_config(provider=None, model=None, temperature=None, persona=None,
         _config["safety_profile"] = profile if profile in SAFETY_POLICY_PROFILES else "standard"
     return dict(_config)
 
-
-def _approval_action_signature(action: Dict[str, Any]) -> str:
-    normalized = dict(action or {})
-    normalized.pop("approval_id", None)
-    try:
-        return json.dumps(normalized, sort_keys=True, ensure_ascii=False)
-    except Exception:
-        return str(normalized)
-
-
-def create_tool_approval(sid: str, action: Dict[str, Any]) -> str:
-    approval_id = f"appr_{uuid.uuid4().hex[:12]}"
-    pending_approvals[approval_id] = {
-        "id": approval_id,
-        "session_id": sid or "",
-        "action": dict(action or {}),
-        "signature": _approval_action_signature(action),
-        "status": "pending",
-        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    }
-    return approval_id
-
-
-def list_tool_approvals(sid: str = "") -> List[Dict[str, Any]]:
-    items = list(pending_approvals.values())
-    if sid:
-        items = [item for item in items if item.get("session_id") == sid]
-    return sorted(items, key=lambda item: item.get("created_at", ""), reverse=True)
-
-
-def decide_tool_approval(approval_id: str, approved: bool, note: str = "") -> Optional[Dict[str, Any]]:
-    record = pending_approvals.get(approval_id)
-    if not record:
-        return None
-    record["status"] = "approved" if approved else "rejected"
-    record["note"] = note
-    record["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    return dict(record)
-
-
-def _consume_approved_action(approval_id: str, sid: str, action: Dict[str, Any]) -> bool:
-    if not approval_id:
-        return False
-    record = pending_approvals.get(approval_id)
-    if not record:
-        return False
-    if record.get("status") != "approved":
-        return False
-    if (record.get("session_id") or "") != (sid or ""):
-        return False
-    if record.get("signature") != _approval_action_signature(action):
-        return False
-    record["status"] = "consumed"
-    record["updated_at"] = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    return True
-
 # ── env ───────────────────────────────────────────────────────────────────────
 GH_TOKEN    = os.getenv("GH_TOKEN", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "")
@@ -140,6 +82,11 @@ def _push_safety_event(event_type: str, detail: Dict) -> None:
     safety_log.append(entry)
     if len(safety_log) > _MAX_SAFETY_LOG:
         del safety_log[:-_MAX_SAFETY_LOG]
+    try:
+        add_safety_audit_entry(entry)
+    except Exception:
+        # Keep runtime safety logging resilient even if persistence is unavailable.
+        pass
 
 # ── token extraction from user messages ───────────────────────────────────────
 _TOKEN_RE   = re.compile(r'gh[ps]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{80,}')
@@ -2341,5 +2288,7 @@ def get_providers_list():
                        "available":has_key and not cooling,"has_key":has_key,
                        "rate_limited":cooling,
                        "cooldown_remaining":max(0,int(_cooldowns.get(pid,0)-time.time())),
-                       "keyless":cfg.get("keyless",False)})
+                       "keyless":cfg.get("keyless",False),
+                       "openai_compat":cfg.get("openai_compat",False),
+                       "local":cfg.get("local",False)})
     return result

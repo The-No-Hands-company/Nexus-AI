@@ -21,7 +21,8 @@ class V1ChatCompletionsRequest(BaseModel):
     model: Optional[str] = "nexus-ai"
     messages: List[V1Message]
     stream: Optional[bool] = False
-    response_format: Optional[str] = None
+    response_format: Optional[Union[str, Dict[str, Any]]] = None
+    user: Optional[str] = None
 
 class V1EmbeddingsRequest(BaseModel):
     model: Optional[str] = "nexus-ai"
