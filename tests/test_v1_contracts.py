@@ -21,6 +21,22 @@ client = TestClient(app)
 
 
 class TestV1Contracts(unittest.TestCase):
+    def test_v1_model_retrieve_known_model(self):
+        response = client.get("/v1/models/nexus-ai")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["object"], "model")
+        self.assertEqual(payload["id"], "nexus-ai")
+        self.assertEqual(payload["owned_by"], "nexus-systems")
+
+    def test_v1_model_retrieve_unknown_model_returns_typed_not_found(self):
+        response = client.get("/v1/models/does-not-exist")
+        self.assertEqual(response.status_code, 404)
+        payload = response.json()
+        self.assertEqual(payload["type"], "not_found_error")
+        self.assertEqual(payload["error"]["type"], "not_found_error")
+        self.assertEqual(payload["error"]["code"], "model_not_found")
+
     def test_v1_models_capabilities(self):
         response = client.get("/v1/models/capabilities")
         self.assertEqual(response.status_code, 200)

@@ -729,19 +729,39 @@ def scheduler_cancel_job(job_id: str):
 #
 # Endpoints:
 #   GET  /v1/models                  – list available models
+#   GET  /v1/models/{model}          – retrieve model metadata
 #   POST /v1/chat/completions        – synchronous or streaming chat
+
+
+def _v1_models_catalog() -> list[dict]:
+    providers = get_providers_list()
+    provider_models = []
+    for provider in providers:
+        if isinstance(provider, dict):
+            provider_id = str(provider.get("id", "")).strip()
+        else:
+            provider_id = str(provider).strip()
+        if not provider_id:
+            continue
+        provider_models.append(
+            {
+                "id": f"nexus-ai/{provider_id}",
+                "object": "model",
+                "created": 0,
+                "owned_by": "nexus-systems",
+            }
+        )
+
+    return [
+        {"id": "nexus-ai", "object": "model", "created": 0, "owned_by": "nexus-systems"},
+        {"id": "nexus-ai/auto", "object": "model", "created": 0, "owned_by": "nexus-systems"},
+    ] + provider_models
 
 @app.get("/v1/models")
 def v1_models():
     return {
         "object": "list",
-        "data": [
-            {"id": "nexus-ai", "object": "model", "created": 0, "owned_by": "nexus-systems"},
-            {"id": "nexus-ai/auto", "object": "model", "created": 0, "owned_by": "nexus-systems"},
-        ] + [
-            {"id": f"nexus-ai/{p}", "object": "model", "created": 0, "owned_by": "nexus-systems"}
-            for p in get_providers_list()
-        ],
+        "data": _v1_models_catalog(),
     }
 
 @app.get("/v1/models/capabilities")
@@ -766,6 +786,24 @@ def v1_model_capabilities():
             for provider in providers
         ],
     }
+
+
+@app.get("/v1/models/{model_id:path}")
+def v1_model_retrieve(model_id: str):
+    requested_id = model_id
+    if not requested_id.startswith("nexus-ai"):
+        requested_id = f"nexus-ai/{requested_id}"
+
+    for model in _v1_models_catalog():
+        if model["id"] == requested_id:
+            return model
+
+    return _v1_error(
+        f"Model '{requested_id}' not found",
+        "not_found_error",
+        404,
+        "model_not_found",
+    )
 
 
 @app.get("/v1/capabilities")
