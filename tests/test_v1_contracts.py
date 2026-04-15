@@ -257,6 +257,25 @@ class TestV1Contracts(unittest.TestCase):
         self.assertEqual(payload["error"]["type"], "invalid_response_format")
         self.assertEqual(payload["error"]["code"], "invalid_response_format")
 
+    @patch("src.api.routes.run_agent_task")
+    def test_v1_chat_completions_reports_usage_token_counts(self, run_agent_task):
+        run_agent_task.return_value = {
+            "result": "hello from nexus assistant",
+            "provider": "nexus",
+            "model": "nexus",
+        }
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hello from user"}]},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        usage = payload["usage"]
+        self.assertGreaterEqual(usage["prompt_tokens"], 1)
+        self.assertGreaterEqual(usage["completion_tokens"], 1)
+        self.assertEqual(usage["total_tokens"], usage["prompt_tokens"] + usage["completion_tokens"])
+
     def test_v1_chat_completions_guardrail_violation(self):
         response = client.post(
             "/v1/chat/completions",

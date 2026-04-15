@@ -847,6 +847,13 @@ def _normalize_embeddings_input(raw_input):
 
     raise ValueError("input must be a string, list of strings, token array, or list of token arrays")
 
+
+def _estimate_text_tokens(text: str) -> int:
+    normalized = str(text or "").strip()
+    if not normalized:
+        return 0
+    return len(normalized.split())
+
 @app.post("/v1/embeddings")
 async def v1_embeddings(request: Request):
     try:
@@ -1035,6 +1042,10 @@ async def v1_chat_completions(request: Request):
                 "invalid_response_format",
             )
 
+    prompt_tokens = _estimate_text_tokens(task)
+    completion_tokens = _estimate_text_tokens(output)
+    total_tokens = prompt_tokens + completion_tokens
+
     return {
         "id": cid,
         "object": "chat.completion",
@@ -1045,7 +1056,11 @@ async def v1_chat_completions(request: Request):
             "message": {"role": "assistant", "content": output},
             "finish_reason": "stop",
         }],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        },
         "_nexus": {"provider": result.get("provider", ""), "model": result.get("model", "")},
     }
 
