@@ -106,6 +106,46 @@ class TestV1Contracts(unittest.TestCase):
         self.assertGreaterEqual(payload["usage"]["prompt_tokens"], 1)
         self.assertEqual(payload["usage"]["total_tokens"], payload["usage"]["prompt_tokens"])
 
+    @patch("src.api.routes.get_rag_system")
+    def test_v1_embeddings_accepts_token_array_input(self, get_rag_system):
+        mock_rag = MagicMock()
+        mock_embedding = MagicMock()
+        mock_embedding.embed_batch.return_value = [[0.9, 0.8]]
+        mock_rag.embedding_model = mock_embedding
+        get_rag_system.return_value = mock_rag
+
+        response = client.post("/v1/embeddings", json={"input": [101, 202, 303], "model": "nexus-ai"})
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload["data"]), 1)
+        self.assertEqual(payload["usage"]["prompt_tokens"], 3)
+        mock_embedding.embed_batch.assert_called_once_with(["101 202 303"])
+
+    @patch("src.api.routes.get_rag_system")
+    def test_v1_embeddings_accepts_batch_token_arrays_input(self, get_rag_system):
+        mock_rag = MagicMock()
+        mock_embedding = MagicMock()
+        mock_embedding.embed_batch.return_value = [[0.9, 0.8], [0.7, 0.6]]
+        mock_rag.embedding_model = mock_embedding
+        get_rag_system.return_value = mock_rag
+
+        response = client.post(
+            "/v1/embeddings",
+            json={"input": [[11, 12], [21, 22, 23]], "model": "nexus-ai"},
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(len(payload["data"]), 2)
+        self.assertEqual(payload["usage"]["prompt_tokens"], 5)
+        mock_embedding.embed_batch.assert_called_once_with(["11 12", "21 22 23"])
+
+    def test_v1_embeddings_rejects_mixed_input_types(self):
+        response = client.post("/v1/embeddings", json={"input": ["hello", 1], "model": "nexus-ai"})
+        self.assertEqual(response.status_code, 422)
+        payload = response.json()
+        self.assertEqual(payload["type"], "validation_error")
+        self.assertEqual(payload["error"]["code"], "validation_error")
+
     @patch("src.api.routes.run_agent_task")
     def test_v1_chat_completions_json_mode_invalid(self, run_agent_task):
         run_agent_task.return_value = {"result": "not json", "provider": "nexus", "model": "nexus"}

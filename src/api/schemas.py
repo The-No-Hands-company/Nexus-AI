@@ -26,7 +26,7 @@ class V1ChatCompletionsRequest(BaseModel):
 
 class V1EmbeddingsRequest(BaseModel):
     model: Optional[str] = "nexus-ai"
-    input: Union[str, List[str]]
+    input: Union[str, List[str], List[int], List[List[int]]]
     user: Optional[str] = None
 
 class V1EmbeddingData(BaseModel):
