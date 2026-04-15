@@ -38,6 +38,7 @@ class V1EmbeddingsResponse(BaseModel):
     object: str = "list"
     data: List[V1EmbeddingData]
     model: Optional[str] = None
+    usage: Dict[str, int] = {}
 
 class ProviderCapability(BaseModel):
     id: str
