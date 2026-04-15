@@ -100,6 +100,11 @@ class TestV1Contracts(unittest.TestCase):
         self.assertEqual(len(payload["data"]), 1)
         self.assertEqual(payload["data"][0]["index"], 0)
         self.assertEqual(payload["data"][0]["embedding"], [0.1, 0.2, 0.3])
+        self.assertIn("usage", payload)
+        self.assertIn("prompt_tokens", payload["usage"])
+        self.assertIn("total_tokens", payload["usage"])
+        self.assertGreaterEqual(payload["usage"]["prompt_tokens"], 1)
+        self.assertEqual(payload["usage"]["total_tokens"], payload["usage"]["prompt_tokens"])
 
     @patch("src.api.routes.run_agent_task")
     def test_v1_chat_completions_json_mode_invalid(self, run_agent_task):

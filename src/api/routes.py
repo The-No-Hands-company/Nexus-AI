@@ -801,6 +801,7 @@ async def v1_embeddings(request: Request):
     except Exception as exc:
         return _v1_error(f"Failed to generate embeddings: {exc}", "model_error", 500, "model_error")
 
+    prompt_tokens = sum(max(1, len(str(item).split())) for item in inputs)
     return {
         "object": "list",
         "data": [
@@ -808,6 +809,10 @@ async def v1_embeddings(request: Request):
             for idx, vec in enumerate(embeddings)
         ],
         "model": payload.model,
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "total_tokens": prompt_tokens,
+        },
     }
 
 @app.post("/v1/chat/completions")
