@@ -2,7 +2,8 @@
 Built-in tools that don't need LLM calls — calculator, weather, currency,
 unit converter, regex tester, base64, JSON formatter, color info.
 """
-import os, re, json, math, base64 as b64lib
+import os, re, json, math, subprocess, zipfile, base64 as b64lib
+from pathlib import Path
 from datetime import datetime
 from .providers.model_router import ModelRouter
 from .scheduler import (
@@ -386,6 +387,98 @@ def dispatch_builtin(action: dict) -> dict | None:
                           action.get("headers"), action.get("body"))
         return _tool_trace(action, r, {"method": action.get("method", "GET"),
                                        "url": action.get("url", "")})
+    if kind == "search_in_files":
+        r = tool_search_in_files(
+            action.get("pattern", ""),
+            action.get("include_glob", "*"),
+            action.get("workdir", "/tmp"),
+            int(action.get("max_results", 200)),
+        )
+        return _tool_trace(action, r, {"pattern": action.get("pattern", "")})
+    if kind == "create_directory":
+        r = tool_create_directory(action.get("path", ""), action.get("workdir", "/tmp"))
+        return _tool_trace(action, r, {"path": action.get("path", "")})
+    if kind == "zip_files":
+        r = tool_zip_files(
+            action.get("paths", []),
+            action.get("output_path", "archive.zip"),
+            action.get("workdir", "/tmp"),
+        )
+        return _tool_trace(action, r, {"output_path": action.get("output_path", "archive.zip")})
+    if kind == "unzip_files":
+        r = tool_unzip_files(
+            action.get("zip_path", ""),
+            action.get("dest_path", ""),
+            action.get("workdir", "/tmp"),
+        )
+        return _tool_trace(action, r, {"zip_path": action.get("zip_path", "")})
+    if kind == "git_status":
+        r = tool_git_status(action.get("repo_path", "."), action.get("workdir", "/tmp"))
+        return _tool_trace(action, r, {"repo_path": action.get("repo_path", ".")})
+    if kind == "git_log":
+        r = tool_git_log(
+            action.get("repo_path", "."),
+            int(action.get("max_count", 20)),
+            action.get("workdir", "/tmp"),
+        )
+        return _tool_trace(action, r, {"repo_path": action.get("repo_path", ".")})
+    if kind == "git_diff":
+        r = tool_git_diff(
+            action.get("repo_path", "."),
+            action.get("ref", "HEAD"),
+            action.get("workdir", "/tmp"),
+        )
+        return _tool_trace(action, r, {
+            "repo_path": action.get("repo_path", "."),
+            "ref": action.get("ref", "HEAD"),
+        })
+    if kind == "git_checkout":
+        r = tool_git_checkout(
+            action.get("repo_path", "."),
+            action.get("branch", ""),
+            bool(action.get("create", False)),
+            action.get("workdir", "/tmp"),
+        )
+        return _tool_trace(action, r, {
+            "repo_path": action.get("repo_path", "."),
+            "branch": action.get("branch", ""),
+        })
+    if kind == "git_pull":
+        r = tool_git_pull(
+            action.get("repo_path", "."),
+            action.get("remote", "origin"),
+            action.get("branch", ""),
+            bool(action.get("ff_only", True)),
+            action.get("workdir", "/tmp"),
+        )
+        return _tool_trace(action, r, {"repo_path": action.get("repo_path", ".")})
+    if kind == "create_pull_request":
+        r = tool_create_pull_request(
+            action.get("title", ""),
+            action.get("body", ""),
+            action.get("base", "main"),
+            action.get("head", ""),
+            action.get("repo_path", "."),
+            action.get("workdir", "/tmp"),
+        )
+        return _tool_trace(action, r, {"title": action.get("title", "")})
+    if kind == "list_issues":
+        r = tool_list_issues(
+            action.get("repo_path", "."),
+            action.get("state", "open"),
+            int(action.get("limit", 20)),
+            action.get("workdir", "/tmp"),
+        )
+        return _tool_trace(action, r, {"repo_path": action.get("repo_path", ".")})
+    if kind == "create_issue":
+        r = tool_create_issue(
+            action.get("title", ""),
+            action.get("body", ""),
+            action.get("labels", ""),
+            action.get("repo_path", "."),
+            action.get("workdir", "/tmp"),
+        )
+        return _tool_trace(action, r, {"title": action.get("title", "")})
     if kind in ("youtube_transcript", "youtube"):
         r = tool_youtube_transcript(action.get("url", ""))
         return _tool_trace(action, r, {"url": action.get("url", "")})
@@ -759,6 +852,246 @@ def tool_read_page(url: str) -> str:
         return f"Page read failed: {e}"
 
 
+# ── FILESYSTEM + GIT HELPERS ────────────────────────────────────────────────
+def _resolve_path(path: str, workdir: str = "/tmp") -> Path:
+    candidate = Path(path)
+    if not candidate.is_absolute():
+        candidate = Path(workdir) / candidate
+    return candidate.resolve()
+
+
+def tool_search_in_files(pattern: str, include_glob: str = "*", workdir: str = "/tmp", max_results: int = 200) -> str:
+    """Search files recursively with regex and return matching lines."""
+    if not pattern.strip():
+        return "❌ pattern is required."
+    root = _resolve_path(".", workdir)
+    if not root.exists():
+        return f"❌ workdir does not exist: {workdir}"
+
+    try:
+        rx = re.compile(pattern, re.IGNORECASE)
+    except re.error as e:
+        return f"❌ Invalid regex pattern: {e}"
+
+    matches: list[str] = []
+    files_scanned = 0
+    for file_path in root.rglob("*"):
+        if not file_path.is_file():
+            continue
+        if include_glob and not file_path.match(include_glob):
+            continue
+        files_scanned += 1
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                for idx, line in enumerate(f, start=1):
+                    if rx.search(line):
+                        rel = file_path.relative_to(root)
+                        matches.append(f"{rel}:{idx}: {line.rstrip()[:240]}")
+                        if len(matches) >= max_results:
+                            break
+        except Exception:
+            continue
+        if len(matches) >= max_results:
+            break
+
+    if not matches:
+        return f"No matches found for /{pattern}/ in {files_scanned} files."
+    return (
+        f"Found {len(matches)} match(es) in {files_scanned} file(s).\n\n"
+        + "```\n"
+        + "\n".join(matches)
+        + "\n```"
+    )
+
+
+def tool_create_directory(path: str, workdir: str = "/tmp") -> str:
+    """Create a directory recursively (mkdir -p semantics)."""
+    if not path.strip():
+        return "❌ path is required."
+    target = _resolve_path(path, workdir)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        return f"✅ Directory ready: {target}"
+    except Exception as e:
+        return f"❌ Failed to create directory: {e}"
+
+
+def tool_zip_files(paths: list[str], output_path: str, workdir: str = "/tmp") -> str:
+    """Create a ZIP archive from files/directories."""
+    if not paths:
+        return "❌ paths is required."
+    if not output_path.strip():
+        return "❌ output_path is required."
+
+    root = _resolve_path(".", workdir)
+    out = _resolve_path(output_path, workdir)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    added = 0
+    try:
+        with zipfile.ZipFile(out, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for raw_path in paths:
+                src = _resolve_path(raw_path, workdir)
+                if not src.exists():
+                    continue
+                if src.is_file():
+                    arcname = src.relative_to(root) if src.is_relative_to(root) else src.name
+                    zf.write(src, arcname=str(arcname))
+                    added += 1
+                else:
+                    for child in src.rglob("*"):
+                        if child.is_file():
+                            arcname = child.relative_to(root) if child.is_relative_to(root) else child.name
+                            zf.write(child, arcname=str(arcname))
+                            added += 1
+        return f"✅ Created zip: {out} ({added} file(s))"
+    except Exception as e:
+        return f"❌ ZIP creation failed: {e}"
+
+
+def tool_unzip_files(zip_path: str, dest_path: str = "", workdir: str = "/tmp") -> str:
+    """Extract a ZIP archive into destination path."""
+    if not zip_path.strip():
+        return "❌ zip_path is required."
+    src = _resolve_path(zip_path, workdir)
+    if not src.exists():
+        return f"❌ ZIP not found: {zip_path}"
+    dest = _resolve_path(dest_path, workdir) if dest_path else _resolve_path(".", workdir)
+    dest.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(src, "r") as zf:
+            zf.extractall(dest)
+            extracted_count = len(zf.namelist())
+        return f"✅ Extracted {extracted_count} entrie(s) to {dest}"
+    except Exception as e:
+        return f"❌ Unzip failed: {e}"
+
+
+def _run_git(repo_path: str, args: list[str], workdir: str = "/tmp") -> tuple[int, str, str]:
+    repo = _resolve_path(repo_path or ".", workdir)
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def tool_git_status(repo_path: str = ".", workdir: str = "/tmp") -> str:
+    """Show current git working tree status."""
+    code, out, err = _run_git(repo_path, ["status", "--short", "--branch"], workdir=workdir)
+    if code != 0:
+        return f"❌ git_status failed: {err or 'unknown error'}"
+    return out or "Working tree clean."
+
+
+def tool_git_log(repo_path: str = ".", max_count: int = 20, workdir: str = "/tmp") -> str:
+    """Show recent git commit history."""
+    if max_count <= 0:
+        max_count = 20
+    code, out, err = _run_git(
+        repo_path,
+        ["log", f"--max-count={max_count}", "--pretty=format:%h %ad %an %s", "--date=short"],
+        workdir=workdir,
+    )
+    if code != 0:
+        return f"❌ git_log failed: {err or 'unknown error'}"
+    return out or "No commits found."
+
+
+def tool_git_diff(repo_path: str = ".", ref: str = "HEAD", workdir: str = "/tmp") -> str:
+    """Show git diff against a reference (default HEAD)."""
+    code, out, err = _run_git(repo_path, ["--no-pager", "diff", ref], workdir=workdir)
+    if code != 0:
+        return f"❌ git_diff failed: {err or 'unknown error'}"
+    if not out:
+        return "No diff."
+    if len(out) > 8000:
+        out = out[:8000] + "\n... (diff truncated)"
+    return f"```diff\n{out}\n```"
+
+
+def tool_git_checkout(repo_path: str, branch: str, create: bool = False, workdir: str = "/tmp") -> str:
+    """Checkout a git branch, optionally creating it."""
+    if not branch.strip():
+        return "❌ branch is required."
+    args = ["checkout"]
+    if create:
+        args.append("-b")
+    args.append(branch)
+    code, out, err = _run_git(repo_path or ".", args, workdir=workdir)
+    if code != 0:
+        return f"❌ git_checkout failed: {err or 'unknown error'}"
+    return out or f"✅ Checked out {branch}"
+
+
+def tool_git_pull(repo_path: str = ".", remote: str = "origin", branch: str = "", ff_only: bool = True, workdir: str = "/tmp") -> str:
+    """Pull latest changes from remote with optional ff-only safety."""
+    args = ["pull"]
+    if ff_only:
+        args.append("--ff-only")
+    if remote:
+        args.append(remote)
+    if branch:
+        args.append(branch)
+    code, out, err = _run_git(repo_path, args, workdir=workdir)
+    if code != 0:
+        return f"❌ git_pull failed: {err or 'unknown error'}"
+    return out or "✅ Pull completed."
+
+
+def _run_gh(args: list[str], repo_path: str = ".", workdir: str = "/tmp") -> tuple[int, str, str]:
+    repo = _resolve_path(repo_path or ".", workdir)
+    proc = subprocess.run(
+        ["gh", *args],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        timeout=45,
+    )
+    return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+
+
+def tool_create_pull_request(title: str, body: str = "", base: str = "main", head: str = "", repo_path: str = ".", workdir: str = "/tmp") -> str:
+    """Create a GitHub pull request using gh CLI."""
+    if not title.strip():
+        return "❌ title is required."
+    args = ["pr", "create", "--title", title, "--body", body or "", "--base", base]
+    if head.strip():
+        args.extend(["--head", head])
+    code, out, err = _run_gh(args, repo_path=repo_path, workdir=workdir)
+    if code != 0:
+        return f"❌ create_pull_request failed: {err or 'gh CLI error'}"
+    return out or "✅ Pull request created."
+
+
+def tool_list_issues(repo_path: str = ".", state: str = "open", limit: int = 20, workdir: str = "/tmp") -> str:
+    """List GitHub issues using gh CLI."""
+    if state not in {"open", "closed", "all"}:
+        return "❌ state must be one of: open, closed, all"
+    if limit <= 0:
+        limit = 20
+    args = ["issue", "list", "--state", state, "--limit", str(limit)]
+    code, out, err = _run_gh(args, repo_path=repo_path, workdir=workdir)
+    if code != 0:
+        return f"❌ list_issues failed: {err or 'gh CLI error'}"
+    return out or "No issues found."
+
+
+def tool_create_issue(title: str, body: str = "", labels: str = "", repo_path: str = ".", workdir: str = "/tmp") -> str:
+    """Create a GitHub issue using gh CLI."""
+    if not title.strip():
+        return "❌ title is required."
+    args = ["issue", "create", "--title", title, "--body", body or ""]
+    if labels.strip():
+        args.extend(["--label", labels])
+    code, out, err = _run_gh(args, repo_path=repo_path, workdir=workdir)
+    if code != 0:
+        return f"❌ create_issue failed: {err or 'gh CLI error'}"
+    return out or "✅ Issue created."
+
+
 # ── DATABASE QUERY TOOL ───────────────────────────────────────────────────────
 def tool_query_db(connection_string: str, query: str) -> str:
     """Run a read-only SQL query. Only SELECT statements allowed."""
@@ -988,3 +1321,61 @@ def estimate_cost(provider_label: str, in_tokens: int, out_tokens: int) -> float
     key = provider_label.lower().split()[0]
     costs = PROVIDER_COSTS.get(key, (0.0, 0.0))
     return (in_tokens * costs[0] + out_tokens * costs[1]) / 1_000_000
+
+
+# ── SQLITE INTROSPECTION ──────────────────────────────────────────────────────
+
+def tool_inspect_sqlite(query: str = "", db_path: str = "") -> str:
+    """Introspect a SQLite database: list tables, describe schema, or run a read-only query."""
+    import sqlite3 as _sq, os as _os
+    path = db_path or _os.getenv("DB_PATH", "/tmp/nexus_ai.db")
+    if not _os.path.exists(path):
+        return f"❌ Database not found: {path}"
+    try:
+        conn = _sq.connect(path)
+        conn.row_factory = _sq.Row
+        q = (query or "").strip()
+
+        if not q or q.lower() in ("tables", "list tables", ".tables"):
+            rows = conn.execute("SELECT name, type FROM sqlite_master WHERE type IN ('table','view') ORDER BY name").fetchall()
+            if not rows:
+                return "No tables found."
+            lines = ["**Tables:**"]
+            for r in rows:
+                lines.append(f"• `{r['name']}` ({r['type']})")
+            conn.close()
+            return "\n".join(lines)
+
+        if q.lower().startswith("schema") or q.lower().startswith(".schema"):
+            tbl = q.split(None, 1)[1].strip() if len(q.split()) > 1 else ""
+            if tbl:
+                row = conn.execute("SELECT sql FROM sqlite_master WHERE name=?", (tbl,)).fetchone()
+                conn.close()
+                return f"```sql\n{row['sql']}\n```" if row else f"Table `{tbl}` not found."
+            rows = conn.execute("SELECT sql FROM sqlite_master WHERE type='table' ORDER BY name").fetchall()
+            conn.close()
+            return "```sql\n" + "\n\n".join(r["sql"] for r in rows if r["sql"]) + "\n```"
+
+        lower_q = q.lower().lstrip()
+        if any(lower_q.startswith(kw) for kw in ("insert", "update", "delete", "drop", "alter", "create", "replace")):
+            conn.close()
+            return "❌ Only read-only queries are allowed (SELECT, PRAGMA, etc.)"
+
+        rows = conn.execute(q).fetchmany(200)
+        conn.close()
+        if not rows:
+            return "Query returned no rows."
+        cols = rows[0].keys()
+        header = " | ".join(cols)
+        sep = " | ".join("---" for _ in cols)
+        lines = [f"| {header} |", f"| {sep} |"]
+        for r in rows:
+            lines.append("| " + " | ".join(str(r[c]) for c in cols) + " |")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"❌ SQLite error: {e}"
+
+
+def tool_query_sqlite(sql: str, db_path: str = "") -> str:
+    """Alias for tool_inspect_sqlite — run a read-only SQL query against the database."""
+    return tool_inspect_sqlite(sql, db_path)

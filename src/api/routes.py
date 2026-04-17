@@ -1,12 +1,14 @@
-import os, uuid, json, asyncio, threading, time, hmac, secrets, hashlib
+import os, uuid, json, asyncio, threading, time, hmac, secrets, hashlib, base64
 import jwt as _jwt
 from datetime import datetime, timezone
-from fastapi import Request, HTTPException
+from fastapi import Request, HTTPException, APIRouter
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse
 from pydantic import ValidationError
-from ..app import app
+
+router = APIRouter()
 from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event, AllProvidersExhausted)
 from ..approvals import list_tool_approvals, decide_tool_approval
+from ..auth import JWT_SECRET, JWT_ALGO, JWT_EXPIRE_H, AuthManager, MULTI_USER
 from ..scheduler import (
     schedule_job,
     list_jobs,
@@ -16,7 +18,7 @@ from ..scheduler import (
     restore_from_db,
 )
 from ..gist_backup import restore_from_gist
-from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries)
+from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries, list_users as db_list_users, update_user_role as db_update_user_role, get_user as db_get_user, _backend as db_backend)
 from ..personas import list_personas, set_persona, get_active_persona_name, get_persona
 from ..memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory, delete_all as delete_all_memory, get_all as get_all_memory)
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
@@ -76,6 +78,17 @@ def _v1_error(message: str, err_type: str = "invalid_request_error", status_code
         },
         status_code=status_code,
     )
+
+
+async def _read_json_body(request: Request, err_message: str = "invalid JSON body") -> dict:
+    """Parse request JSON body and raise HTTPException on malformed payloads."""
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail=err_message)
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=400, detail=err_message)
+    return data
 
 
 def _normalize_response_format(response_format):
@@ -402,13 +415,36 @@ def _quota_error_response(limit_result: dict) -> JSONResponse:
             "retry_after_seconds": limit_result.get("retry_after_seconds", 1),
         },
     }
-    headers = {"Retry-After": str(limit_result.get("retry_after_seconds", 1))}
+    retry = str(limit_result.get("retry_after_seconds", 1))
+    limit = str(limit_result.get("limit", 0))
+    remaining = str(max(0, int(limit_result.get("limit", 0)) - int(limit_result.get("used", 0))))
+    headers = {
+        "Retry-After": retry,
+        "X-RateLimit-Limit": limit,
+        "X-RateLimit-Remaining": remaining,
+        "X-RateLimit-Reset": str(int(time.time()) + int(limit_result.get("retry_after_seconds", 1))),
+        "X-RateLimit-Policy": limit_result.get("limit_type", "per_minute"),
+    }
     return JSONResponse(body, status_code=429, headers=headers)
+
+
+JWT_REFRESH_EXPIRE_D = int(os.getenv("JWT_REFRESH_EXPIRE_D", "14"))
+_revoked_access_tokens: set[str] = set()
+_refresh_tokens: dict[str, dict] = {}
 
 
 def _v1_quota_error_response(limit_result: dict) -> JSONResponse:
     message = "Quota exceeded for this user"
-    headers = {"Retry-After": str(limit_result.get("retry_after_seconds", 1))}
+    retry = str(limit_result.get("retry_after_seconds", 1))
+    limit = str(limit_result.get("limit", 0))
+    remaining = str(max(0, int(limit_result.get("limit", 0)) - int(limit_result.get("used", 0))))
+    headers = {
+        "Retry-After": retry,
+        "X-RateLimit-Limit": limit,
+        "X-RateLimit-Remaining": remaining,
+        "X-RateLimit-Reset": str(int(time.time()) + int(limit_result.get("retry_after_seconds", 1))),
+        "X-RateLimit-Policy": limit_result.get("limit_type", "per_minute"),
+    }
     return JSONResponse(
         {
             "error": {
@@ -453,8 +489,29 @@ def _verify_pw(password: str, stored: str) -> bool:
 
 def _make_token(username: str) -> str:
     from time import time as _t
-    payload = {"sub": username, "exp": int(_t()) + JWT_EXPIRE_H * 3600}
+    user = db_get_user(username)
+    role = user.get("role", "user") if user else "user"
+    payload = {
+        "sub": username,
+        "role": role,
+        "exp": int(_t()) + JWT_EXPIRE_H * 3600,
+        "type": "access",
+        "jti": secrets.token_hex(8),
+    }
     return _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+
+
+def _make_refresh_token(username: str) -> str:
+    from time import time as _t
+    payload = {
+        "sub": username,
+        "exp": int(_t()) + JWT_REFRESH_EXPIRE_D * 86400,
+        "type": "refresh",
+        "jti": secrets.token_hex(8),
+    }
+    token = _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
+    _refresh_tokens[token] = {"username": username, "exp": payload["exp"]}
+    return token
 
 def _orchestrator_llm(prompt: str, task: str = "") -> str:
     result, _pid = call_llm_with_fallback([{"role":"user","content":prompt}], task)
@@ -468,8 +525,12 @@ def _read_token(request: Request) -> str | None:
     if not header.startswith("Bearer "):
         return None
     token = header[7:]
+    if token in _revoked_access_tokens:
+        return None
     try:
         payload = _jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        if payload.get("type") not in (None, "access"):
+            return None
         return payload.get("sub")
     except Exception:
         return None
@@ -481,8 +542,32 @@ def require_auth(request: Request) -> str:
         raise HTTPException(status_code=401, detail="Unauthorized — valid Bearer token required")
     return username
 
+
+def _get_token_role(request: Request) -> str:
+    if not MULTI_USER:
+        return "admin"
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
+        return "guest"
+    token = header[7:]
+    try:
+        payload = _jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        return payload.get("role", "user")
+    except Exception:
+        return "guest"
+
+
+def require_admin(request: Request) -> str:
+    if not MULTI_USER:
+        return "nexus_admin"
+    username = require_auth(request)
+    role = _get_token_role(request)
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return username
+
 # ── auth endpoints ────────────────────────────────────────────────────────────
-@app.post("/auth/register")
+@router.post("/auth/register")
 def auth_register(username: str = "", password: str = ""):
     from ..db import create_user, user_exists
     if not username or not password:
@@ -495,10 +580,11 @@ def auth_register(username: str = "", password: str = ""):
     ok = create_user(username, hashed, username)
     if ok:
         token = _make_token(username)
-        return {"token": token, "username": username}
+        refresh_token = _make_refresh_token(username)
+        return {"token": token, "refresh_token": refresh_token, "username": username}
     return JSONResponse({"error": "registration failed"}, status_code=500)
 
-@app.post("/auth/login")
+@router.post("/auth/login")
 def auth_login(username: str = "", password: str = ""):
     from ..db import get_user
     if not username or not password:
@@ -507,16 +593,77 @@ def auth_login(username: str = "", password: str = ""):
     if not user or not _verify_pw(password, user["password"]):
         return JSONResponse({"error": "invalid credentials"}, status_code=401)
     token = _make_token(username)
-    return {"token": token, "username": username}
+    refresh_token = _make_refresh_token(username)
+    return {"token": token, "refresh_token": refresh_token, "username": username}
 
-@app.get("/auth/me")
+@router.get("/auth/me")
 def auth_me(request: Request):
     username = _read_token(request)
     if not username:
         return JSONResponse({"username": None}, status_code=401)
     return {"username": username}
 
-@app.get("/")
+
+@router.post("/auth/logout")
+async def auth_logout(request: Request):
+    body = {}
+    try:
+        body = await _read_json_body(request)
+    except HTTPException:
+        body = {}
+
+    header = request.headers.get("Authorization", "")
+    has_access = header.startswith("Bearer ")
+    if has_access:
+        token = header[7:]
+        if token:
+            _revoked_access_tokens.add(token)
+
+    refresh_token = str(body.get("refresh_token") or "").strip()
+    if refresh_token:
+        _refresh_tokens.pop(refresh_token, None)
+
+    return {
+        "ok": True,
+        "revoked_access": has_access,
+        "revoked_refresh": bool(refresh_token),
+    }
+
+
+@router.post("/auth/refresh")
+async def auth_refresh(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    refresh_token = str(body.get("refresh_token") or "").strip()
+    if not refresh_token:
+        return _api_error("refresh_token is required", "validation_error", 422)
+
+    record = _refresh_tokens.get(refresh_token)
+    if not record:
+        return _api_error("invalid refresh token", "unauthorized", 401)
+
+    try:
+        payload = _jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGO])
+    except Exception:
+        _refresh_tokens.pop(refresh_token, None)
+        return _api_error("invalid refresh token", "unauthorized", 401)
+
+    if payload.get("type") != "refresh":
+        return _api_error("invalid refresh token", "unauthorized", 401)
+
+    username = str(payload.get("sub") or "").strip()
+    if not username or record.get("username") != username:
+        return _api_error("invalid refresh token", "unauthorized", 401)
+
+    _refresh_tokens.pop(refresh_token, None)
+    new_access = _make_token(username)
+    new_refresh = _make_refresh_token(username)
+    return {"token": new_access, "refresh_token": new_refresh, "username": username}
+
+@router.get("/")
 def home(): return FileResponse("static/index.html")
 
 
@@ -527,25 +674,20 @@ def home(): return FileResponse("static/index.html")
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 
-@app.post("/webhook/trigger")
+@router.post("/webhook/trigger")
 async def webhook_trigger(request: Request):
-    from fastapi import HTTPException
     secret = request.headers.get("x-webhook-secret", "")
     if WEBHOOK_SECRET and not hmac.compare_digest(secret, WEBHOOK_SECRET):
         return JSONResponse({"error": "invalid webhook secret"}, status_code=403)
     try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return JSONResponse({"error": str(exc.detail)}, status_code=exc.status_code)
     task = body.get("task", "")
-    if not task:
-        return JSONResponse({"error": "task field is required"}, status_code=400)
-    try:
-        task = check_user_task(task, policy_profile=_config.get("safety_profile", "standard"))
-    except GuardrailViolation as exc:
-        return _api_error(exc.reason, exc.code, 422)
+    if not task: return JSONResponse({"error": "task field is required"}, status_code=400)
+    try: task = check_user_task(task, policy_profile=_config.get("safety_profile", "standard"))
+    except GuardrailViolation as exc: return _api_error(exc.reason, exc.code, 422)
     repo = body.get("repo", "")
-    # Spin off agent in background thread, return a run_id
     run_id = "run_" + secrets.token_hex(8)
     run_results[run_id] = {"status": "running", "result": None, "error": None}
     def _run():
@@ -558,36 +700,37 @@ async def webhook_trigger(request: Request):
     threading.Thread(target=_run, daemon=True).start()
     return {"run_id": run_id, "status": "https://github.com/The-No-Hands-company/Nexus-AI#webhook-triggers"}
 
-@app.get("/webhook/status/{run_id}")
+@router.get("/webhook/status/{run_id}")
 async def webhook_status(run_id: str):
     result = run_results.get(run_id)
-    if not result:
-        return JSONResponse({"error": "run_id not found"}, status_code=404)
+    if not result: return JSONResponse({"error": "run_id not found"}, status_code=404)
     return result
 
-@app.get("/health")
+@router.get("/health")
 def health(): return {"status":"healthy","provider":get_config()["provider"]}
 
-@app.get("/api/system/resources")
-def system_resources():
-    return get_system_resources()
+@router.get("/api/system/resources")
+def system_resources(): return get_system_resources()
 
-@app.get("/providers")
+@router.get("/providers")
 def providers(): return {"providers":get_providers_list()}
 
 
 # ── Swarm View ────────────────────────────────────────────────────────────────
 
-@app.get("/swarm/activity")
+@router.get("/swarm/activity")
 def swarm_activity(limit: int = 50):
     """Return the most recent swarm activity events (capped at _MAX_ACTIVITY)."""
     limit = max(1, min(limit, _MAX_ACTIVITY))
     return {"events": activity_log[-limit:], "total": len(activity_log)}
 
 
-@app.post("/safety/check")
+@router.post("/safety/check")
 async def safety_check(request: Request):
-    data = await request.json()
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
     text = (data.get("text") or "").strip()
     if not text:
         return _api_error("text is required", "validation_error", 422)
@@ -626,9 +769,12 @@ async def safety_check(request: Request):
     return payload
 
 
-@app.post("/safety/pii-scan")
+@router.post("/safety/pii-scan")
 async def pii_scan(request: Request):
-    data = await request.json()
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
     text = (data.get("text") or "")
     if not text.strip():
         return _api_error("text is required", "validation_error", 422)
@@ -643,9 +789,12 @@ async def pii_scan(request: Request):
     return result
 
 
-@app.post("/safety/prompt-injection")
+@router.post("/safety/prompt-injection")
 async def prompt_injection_scan(request: Request):
-    data = await request.json()
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
     text = (data.get("text") or "")
     if not text.strip():
         return _api_error("text is required", "validation_error", 422)
@@ -695,15 +844,18 @@ async def prompt_injection_scan(request: Request):
 
 # ── Scheduler API ─────────────────────────────────────────────────────────────
 
-@app.get("/scheduler/jobs")
+@router.get("/scheduler/jobs")
 def scheduler_jobs():
     jobs = [job_to_dict(j) for j in list_jobs()]
     return {"jobs": jobs, "total": len(jobs)}
 
 
-@app.post("/scheduler/jobs")
+@router.post("/scheduler/jobs")
 async def scheduler_create_job(request: Request):
-    body = await request.json()
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
     name = (body.get("name") or "background-task").strip()
     task = (body.get("task") or "").strip()
     schedule = (body.get("schedule") or "5m").strip()
@@ -716,11 +868,363 @@ async def scheduler_create_job(request: Request):
         return _api_error(f"Failed to create job: {exc}", "validation_error", 422)
 
 
-@app.post("/scheduler/jobs/{job_id}/cancel")
+@router.post("/scheduler/jobs/{job_id}/cancel")
 def scheduler_cancel_job(job_id: str):
     if cancel_job(job_id):
         return {"ok": True, "job_id": job_id}
     return _api_error("job not found", "not_found", 404)
+
+
+@router.post("/v1/images/generations")
+async def v1_images_generations(request: Request):
+    """OpenAI-compatible local image generation endpoint."""
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _v1_error(str(exc.detail), "invalid_request_error", exc.status_code)
+
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return _v1_error("prompt is required", "invalid_request_error", 422)
+
+    size = str(body.get("size") or "1024x1024").strip().lower()
+    width, height = 1024, 1024
+    if "x" in size:
+        try:
+            width, height = [int(x) for x in size.split("x", 1)]
+        except Exception:
+            return _v1_error("size must be in WxH format", "invalid_request_error", 422)
+
+    try:
+        from ..generation import generate_image_local
+
+        image_bytes = generate_image_local(
+            prompt=prompt,
+            negative_prompt=str(body.get("negative_prompt") or ""),
+            width=width,
+            height=height,
+            steps=int(body.get("steps") or 20),
+            backend=str(body.get("backend") or "ollama_flux"),
+            model=str(body.get("model") or "auto"),
+        )
+    except ValueError as exc:
+        return _v1_error(str(exc), "invalid_request_error", 422)
+    except Exception as exc:
+        return _v1_error(str(exc), "server_error", 500)
+
+    return {
+        "created": int(time.time()),
+        "data": [
+            {
+                "b64_json": base64.b64encode(image_bytes).decode("ascii"),
+                "revised_prompt": prompt,
+            }
+        ],
+    }
+
+
+@router.post("/generation/video")
+async def generation_video(request: Request):
+    """Generate local video bytes and return base64 payload."""
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return _api_error("prompt is required", "validation_error", 422)
+
+    try:
+        from ..generation import generate_video
+
+        video_bytes = generate_video(
+            prompt=prompt,
+            duration_seconds=float(body.get("duration_seconds") or 4.0),
+            fps=int(body.get("fps") or 8),
+            width=int(body.get("width") or 512),
+            height=int(body.get("height") or 512),
+            backend=str(body.get("backend") or "wan_local"),
+        )
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+    except Exception as exc:
+        return _api_error(str(exc), "generation_error", 500)
+
+    return {
+        "mime_type": "video/mp4",
+        "duration_seconds": float(body.get("duration_seconds") or 4.0),
+        "video_b64": base64.b64encode(video_bytes).decode("ascii"),
+    }
+
+
+@router.post("/vision/understand")
+async def vision_understand(request: Request):
+    """Describe an image using local vision flow."""
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    image_b64 = str(body.get("image_b64") or "").strip()
+    image_url = str(body.get("image_url") or "").strip()
+    prompt = str(body.get("prompt") or "Describe this image in detail.")
+    mime_type = str(body.get("mime_type") or "image/png")
+
+    if not image_b64 and not image_url:
+        return _api_error("image_b64 or image_url is required", "validation_error", 422)
+
+    try:
+        from ..vision import describe_image, capture_screenshot
+
+        if image_b64:
+            image_bytes = base64.b64decode(image_b64)
+        else:
+            image_bytes = capture_screenshot(image_url)
+            mime_type = "image/png"
+
+        description = describe_image(image_bytes=image_bytes, mime_type=mime_type, prompt=prompt)
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+    except Exception as exc:
+        return _api_error(str(exc), "vision_error", 500)
+
+    return {
+        "description": description,
+        "mime_type": mime_type,
+        "prompt": prompt,
+    }
+
+
+@router.post("/integrations/tunnel")
+async def integrations_tunnel(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    try:
+        from ..integrations import NexusTunnelConfig, connect_tunnel, get_tunnel_status
+        config = NexusTunnelConfig(
+            endpoint=str(body.get("endpoint") or "").strip(),
+            auth_token=str(body.get("auth_token") or "").strip(),
+            local_port=int(body.get("local_port") or 8000),
+            subdomain=str(body.get("subdomain") or "").strip(),
+            auto_reconnect=bool(body.get("auto_reconnect", True)),
+        )
+        public_url = connect_tunnel(config)
+        return {"public_url": public_url, "status": get_tunnel_status()}
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.post("/integrations/guardian")
+async def integrations_guardian(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    try:
+        from ..integrations import GuardianConfig, get_guardian_status, register_with_guardian
+        config = GuardianConfig(
+            endpoint=str(body.get("endpoint") or "").strip(),
+            api_key=str(body.get("api_key") or "").strip(),
+            organisation_id=str(body.get("organisation_id") or "").strip(),
+            enforce_policies=bool(body.get("enforce_policies", True)),
+        )
+        instance_id = register_with_guardian(config)
+        return {"instance_id": instance_id, "status": get_guardian_status()}
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.post("/integrations/edge")
+async def integrations_edge(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    try:
+        from ..integrations import EdgeNodeConfig, get_edge_status, register_edge_node
+        config = EdgeNodeConfig(
+            node_id=str(body.get("node_id") or "").strip(),
+            orchestrator_url=str(body.get("orchestrator_url") or "").strip(),
+            model_ids=list(body.get("model_ids") or []),
+            heartbeat_interval_s=int(body.get("heartbeat_interval_s") or 30),
+            max_concurrent_requests=int(body.get("max_concurrent_requests") or 4),
+            api_key=str(body.get("api_key") or "").strip(),
+        )
+        node_id = register_edge_node(config)
+        return {"node_id": node_id, "status": get_edge_status()}
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.post("/collab/rooms")
+async def collab_create_room(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    owner = str(body.get("owner") or "").strip()
+    if not owner:
+        return _api_error("owner is required", "validation_error", 422)
+
+    try:
+        from ..collab import create_room
+        room = create_room(owner=owner, name=str(body.get("name") or ""), session_id=body.get("session_id"))
+        return {"room": room.to_dict()}
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.get("/collab/rooms")
+def collab_list_rooms(username: str = ""):
+    from ..collab import list_rooms
+    rooms = list_rooms(username=username or None)
+    return {"rooms": [room.to_dict() for room in rooms], "total": len(rooms)}
+
+
+@router.get("/collab/rooms/{room_id}")
+def collab_get_room(room_id: str):
+    from ..collab import get_room
+    room = get_room(room_id)
+    if not room:
+        return _api_error("room not found", "not_found", 404)
+    return {"room": room.to_dict()}
+
+
+@router.post("/collab/rooms/{room_id}/join")
+async def collab_join(room_id: str, request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    username = str(body.get("username") or "").strip()
+    if not username:
+        return _api_error("username is required", "validation_error", 422)
+
+    try:
+        from ..collab import join_room
+        room = join_room(room_id=room_id, username=username)
+        return {"room": room.to_dict()}
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.post("/collab/rooms/{room_id}/leave")
+async def collab_leave(room_id: str, request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    username = str(body.get("username") or "").strip()
+    if not username:
+        return _api_error("username is required", "validation_error", 422)
+
+    from ..collab import leave_room
+    room_empty = leave_room(room_id=room_id, username=username)
+    return {"ok": True, "room_empty": room_empty}
+
+
+@router.delete("/collab/rooms/{room_id}")
+def collab_close(room_id: str):
+    from ..collab import close_room
+    if not close_room(room_id):
+        return _api_error("room not found", "not_found", 404)
+    return {"ok": True, "room_id": room_id}
+
+
+@router.post("/benchmark/eval-suite")
+async def benchmark_eval_suite(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    model = str(body.get("model") or "").strip()
+    if not model:
+        return _api_error("model is required", "validation_error", 422)
+
+    try:
+        from ..eval_pipeline import run_eval_suite
+        result = run_eval_suite(
+            model=model,
+            provider=str(body.get("provider") or "ollama"),
+            suites=list(body.get("suites") or []),
+            n_samples=int(body.get("n_samples") or 20),
+            adapter_id=body.get("adapter_id"),
+        )
+        return {
+            **{k: v for k, v in result.items() if k != "jobs"},
+            "jobs": [job.__dict__ for job in result["jobs"]],
+        }
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.post("/benchmark/regression")
+async def benchmark_regression(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    model = str(body.get("model") or "").strip()
+    if not model:
+        return _api_error("model is required", "validation_error", 422)
+
+    try:
+        from ..eval_pipeline import run_regression_benchmark
+        return run_regression_benchmark(
+            model=model,
+            provider=str(body.get("provider") or "ollama"),
+            suites=list(body.get("suites") or []),
+            threshold=float(body.get("threshold") or 0.05),
+            n_samples=int(body.get("n_samples") or 20),
+        )
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.post("/compute/contributed/register")
+async def contributed_register(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    try:
+        from ..hardware import register_contributed_compute
+        registration = register_contributed_compute(
+            endpoint=str(body.get("endpoint") or "").strip(),
+            api_key=str(body.get("api_key") or "").strip(),
+            max_concurrent=int(body.get("max_concurrent") or 1),
+        )
+        return registration
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.get("/compute/contributed/nodes")
+def contributed_nodes():
+    from ..hardware import list_contributed_compute_nodes
+    nodes = list_contributed_compute_nodes()
+    return {"nodes": nodes, "total": len(nodes)}
+
+
+@router.delete("/compute/contributed/{node_id}")
+def contributed_deregister(node_id: str):
+    from ..hardware import deregister_contributed_compute
+    removed = deregister_contributed_compute(node_id)
+    if not removed:
+        return _api_error("node not found", "not_found", 404)
+    return {"ok": True, "node_id": node_id}
 
 
 # ── OpenAI-compatible API (v1) ────────────────────────────────────────────────
@@ -757,14 +1261,14 @@ def _v1_models_catalog() -> list[dict]:
         {"id": "nexus-ai/auto", "object": "model", "created": 0, "owned_by": "nexus-systems"},
     ] + provider_models
 
-@app.get("/v1/models")
+@router.get("/v1/models")
 def v1_models():
     return {
         "object": "list",
         "data": _v1_models_catalog(),
     }
 
-@app.get("/v1/models/capabilities")
+@router.get("/v1/models/capabilities")
 def v1_model_capabilities():
     providers = get_providers_list()
     return {
@@ -788,7 +1292,7 @@ def v1_model_capabilities():
     }
 
 
-@app.get("/v1/models/{model_id:path}")
+@router.get("/v1/models/{model_id:path}")
 def v1_model_retrieve(model_id: str):
     requested_id = model_id
     if not requested_id.startswith("nexus-ai"):
@@ -806,7 +1310,7 @@ def v1_model_retrieve(model_id: str):
     )
 
 
-@app.get("/v1/capabilities")
+@router.get("/v1/capabilities")
 def v1_capabilities():
     """Return platform-level capability metadata for OpenAI-compatible clients."""
     providers = get_providers_list()
@@ -854,7 +1358,7 @@ def _estimate_text_tokens(text: str) -> int:
         return 0
     return len(normalized.split())
 
-@app.post("/v1/embeddings")
+@router.post("/v1/embeddings")
 async def v1_embeddings(request: Request):
     try:
         payload = V1EmbeddingsRequest(**(await request.json()))
@@ -886,7 +1390,7 @@ async def v1_embeddings(request: Request):
         },
     }
 
-@app.post("/v1/chat/completions")
+@router.post("/v1/chat/completions")
 async def v1_chat_completions(request: Request):
     try:
         payload = V1ChatCompletionsRequest(**(await request.json()))
@@ -1066,30 +1570,33 @@ async def v1_chat_completions(request: Request):
 
 
 # ── settings ──────────────────────────────────────────────────────────────────
-@app.get("/manifest.json")
+@router.get("/manifest.json")
 def manifest():
     return FileResponse("static/manifest.json", media_type="application/manifest+json")
 
-@app.get("/sw.js")
+@router.get("/sw.js")
 def service_worker():
     return FileResponse("static/sw.js", media_type="application/javascript",
                         headers={"Service-Worker-Allowed": "/"})
 
-@app.get("/personas")
+@router.get("/personas")
 def get_personas():
     return {"personas": list_personas(), "active": get_active_persona_name()}
 
-@app.post("/personas/{persona_id}")
+@router.post("/personas/{persona_id}")
 def switch_persona(persona_id: str):
     p = set_persona(persona_id)
     return {"active": persona_id, "persona": p}
 
-@app.get("/settings")
+@router.get("/settings")
 def get_settings(): return get_config()
 
-@app.post("/settings")
+@router.post("/settings")
 async def post_settings(request: Request):
-    data = await request.json()
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
     prev_profile = _config.get("safety_profile", "standard")
     result = update_config(provider=data.get("provider"),
                            model=data.get("model"),
@@ -1102,7 +1609,7 @@ async def post_settings(request: Request):
     return result
 
 
-@app.get("/settings/safety")
+@router.get("/settings/safety")
 def get_safety_settings():
     profile = _config.get("safety_profile", "standard")
     return {
@@ -1112,9 +1619,12 @@ def get_safety_settings():
     }
 
 
-@app.post("/settings/safety")
+@router.post("/settings/safety")
 async def update_safety_settings(request: Request):
-    data = await request.json()
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
     profile = str(data.get("safety_profile", "standard")).lower().strip()
     if profile not in SAFETY_POLICY_PROFILES:
         allowed = ", ".join(sorted(SAFETY_POLICY_PROFILES.keys()))
@@ -1130,14 +1640,17 @@ async def update_safety_settings(request: Request):
     }
 
 
-@app.get("/settings/rate-limits")
+@router.get("/settings/rate-limits")
 def get_rate_limit_settings():
     return dict(_rate_limit_settings)
 
 
-@app.post("/settings/rate-limits")
+@router.post("/settings/rate-limits")
 async def update_rate_limit_settings(request: Request):
-    data = await request.json()
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
     mode = str(data.get("mode", _rate_limit_settings.get("mode", "soft"))).lower().strip()
     per_minute = data.get("per_minute", _rate_limit_settings.get("per_minute", 60))
     per_day = data.get("per_day", _rate_limit_settings.get("per_day", 2500))
@@ -1162,7 +1675,7 @@ async def update_rate_limit_settings(request: Request):
     return dict(_rate_limit_settings)
 
 
-@app.get("/safety/profiles")
+@router.get("/safety/profiles")
 def list_safety_profiles():
     return {
         "active": _config.get("safety_profile", "standard"),
@@ -1203,7 +1716,7 @@ def _event_severity(event: dict) -> str:
     return "none"
 
 
-@app.get("/safety/audit")
+@router.get("/safety/audit")
 def get_safety_audit(
     limit: int = 200,
     session_id: str = "",
@@ -1260,7 +1773,7 @@ def get_safety_audit(
         "filtered": bool(session_id or event_type or severity),
     }
 
-@app.get("/personas")
+@router.get("/personas")
 def list_personas():
     active = _config["persona"]
     return {"personas": [
@@ -1271,13 +1784,13 @@ def list_personas():
 
 
 # ── memory ────────────────────────────────────────────────────────────────────
-@app.get("/memory")
+@router.get("/memory")
 def list_memory(): return {"memories": get_all_memory()}
 
-@app.delete("/memory")
+@router.delete("/memory")
 def clear_memory(): delete_all_memory(); return {"cleared":True}
 
-@app.post("/memory/prune")
+@router.post("/memory/prune")
 async def prune_memory_endpoint(request: Request):
     """Delete memory entries older than max_age_days (default: MEMORY_MAX_AGE_DAYS env var).
     Always keeps at least min_keep most-recent entries.
@@ -1295,7 +1808,7 @@ async def prune_memory_endpoint(request: Request):
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
-@app.get("/memory/semantic")
+@router.get("/memory/semantic")
 def get_semantic_mem():
     try:
         from ..memory import get_semantic_memory
@@ -1303,7 +1816,7 @@ def get_semantic_mem():
     except Exception as e:
         return {"memories": [], "note": str(e)}
 
-@app.post("/memory/semantic")
+@router.post("/memory/semantic")
 async def add_semantic_mem(request: Request):
     data = await request.json()
     try:
@@ -1321,7 +1834,7 @@ _BENCHMARK_PROBES = [
     ("coding",      "Write a one-line Python expression to reverse a string."),
 ]
 
-@app.post("/benchmark/run")
+@router.post("/benchmark/run")
 async def benchmark_run(request: Request):
     """Run a lightweight probe suite against all available providers and store results.
 
@@ -1368,7 +1881,7 @@ async def benchmark_run(request: Request):
     return {"results": results}
 
 
-@app.get("/benchmark/results")
+@router.get("/benchmark/results")
 def benchmark_results():
     """Return stored benchmark results (most recent first)."""
     from ..db import load_benchmark_results
@@ -1376,7 +1889,7 @@ def benchmark_results():
 
 
 # ── Consensus reasoning endpoint ──────────────────────────────────────────────
-@app.post("/reason/consensus")
+@router.post("/reason/consensus")
 async def reason_consensus(request: Request):
     """Run a task through multiple providers and return a reconciled consensus answer.
 
@@ -1483,7 +1996,7 @@ def _score_citation_confidence(answer: str, expected_sources: list[str] | None =
     }
 
 
-@app.post("/reason/generator-critic")
+@router.post("/reason/generator-critic")
 async def reason_generator_critic(request: Request):
     """Generator-critic research flow with citation confidence scoring.
 
@@ -1637,13 +2150,13 @@ def _call_llm_adaptive(messages: List[Dict], task: str = "") -> tuple:
     return result, provider, escalated, confidence
 
 
-@app.get("/settings/adaptive-routing")
+@router.get("/settings/adaptive-routing")
 def get_adaptive_routing():
     """Return the current adaptive confidence routing configuration."""
     return dict(_adaptive_routing_config)
 
 
-@app.post("/settings/adaptive-routing")
+@router.post("/settings/adaptive-routing")
 async def update_adaptive_routing(request: Request):
     """Update adaptive confidence routing settings.
 
@@ -1678,7 +2191,7 @@ async def update_adaptive_routing(request: Request):
 
 # ── Multi-agent debate endpoint ────────────────────────────────────────────
 
-@app.post("/reason/debate")
+@router.post("/reason/debate")
 async def reason_debate(request: Request):
     """Multi-agent red/blue team debate.
 
@@ -1778,7 +2291,7 @@ async def reason_debate(request: Request):
 
 # ── Hypothesis testing loop endpoint ──────────────────────────────────────
 
-@app.post("/reason/hypothesis")
+@router.post("/reason/hypothesis")
 async def reason_hypothesis(request: Request):
     """Structured hypothesis testing loop.
 
@@ -1871,7 +2384,7 @@ async def reason_hypothesis(request: Request):
 
 
 # ── RAG endpoints ─────────────────────────────────────────────────────────
-@app.post("/rag/ingest")
+@router.post("/rag/ingest")
 async def rag_ingest(request: Request):
     data = await request.json()
     text = (data.get("text") or "").strip()
@@ -1897,7 +2410,7 @@ async def rag_ingest(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.post("/rag/query")
+@router.post("/rag/query")
 async def rag_query(request: Request):
     data = await request.json()
     query = (data.get("query") or "").strip()
@@ -1914,7 +2427,7 @@ async def rag_query(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.get("/rag/status")
+@router.get("/rag/status")
 def rag_status():
     try:
         return get_rag_system().stats()
@@ -1948,7 +2461,7 @@ def _compute_diff_stats(original: str, modified: str, filename: str = "file") ->
     }
 
 
-@app.post("/diff")
+@router.post("/diff")
 async def compute_diff(request: Request):
     """Compute a structured unified diff between two text blobs.
 
@@ -1976,7 +2489,7 @@ async def compute_diff(request: Request):
     return {**stats, "saved": saved}
 
 
-@app.get("/diff/history")
+@router.get("/diff/history")
 def diff_history(trace_id: str = "", limit: int = 50):
     """Return file diff history, optionally filtered by trace_id."""
     try:
@@ -1987,7 +2500,7 @@ def diff_history(trace_id: str = "", limit: int = 50):
     return {"diffs": diffs, "total": len(diffs)}
 
 
-@app.get("/diff/{diff_id}")
+@router.get("/diff/{diff_id}")
 def diff_detail(diff_id: int):
     """Return full diff detail (including before/after text and unified diff) by id."""
     record = _get_file_diff_detail(diff_id)
@@ -2021,7 +2534,7 @@ def _build_self_review_prompt(traces: list[dict]) -> str:
     return "\n".join(lines)
 
 
-@app.post("/agent/self-review")
+@router.post("/agent/self-review")
 async def agent_self_review(request: Request):
     """Analyze recent execution traces and generate self-improvement suggestions.
 
@@ -2083,7 +2596,7 @@ async def agent_self_review(request: Request):
     }
 
 
-@app.get("/agent/self-review/history")
+@router.get("/agent/self-review/history")
 def self_review_history(limit: int = 10):
     """Return past self-review results."""
     try:
@@ -2278,7 +2791,7 @@ def _extract_document_segments(
     return [{"text": f"❌ Unsupported file type: {ext or 'unknown'}", "metadata": base_meta}]
 
 
-@app.post("/documents/ingest")
+@router.post("/documents/ingest")
 async def documents_ingest(request: Request):
     """Extract text from a document and ingest it into the RAG store.
 
@@ -2347,7 +2860,7 @@ async def documents_ingest(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.post("/documents/understand")
+@router.post("/documents/understand")
 async def documents_understand(request: Request):
     """Extract text from a document and answer a question about it using an LLM.
 
@@ -2446,7 +2959,7 @@ async def documents_understand(request: Request):
     }
 
 
-@app.post("/autonomy/plan")
+@router.post("/autonomy/plan")
 async def autonomy_plan(request: Request):
     """Decompose a goal into a structured subtask plan without executing it."""
     data = await request.json()
@@ -2489,7 +3002,7 @@ async def autonomy_plan(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.post("/autonomy/execute")
+@router.post("/autonomy/execute")
 async def autonomy_execute(request: Request):
     data = await request.json()
     goal = (data.get("goal") or "").strip()
@@ -2522,7 +3035,7 @@ async def autonomy_execute(request: Request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
-@app.get("/autonomy/trace/{trace_id}")
+@router.get("/autonomy/trace/{trace_id}")
 def autonomy_trace(trace_id: str):
     """Retrieve a stored plan or execution trace by its ID."""
     trace = autonomy_traces.get(trace_id)
@@ -2532,7 +3045,7 @@ def autonomy_trace(trace_id: str):
 
 
 # ── sessions ──────────────────────────────────────────────────────────────────
-@app.post("/session")
+@router.post("/session")
 async def new_session(request: Request = None):
     pid = ""
     if request:
@@ -2558,7 +3071,7 @@ async def new_session(request: Request = None):
     get_session_dir(sid)
     return {"session_id":sid,"has_memory":bool(memory_ctx),"has_project":bool(extra_ctx)}
 
-@app.delete("/session/{sid}")
+@router.delete("/session/{sid}")
 def clear_session(sid: str):
     sessions.pop(sid, None)
     _session_state.pop(sid, None)
@@ -2566,7 +3079,7 @@ def clear_session(sid: str):
 
 
 # ── token endpoint (set from UI without pasting in chat) ─────────────────────
-@app.post("/session/{sid}/token")
+@router.post("/session/{sid}/token")
 async def set_token(sid: str, request: Request):
     data  = await request.json()
     token = data.get("token","").strip()
@@ -2575,7 +3088,7 @@ async def set_token(sid: str, request: Request):
 
 
 # ── per-session safety profile override ──────────────────────────────────────
-@app.get("/session/{sid}/safety")
+@router.get("/session/{sid}/safety")
 def get_session_safety(sid: str):
     from ..agent import get_session_state
     session_profile = get_session_state(sid).get("safety_profile") if sid else None
@@ -2588,7 +3101,7 @@ def get_session_safety(sid: str):
         "available_profiles": list(SAFETY_POLICY_PROFILES.keys()),
     }
 
-@app.post("/session/{sid}/safety")
+@router.post("/session/{sid}/safety")
 async def set_session_safety(sid: str, request: Request):
     data    = await request.json()
     profile = data.get("safety_profile")
@@ -2610,7 +3123,7 @@ async def set_session_safety(sid: str, request: Request):
 
 
 # ── chat history ──────────────────────────────────────────────────────────────
-@app.get("/chats")
+@router.get("/chats")
 def list_chats():
     pinned_ids = set(get_pinned_chats())
     def _sort(ch):
@@ -2620,7 +3133,7 @@ def list_chats():
                       "updated_at":c["updated_at"],"message_count":len(c["messages"]),
                       "pinned": c["id"] in pinned_ids} for c in listed]}
 
-@app.post("/chats")
+@router.post("/chats")
 async def save_chat(request: Request):
     data    = await request.json()
     sid     = data.get("session_id")
@@ -2641,20 +3154,20 @@ async def save_chat(request: Request):
     threading.Thread(target=_bg, daemon=True).start()
     return {"chat_id":cid,"title":chats[cid]["title"]}
 
-@app.get("/chats/{cid}")
+@router.get("/chats/{cid}")
 def load_chat(cid: str):
     chat = chats.get(cid) or db_load_chat(cid)
     if chat and cid not in chats:
         chats[cid] = chat   # repopulate in-memory cache
     return chat if chat else {"error":"Not found"}
 
-@app.delete("/chats/{cid}")
+@router.delete("/chats/{cid}")
 def delete_chat(cid: str):
     chats.pop(cid, None)
     db_delete_chat(cid)
     return {"deleted":cid}
 
-@app.get("/chats/{cid}/export")
+@router.get("/chats/{cid}/export")
 def export_chat(cid: str):
     chat = chats.get(cid)
     if not chat: return {"error":"Not found"}
@@ -2668,7 +3181,7 @@ def export_chat(cid: str):
     return StreamingResponse(iter(["\n".join(lines)]),media_type="text/markdown",
         headers={"Content-Disposition":f'attachment; filename="chat-{cid[:8]}.md"'})
 
-@app.post("/chats/{cid}/share")
+@router.post("/chats/{cid}/share")
 def share_chat(cid: str):
     chat = chats.get(cid)
     if not chat: return {"error":"Not found"}
@@ -2683,7 +3196,7 @@ def share_chat(cid: str):
                   share_data["created_at"], chat["messages"])
     return {"share_id":share_id,"url":f"/share/{share_id}"}
 
-@app.get("/share/{share_id}")
+@router.get("/share/{share_id}")
 def view_share(share_id: str):
     chat = shares.get(share_id) or db_load_share(share_id)
     if chat and share_id not in shares:
@@ -2710,11 +3223,11 @@ strong{{font-size:.75rem;opacity:.7;display:block;margin-bottom:4px}}p{{margin:0
 
 # ── projects ──────────────────────────────────────────────────────────────────
 
-@app.get("/projects")
+@router.get("/projects")
 def list_projects():
     return {"projects": list(sorted(projects.values(), key=lambda p: p["updated_at"], reverse=True))}
 
-@app.post("/projects")
+@router.post("/projects")
 async def create_project(request: Request):
     data = await request.json()
     pid  = data.get("id") or str(uuid.uuid4())
@@ -2732,28 +3245,28 @@ async def create_project(request: Request):
                     proj["color"], proj["created_at"], proj["updated_at"])
     return proj
 
-@app.get("/projects/{pid}")
+@router.get("/projects/{pid}")
 def get_project(pid: str):
     return projects.get(pid) or {"error":"Not found"}
 
-@app.delete("/projects/{pid}")
+@router.delete("/projects/{pid}")
 def del_project(pid: str):
     projects.pop(pid, None)
     db_delete_project(pid)
     return {"deleted": pid}
 
-@app.post("/projects/{pid}/chats/{cid}")
+@router.post("/projects/{pid}/chats/{cid}")
 def link_chat_to_project(pid: str, cid: str):
     assign_chat_to_project(pid, cid)
     return {"linked": cid}
 
-@app.get("/projects/{pid}/chats")
+@router.get("/projects/{pid}/chats")
 def project_chat_list(pid: str):
     chat_ids = get_project_chats(pid)
     result   = [chats[cid] for cid in chat_ids if cid in chats]
     return {"chats": result}
 
-@app.get("/projects/{pid}/context")
+@router.get("/projects/{pid}/context")
 def project_context(pid: str):
     """Get full project context: instructions + recent chats + memory + repo info."""
     proj = projects.get(pid)
@@ -2781,7 +3294,7 @@ def project_context(pid: str):
         _PROJECT_CONTEXT_CACHE[pid] = ctx
     return ctx
 
-@app.post("/projects/{pid}/sessions")
+@router.post("/projects/{pid}/sessions")
 def new_project_session(pid: str):
     """Start a new session pre-loaded with project context."""
     proj = projects.get(pid)
@@ -2815,7 +3328,7 @@ def new_project_session(pid: str):
     get_session_dir(new_sid)
     return {"session_id": new_sid, "project_id": pid, "has_context": bool(session_parts)}
 
-@app.post("/projects/{pid}/context")
+@router.post("/projects/{pid}/context")
 async def update_project_context(pid: str, request: Request):
     """Update project context cache from agent output."""
     data = await request.json()
@@ -2832,11 +3345,11 @@ async def update_project_context(pid: str, request: Request):
 
 
 # ── custom instructions ────────────────────────────────────────────────────────
-@app.get("/instructions")
+@router.get("/instructions")
 def get_instructions():
     return {"instructions": db_load_ci()}
 
-@app.post("/instructions")
+@router.post("/instructions")
 async def set_instructions(request: Request):
     data = await request.json()
     db_save_ci(data.get("instructions",""))
@@ -2844,13 +3357,13 @@ async def set_instructions(request: Request):
 
 
 # ── memory CRUD ────────────────────────────────────────────────────────────────
-@app.patch("/memory/{entry_id}")
+@router.patch("/memory/{entry_id}")
 async def update_memory(entry_id: int, request: Request):
     data = await request.json()
     db_update_memory(entry_id, data.get("summary",""))
     return {"updated": entry_id}
 
-@app.delete("/memory/{entry_id}")
+@router.delete("/memory/{entry_id}")
 def delete_memory_item(entry_id: int):
     db_delete_memory(entry_id)
     return {"deleted": entry_id}
@@ -2860,7 +3373,7 @@ def delete_memory_item(entry_id: int):
 # Per-session rate limiting
 
 # ── search ────────────────────────────────────────────────────────────────────
-@app.get("/chats/search")
+@router.get("/chats/search")
 def search_chats_endpoint(q: str = ""):
     if not q.strip():
         return {"results": []}
@@ -2868,7 +3381,7 @@ def search_chats_endpoint(q: str = ""):
 
 
 # ── pin ────────────────────────────────────────────────────────────────────────
-@app.post("/chats/{cid}/pin")
+@router.post("/chats/{cid}/pin")
 async def pin_chat_endpoint(cid: str, request: Request):
     data   = await request.json()
     pinned = data.get("pinned", True)
@@ -2879,11 +3392,11 @@ async def pin_chat_endpoint(cid: str, request: Request):
 
 
 # ── custom personas ────────────────────────────────────────────────────────────
-@app.get("/personas/custom")
+@router.get("/personas/custom")
 def list_custom_personas():
     return {"personas": db_load_personas()}
 
-@app.post("/personas/custom")
+@router.post("/personas/custom")
 async def create_custom_persona(request: Request):
     data = await request.json()
     pid  = data.get("id") or str(uuid.uuid4())
@@ -2899,7 +3412,7 @@ async def create_custom_persona(request: Request):
     )
     return {"id": pid}
 
-@app.delete("/personas/custom/{pid}")
+@router.delete("/personas/custom/{pid}")
 def delete_custom_persona_endpoint(pid: str):
     db_del_persona(pid)
     return {"deleted": pid}
@@ -2908,7 +3421,7 @@ def delete_custom_persona_endpoint(pid: str):
 # ── usage dashboard ───────────────────────────────────────────────────────────
 
 
-@app.get("/usage")
+@router.get("/usage")
 def usage_stats(days: int = 7):
     try:
         from ..tools_builtin import estimate_cost, PROVIDER_COSTS
@@ -2929,7 +3442,7 @@ def usage_stats(days: int = 7):
 
 
 # ── provider health ────────────────────────────────────────────────────────────
-@app.get("/providers/health")
+@router.get("/providers/health")
 async def provider_health():
     """Quick pre-flight check on each provider."""
     import asyncio, time
@@ -2952,7 +3465,7 @@ async def provider_health():
 
 # ── message reactions ─────────────────────────────────────────────────────────
 
-@app.post("/reactions")
+@router.post("/reactions")
 async def add_reaction(request: Request):
     data = await request.json()
     rid  = str(uuid.uuid4())[:8]
@@ -2964,7 +3477,7 @@ async def add_reaction(request: Request):
     }
     return {"id": rid}
 
-@app.get("/reactions")
+@router.get("/reactions")
 def get_reactions(chat_id: str = ""):
     if chat_id:
         return {"reactions": {k:v for k,v in _reactions.items() if v.get("chat_id")==chat_id}}
@@ -2972,7 +3485,7 @@ def get_reactions(chat_id: str = ""):
 
 
 # ── search ───────────────────────────────────────────────────────────────────
-@app.get("/search")
+@router.get("/search")
 def search_chats_endpoint(q: str = ""):
     if not q.strip():
         return {"results": []}
@@ -2982,33 +3495,33 @@ def search_chats_endpoint(q: str = ""):
 # ── pins ──────────────────────────────────────────────────────────────────────
 _pins: set = set(get_pinned_chats())
 
-@app.post("/chats/{cid}/pin")
+@router.post("/chats/{cid}/pin")
 def pin_chat_endpoint(cid: str):
     _pins.add(cid)
     db_pin_chat(cid, True)
     return {"pinned": cid}
 
-@app.delete("/chats/{cid}/pin")
+@router.delete("/chats/{cid}/pin")
 def unpin_chat_endpoint(cid: str):
     _pins.discard(cid)
     db_pin_chat(cid, False)
     return {"unpinned": cid}
 
-@app.get("/chats/pinned")
+@router.get("/chats/pinned")
 def get_pinned():
     result = [chats[cid] for cid in _pins if cid in chats]
     return {"chats": result}
 
 
 # ── user preferences ──────────────────────────────────────────────────────────
-@app.get("/prefs")
+@router.get("/prefs")
 def get_prefs():
     return {
         "theme":     db_load_pref("theme", "dark"),
         "font_size": db_load_pref("font_size", "15"),
     }
 
-@app.post("/prefs")
+@router.post("/prefs")
 async def set_prefs(request: Request):
     data = await request.json()
     for key in ("theme", "font_size"):
@@ -3018,7 +3531,7 @@ async def set_prefs(request: Request):
 
 
 # ── agent ─────────────────────────────────────────────────────────────────────
-@app.post("/agent")
+@router.post("/agent")
 async def agent_post(request: Request):
     data  = await request.json()
     task  = data.get("task","").strip()
@@ -3054,7 +3567,7 @@ async def agent_post(request: Request):
     return {"result":result["result"],"provider":result["provider"],"model":result["model"],"session_id":sid}
 
 
-@app.post("/agent/stream")
+@router.post("/agent/stream")
 async def agent_stream(request: Request):
     data      = await request.json()
     task      = data.get("task","").strip()
@@ -3123,7 +3636,7 @@ async def agent_stream(request: Request):
     return StreamingResponse(generate(), media_type="text/event-stream",
         headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no", "X-Trace-Id": trace_id})
 
-@app.get("/agent/trace/{trace_id}")
+@router.get("/agent/trace/{trace_id}")
 def get_agent_trace(trace_id: str):
     trace = execution_traces.get(trace_id)
     if trace is None:
@@ -3131,7 +3644,7 @@ def get_agent_trace(trace_id: str):
     return {"trace_id": trace_id, "events": trace}
 
 
-@app.post("/agent/stop/{stream_id}")
+@router.post("/agent/stop/{stream_id}")
 def stop_stream(stream_id: str):
     evt = _active_streams.get(stream_id)
     if evt: evt.set(); return {"stopped":stream_id}
@@ -3195,7 +3708,7 @@ async def _heartbeat_loop():
 
 # ── Sprint E: filtered memory search ─────────────────────────────────────────
 
-@app.get("/memory/search")
+@router.get("/memory/search")
 async def memory_search(
     request: Request,
     q: str = "",
@@ -3236,7 +3749,7 @@ async def memory_search(
 
 # ── Sprint E: per-message feedback ────────────────────────────────────────────
 
-@app.post("/feedback/{chat_id}/{message_idx}")
+@router.post("/feedback/{chat_id}/{message_idx}")
 async def save_message_feedback(chat_id: str, message_idx: int, request: Request):
     """Store a 👍/👎 reaction for a specific message.
 
@@ -3261,7 +3774,7 @@ async def save_message_feedback(chat_id: str, message_idx: int, request: Request
     return {"saved": True, "chat_id": chat_id, "message_idx": message_idx, "reaction": reaction}
 
 
-@app.get("/feedback/export")
+@router.get("/feedback/export")
 def feedback_export(limit: int = 5000):
     """Export all message feedback as JSON training data."""
     from ..db import load_feedback_export, get_feedback_stats
@@ -3274,7 +3787,7 @@ def feedback_export(limit: int = 5000):
     }
 
 
-@app.get("/feedback/stats")
+@router.get("/feedback/stats")
 def feedback_stats():
     """Return aggregate thumbs-up / thumbs-down counts."""
     from ..db import get_feedback_stats
@@ -3283,14 +3796,14 @@ def feedback_stats():
 
 # ── Sprint F: Specialist Agent Library ───────────────────────────────────────
 
-@app.get("/agents")
+@router.get("/agents")
 def list_specialist_agents():
     """Return the full catalogue of built-in specialist agents."""
     from ..agents import list_agents
     return {"agents": list_agents()}
 
 
-@app.get("/architecture/hierarchy")
+@router.get("/architecture/hierarchy")
 def architecture_hierarchy():
     """Return a live scaffold of the AI-system hierarchy.
 
@@ -3307,7 +3820,7 @@ def architecture_hierarchy():
     )
 
 
-@app.post("/architecture/blueprints")
+@router.post("/architecture/blueprints")
 async def create_architecture_blueprint(request: Request):
     from ..agent import get_providers_list
     from ..agents import list_agents
@@ -3338,7 +3851,7 @@ async def create_architecture_blueprint(request: Request):
     return {"blueprint": created}
 
 
-@app.get("/architecture/blueprints")
+@router.get("/architecture/blueprints")
 def list_architecture_blueprints(name: str = "", limit: int = 50):
     from ..db import list_architecture_blueprints as db_list_architecture_blueprints
 
@@ -3346,7 +3859,7 @@ def list_architecture_blueprints(name: str = "", limit: int = 50):
     return {"blueprints": items, "total": len(items)}
 
 
-@app.get("/architecture/blueprints/{name}")
+@router.get("/architecture/blueprints/{name}")
 def get_architecture_blueprint(name: str, version: int = 0):
     from ..db import load_architecture_blueprint
 
@@ -3356,7 +3869,7 @@ def get_architecture_blueprint(name: str, version: int = 0):
     return data
 
 
-@app.get("/architecture/registry/{name}")
+@router.get("/architecture/registry/{name}")
 def get_architecture_registry(name: str, version: int = 0):
     from ..db import load_architecture_registry
 
@@ -3366,7 +3879,7 @@ def get_architecture_registry(name: str, version: int = 0):
     return data
 
 
-@app.get("/agents/{agent_id}")
+@router.get("/agents/{agent_id}")
 def get_specialist_agent(agent_id: str):
     """Return metadata for a single specialist agent."""
     from ..agents import get_specialist
@@ -3385,7 +3898,7 @@ def get_specialist_agent(agent_id: str):
     }
 
 
-@app.post("/agents/{agent_id}/run")
+@router.post("/agents/{agent_id}/run")
 async def run_specialist_agent(agent_id: str, request: Request):
     """Run a task through a named specialist agent.
 
@@ -3440,7 +3953,7 @@ async def run_specialist_agent(agent_id: str, request: Request):
         return _api_error(str(exc), "agent_error", 500)
 
 
-@app.post("/agents/classify")
+@router.post("/agents/classify")
 async def classify_task_to_agent(request: Request):
     """Classify a task description and return the best matching specialist agent."""
     from ..agents import classify_to_specialist
@@ -3464,7 +3977,7 @@ async def classify_task_to_agent(request: Request):
 
 # ── Sprint F: Hierarchical Orchestration ─────────────────────────────────────
 
-@app.post("/orchestrate/hierarchical")
+@router.post("/orchestrate/hierarchical")
 async def hierarchical_orchestrate(request: Request):
     """Run the full Planner → Executor → Reviewer → Verifier pipeline.
 
@@ -3527,7 +4040,7 @@ async def hierarchical_orchestrate(request: Request):
         return _api_error(str(exc), "orchestration_error", 500)
 
 
-@app.get("/orchestrate/hierarchical/{trace_id}")
+@router.get("/orchestrate/hierarchical/{trace_id}")
 def get_hierarchical_trace(trace_id: str):
     """Retrieve a stored hierarchical orchestration result by trace ID."""
     trace = autonomy_traces.get(trace_id)
@@ -3538,7 +4051,7 @@ def get_hierarchical_trace(trace_id: str):
 
 # ── Sprint G: Simulate Endpoint ───────────────────────────────────────────────
 
-@app.post("/simulate")
+@router.post("/simulate")
 async def run_simulation(request: Request):
     """Run a swarm prediction simulation (MiroFish-inspired).
 
@@ -3599,7 +4112,7 @@ async def run_simulation(request: Request):
 
 # ── Sprint G: Agent Marketplace ───────────────────────────────────────────────
 
-@app.get("/marketplace/agents")
+@router.get("/marketplace/agents")
 def list_marketplace_agents():
     """Return all available agents (built-in + imported) from the marketplace."""
     from ..agents.registry import SPECIALIST_AGENTS
@@ -3623,7 +4136,7 @@ def list_marketplace_agents():
     return {"agents": builtin + imported, "total": len(builtin) + len(imported)}
 
 
-@app.post("/marketplace/agents", status_code=201)
+@router.post("/marketplace/agents", status_code=201)
 async def import_marketplace_agent(request: Request):
     """Import a custom JSON-defined agent into the marketplace.
 
@@ -3680,7 +4193,7 @@ async def import_marketplace_agent(request: Request):
     return {"id": agent_id, "name": name, "status": "imported"}
 
 
-@app.delete("/marketplace/agents/{agent_id}", status_code=200)
+@router.delete("/marketplace/agents/{agent_id}", status_code=200)
 def delete_marketplace_agent(agent_id: str):
     """Delete an imported marketplace agent by id.
 
@@ -3701,7 +4214,7 @@ def delete_marketplace_agent(agent_id: str):
 
 # NOTE: /agents/bus/log must be registered BEFORE /agents/bus/{agent_id} so
 # FastAPI doesn't capture the literal "log" path segment as an agent_id.
-@app.get("/agents/bus/log")
+@router.get("/agents/bus/log")
 def get_bus_log(limit: int = 50):
     """Return the recent global message bus log."""
     from ..agent_bus import recent_log, all_agents
@@ -3712,7 +4225,7 @@ def get_bus_log(limit: int = 50):
     }
 
 
-@app.get("/agents/bus/{agent_id}")
+@router.get("/agents/bus/{agent_id}")
 def read_agent_inbox(
     agent_id: str,
     limit: int = 20,
@@ -3733,7 +4246,7 @@ def read_agent_inbox(
     }
 
 
-@app.post("/agents/bus", status_code=201)
+@router.post("/agents/bus", status_code=201)
 async def post_agent_message(request: Request):
     """Post a message from one agent to another (or broadcast).
 
@@ -3764,7 +4277,7 @@ async def post_agent_message(request: Request):
     return msg.to_dict()
 
 
-@app.delete("/tasks/{trace_id}")
+@router.delete("/tasks/{trace_id}")
 def delete_task_trace(trace_id: str):
     deleted = _delete_trace(trace_id)
     execution_traces.pop(trace_id, None)
@@ -3775,7 +4288,7 @@ def delete_task_trace(trace_id: str):
 
 # ── Ensemble settings endpoints ──────────────────────────────────────────────
 
-@app.post("/kg/store")
+@router.post("/kg/store")
 async def kg_store_endpoint(request: Request):
     data = await request.json()
     name = (data.get("name") or "").strip()
@@ -3790,7 +4303,7 @@ async def kg_store_endpoint(request: Request):
     return {"id": eid, "name": name, "ok": True}
 
 
-@app.get("/kg/query")
+@router.get("/kg/query")
 def kg_query_endpoint(q: str = "", limit: int = 10):
     if not q:
         return _api_error("q is required", "validation_error", 422)
@@ -3798,13 +4311,13 @@ def kg_query_endpoint(q: str = "", limit: int = 10):
     return {"results": results, "count": len(results)}
 
 
-@app.get("/kg/entities")
+@router.get("/kg/entities")
 def kg_entities_endpoint(entity_type: str = "", limit: int = 100):
     results = _kg_list(entity_type=entity_type or None, limit=limit)
     return {"entities": results, "count": len(results)}
 
 
-@app.get("/kg/entities/{name}")
+@router.get("/kg/entities/{name}")
 def kg_entity_get_endpoint(name: str):
     entity = _kg_get(name)
     if entity is None:
@@ -3812,7 +4325,7 @@ def kg_entity_get_endpoint(name: str):
     return entity
 
 
-@app.delete("/kg/entities/{name}")
+@router.delete("/kg/entities/{name}")
 def kg_entity_delete_endpoint(name: str):
     deleted = _kg_delete(name)
     if not deleted:
@@ -3822,13 +4335,13 @@ def kg_entity_delete_endpoint(name: str):
 
 # ── Execution Trace replay/resume endpoints ──────────────────────────────────
 
-@app.get("/tasks")
+@router.get("/tasks")
 def list_tasks(limit: int = 50):
     traces = _list_traces(limit=limit)
     return {"traces": traces, "count": len(traces)}
 
 
-@app.get("/tasks/{trace_id}")
+@router.get("/tasks/{trace_id}")
 def get_task_trace(trace_id: str):
     # Check in-memory first (live traces), then SQLite checkpoints
     in_memory = execution_traces.get(trace_id)
@@ -3839,7 +4352,7 @@ def get_task_trace(trace_id: str):
     return {"trace_id": trace_id, "events": events, "checkpoints": len(checkpoints)}
 
 
-@app.get("/tasks/{trace_id}/replay")
+@router.get("/tasks/{trace_id}/replay")
 async def replay_task(trace_id: str):
     """Stream stored trace events as SSE with a short delay for visual replay."""
     import asyncio as _asyncio
@@ -3863,7 +4376,7 @@ async def replay_task(trace_id: str):
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-@app.post("/tasks/{trace_id}/resume")
+@router.post("/tasks/{trace_id}/resume")
 async def resume_task(trace_id: str, request: Request):
     """Resume a task from its latest checkpoint."""
     data = await request.json()
@@ -3924,7 +4437,7 @@ async def resume_task(trace_id: str, request: Request):
                                       "X-Trace-Id": new_trace_id})
 
 
-@app.delete("/tasks/{trace_id}")
+@router.delete("/tasks/{trace_id}")
 def delete_task_trace(trace_id: str):
     deleted = _delete_trace(trace_id)
     execution_traces.pop(trace_id, None)
@@ -3935,7 +4448,7 @@ def delete_task_trace(trace_id: str):
 
 # ── Ensemble settings endpoints ──────────────────────────────────────────────
 
-@app.get("/settings/ensemble")
+@router.get("/settings/ensemble")
 def get_ensemble_settings():
     return {
         "ensemble_mode":      _config.get("ensemble_mode", True),
@@ -3944,7 +4457,7 @@ def get_ensemble_settings():
     }
 
 
-@app.post("/settings/ensemble")
+@router.post("/settings/ensemble")
 async def update_ensemble_settings(request: Request):
     data = await request.json()
     kwargs = {}
@@ -3964,14 +4477,14 @@ async def update_ensemble_settings(request: Request):
     }
 
 
-@app.get("/settings/hitl")
+@router.get("/settings/hitl")
 def get_hitl_settings():
     return {
         "hitl_approval_mode": _config.get("hitl_approval_mode", "off"),
     }
 
 
-@app.post("/settings/hitl")
+@router.post("/settings/hitl")
 async def update_hitl_settings(request: Request):
     data = await request.json()
     mode = str(data.get("hitl_approval_mode", "off")).lower().strip()
@@ -3981,7 +4494,7 @@ async def update_hitl_settings(request: Request):
     return {"hitl_approval_mode": _config.get("hitl_approval_mode", "off")}
 
 
-@app.get("/approvals")
+@router.get("/approvals")
 def get_approvals(session_id: str = ""):
     return {
         "items": list_tool_approvals(session_id),
@@ -3989,7 +4502,7 @@ def get_approvals(session_id: str = ""):
     }
 
 
-@app.post("/approvals/{approval_id}")
+@router.post("/approvals/{approval_id}")
 async def resolve_approval(approval_id: str, request: Request):
     data = await request.json()
     approved = bool(data.get("approved", False))
@@ -4005,5 +4518,184 @@ def startup_event() -> None:
     restore_from_db()
     asyncio.create_task(_register_with_nexus_cloud())
     asyncio.create_task(_heartbeat_loop())
+
+
+# ── admin: user management ────────────────────────────────────────────────────
+
+@router.get("/admin/users")
+def admin_list_users(request: Request):
+    require_admin(request)
+    users = db_list_users()
+    safe = [{"username": u["username"], "display_name": u.get("display_name", ""),
+              "role": u.get("role", "user"), "created_at": u.get("created_at", "")}
+            for u in users]
+    return {"users": safe, "total": len(safe)}
+
+
+@router.patch("/admin/users/{username}/role")
+async def admin_update_role(username: str, request: Request):
+    require_admin(request)
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+    role = str(data.get("role", "")).strip().lower()
+    if role not in ("admin", "user", "viewer"):
+        return _api_error("role must be one of: admin, user, viewer", "validation_error", 422)
+    target = db_get_user(username)
+    if not target:
+        return _api_error("user not found", "not_found", 404)
+    ok = db_update_user_role(username, role)
+    return {"username": username, "role": role, "updated": ok}
+
+
+# ── auth: password reset ──────────────────────────────────────────────────────
+
+@router.post("/auth/password-reset")
+async def auth_password_reset(request: Request):
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+    username = str(data.get("username", "")).strip()
+    new_password = str(data.get("new_password", "")).strip()
+    current_password = str(data.get("current_password", "")).strip()
+
+    if not username or not new_password:
+        return _api_error("username and new_password are required", "validation_error", 422)
+    if len(new_password) < 8:
+        return _api_error("new_password must be at least 8 characters", "validation_error", 422)
+
+    user = db_get_user(username)
+    if not user:
+        return _api_error("user not found", "not_found", 404)
+
+    caller = _read_token(request)
+    caller_role = _get_token_role(request)
+    is_self = caller == username
+    is_admin = caller_role == "admin"
+
+    if not is_self and not is_admin:
+        return _api_error("Cannot reset another user's password", "forbidden", 403)
+
+    if is_self and not is_admin:
+        if not current_password or not _verify_pw(current_password, user["password"]):
+            return _api_error("current_password is incorrect", "unauthorized", 401)
+
+    new_hash = _hash_pw(new_password)
+    from ..db import _sql_execute, _backend as _b
+    from ..db import SQLiteBackend, PostgresBackend
+    if isinstance(_b, SQLiteBackend):
+        _sql_execute("UPDATE users SET password=? WHERE username=?", (new_hash, username))
+    else:
+        _sql_execute("UPDATE users SET password=%s WHERE username=%s", (new_hash, username))
+    return {"ok": True, "username": username}
+
+
+# ── admin: per-user quota dashboard ──────────────────────────────────────────
+
+@router.get("/admin/quota")
+def admin_quota_dashboard(request: Request):
+    require_admin(request)
+    from ..profiles import get_quota_state
+    users = db_list_users()
+    result = []
+    for u in users:
+        uname = u["username"]
+        state = get_quota_state(uname)
+        result.append({"username": uname, "role": u.get("role", "user"), **state})
+    return {"quotas": result, "total": len(result)}
+
+
+@router.post("/admin/quota/{username}")
+async def admin_set_quota(username: str, request: Request):
+    require_admin(request)
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+    user = db_get_user(username)
+    if not user:
+        return _api_error("user not found", "not_found", 404)
+    tokens_per_day = int(data.get("tokens_per_day", 0))
+    requests_per_day = data.get("requests_per_day")
+    if requests_per_day is not None:
+        requests_per_day = int(requests_per_day)
+    from ..profiles import set_quota
+    state = set_quota(username, tokens_per_day, requests_per_day)
+    return {"username": username, **state}
+
+
+@router.get("/quota/me")
+def my_quota(request: Request):
+    if not MULTI_USER:
+        username = "nexus_admin"
+    else:
+        username = _read_token(request)
+        if not username:
+            return _api_error("Unauthorized", "unauthorized", 401)
+    from ..profiles import get_quota_state
+    return {"username": username, **get_quota_state(username)}
+
+
+# ── database backup / restore ─────────────────────────────────────────────────
+
+@router.get("/api/backup")
+def db_backup(request: Request):
+    require_admin(request)
+    import io, sqlite3 as _sqlite3
+    from ..db import SQLiteBackend, _backend as _b
+    if not isinstance(_b, SQLiteBackend):
+        return _api_error("Backup only supported for SQLite backend", "not_supported", 400)
+    buf = io.BytesIO()
+    src = _sqlite3.connect(_b.db_path)
+    dst = _sqlite3.connect(":memory:")
+    src.backup(dst)
+    dst_buf = io.BytesIO()
+    for line in dst.iterdump():
+        dst_buf.write((line + "\n").encode())
+    dst_buf.seek(0)
+    src.close()
+    dst.close()
+    from fastapi.responses import StreamingResponse
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    return StreamingResponse(
+        dst_buf,
+        media_type="application/sql",
+        headers={"Content-Disposition": f'attachment; filename="nexus_backup_{ts}.sql"'},
+    )
+
+
+@router.post("/api/restore")
+async def db_restore(request: Request):
+    require_admin(request)
+    from ..db import SQLiteBackend, _backend as _b
+    if not isinstance(_b, SQLiteBackend):
+        return _api_error("Restore only supported for SQLite backend", "not_supported", 400)
+    body = await request.body()
+    if not body:
+        return _api_error("SQL backup body is required", "validation_error", 422)
+    import sqlite3 as _sqlite3, tempfile, shutil, os as _os
+    tmp_path = _b.db_path + ".restore_tmp"
+    try:
+        conn = _sqlite3.connect(tmp_path)
+        for stmt in body.decode("utf-8").split(";\n"):
+            stmt = stmt.strip()
+            if stmt:
+                try:
+                    conn.execute(stmt)
+                except Exception:
+                    pass
+        conn.commit()
+        conn.close()
+        shutil.copy2(tmp_path, _b.db_path)
+        _os.remove(tmp_path)
+    except Exception as e:
+        try:
+            _os.remove(tmp_path)
+        except Exception:
+            pass
+        return _api_error(f"Restore failed: {e}", "restore_error", 500)
+    return {"ok": True, "message": "Database restored successfully"}
 
 

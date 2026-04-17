@@ -21,6 +21,66 @@ client = TestClient(app)
 
 
 class TestV1Contracts(unittest.TestCase):
+    def test_auth_register_login_refresh_logout_flow(self):
+        username = "authflow_user"
+        password = "StrongPass123"  # pragma: allowlist secret
+
+        reg = client.post("/auth/register", params={"username": username, "password": password})
+        self.assertIn(reg.status_code, (200, 409))
+
+        login = client.post("/auth/login", params={"username": username, "password": password})
+        self.assertEqual(login.status_code, 200)
+        login_payload = login.json()
+        self.assertIn("token", login_payload)
+        self.assertIn("refresh_token", login_payload)
+
+        me = client.get("/auth/me", headers={"Authorization": f"Bearer {login_payload['token']}"})
+        self.assertEqual(me.status_code, 200)
+        self.assertEqual(me.json().get("username"), username)
+
+        refreshed = client.post("/auth/refresh", json={"refresh_token": login_payload["refresh_token"]})
+        self.assertEqual(refreshed.status_code, 200)
+        refreshed_payload = refreshed.json()
+        self.assertIn("token", refreshed_payload)
+        self.assertIn("refresh_token", refreshed_payload)
+
+        logout = client.post(
+            "/auth/logout",
+            json={"refresh_token": refreshed_payload["refresh_token"]},
+            headers={"Authorization": f"Bearer {refreshed_payload['token']}"},
+        )
+        self.assertEqual(logout.status_code, 200)
+        self.assertTrue(logout.json().get("ok"))
+
+        me_after_logout = client.get("/auth/me", headers={"Authorization": f"Bearer {refreshed_payload['token']}"})
+        self.assertEqual(me_after_logout.status_code, 401)
+
+    def test_auth_refresh_rejects_missing_token(self):
+        response = client.post("/auth/refresh", json={})
+        self.assertEqual(response.status_code, 422)
+
+    def test_session_endpoints_contract(self):
+        create_resp = client.post("/session", json={})
+        self.assertEqual(create_resp.status_code, 200)
+        sid = create_resp.json().get("session_id")
+        self.assertTrue(sid)
+
+        token_resp = client.post(f"/session/{sid}/token", json={"token": "ghp_exampleToken0000000000000000000000000000"})  # pragma: allowlist secret
+        self.assertEqual(token_resp.status_code, 200)
+        self.assertTrue(token_resp.json().get("set"))
+
+        safety_get = client.get(f"/session/{sid}/safety")
+        self.assertEqual(safety_get.status_code, 200)
+        self.assertEqual(safety_get.json().get("session_id"), sid)
+
+        safety_set = client.post(f"/session/{sid}/safety", json={"safety_profile": "strict"})
+        self.assertEqual(safety_set.status_code, 200)
+        self.assertEqual(safety_set.json().get("effective_profile"), "strict")
+
+        clear_resp = client.delete(f"/session/{sid}")
+        self.assertEqual(clear_resp.status_code, 200)
+        self.assertEqual(clear_resp.json().get("cleared"), sid)
+
     def test_v1_model_retrieve_known_model(self):
         response = client.get("/v1/models/nexus-ai")
         self.assertEqual(response.status_code, 200)
@@ -459,7 +519,7 @@ class TestSafetyModule(unittest.TestCase):
         self.assertTrue(decision.allowed)
 
     def test_sensitive_token_masked(self):
-        decision = check_text_against_guardrail("Use token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa to auth")
+        decision = check_text_against_guardrail("Use token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa to auth")  # pragma: allowlist secret
         self.assertIsNotNone(decision.masked_text)
         self.assertIn("[REDACTED]", decision.masked_text)
 
@@ -526,7 +586,7 @@ class TestSafetyModule(unittest.TestCase):
         self.assertTrue(any(issue.code == "tool_destructive_command" for issue in verdict.issues))
 
     def test_output_safety_redacts_secret_tokens(self):
-        verdict = screen_output("token=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        verdict = screen_output("token=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")  # pragma: allowlist secret
         self.assertTrue(verdict.allowed)
         self.assertEqual(verdict.action.value, "redact")
         self.assertIn("[REDACTED]", verdict.masked_text)
@@ -575,14 +635,14 @@ class TestSafetyMiddleware(unittest.TestCase):
 
         run_results["safety-output-test"] = {
             "status": "done",
-            "result": "token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "result": "token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",  # pragma: allowlist secret
             "error": None,
         }
         response = client.get("/webhook/status/safety-output-test")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertIn("[REDACTED]", payload["result"])
-        self.assertNotIn("ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", payload["result"])
+        self.assertNotIn("ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", payload["result"])  # pragma: allowlist secret
 
     def test_agent_stream_sse_redacted_by_middleware(self):
         from src.safety_middleware import SafetyPipelineMiddleware
@@ -595,12 +655,12 @@ class TestSafetyMiddleware(unittest.TestCase):
             })
             await send({
                 "type": "http.response.body",
-                "body": b'data: {"result": "token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n\n',
+                "body": b'data: {"result": "token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n\n',  # pragma: allowlist secret
                 "more_body": True,
             })
             await send({
                 "type": "http.response.body",
-                "body": b'data: {"content": "done ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n\n',
+                "body": b'data: {"content": "done ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n\n',  # pragma: allowlist secret
                 "more_body": False,
             })
 
@@ -639,7 +699,7 @@ class TestSafetyMiddleware(unittest.TestCase):
 
         self.assertEqual(start["status"], 200)
         self.assertIn("[REDACTED]", body)
-        self.assertNotIn("ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", body)
+        self.assertNotIn("ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", body)  # pragma: allowlist secret
 
 
 class TestHITLApprovals(unittest.TestCase):
