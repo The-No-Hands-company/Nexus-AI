@@ -18,7 +18,7 @@ from ..scheduler import (
     restore_from_db,
 )
 from ..gist_backup import restore_from_gist
-from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries, list_users as db_list_users, update_user_role as db_update_user_role, get_user as db_get_user, _backend as db_backend)
+from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries, list_users as db_list_users, update_user_role as db_update_user_role, get_user as db_get_user, _backend as db_backend, update_user_email as db_update_user_email, create_api_key as db_create_api_key, list_api_keys as db_list_api_keys, get_api_key_by_hash as db_get_api_key_by_hash, revoke_api_key as db_revoke_api_key, touch_api_key as db_touch_api_key, get_or_create_oauth_user as db_get_or_create_oauth_user)
 from ..personas import list_personas, set_persona, get_active_persona_name, get_persona
 from ..memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory, delete_all as delete_all_memory, get_all as get_all_memory)
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
@@ -520,7 +520,27 @@ def _orchestrator_llm(prompt: str, task: str = "") -> str:
     return str(result)
 
 
+def _hash_api_key(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
 def _read_token(request: Request) -> str | None:
+    # 1. X-API-Key header
+    raw_api_key = request.headers.get("X-API-Key", "").strip()
+    if not raw_api_key:
+        # Also allow Bearer nxk_... as API key
+        hdr = request.headers.get("Authorization", "")
+        if hdr.startswith("Bearer nxk_"):
+            raw_api_key = hdr[7:]
+    if raw_api_key and raw_api_key.startswith("nxk_"):
+        key_hash = _hash_api_key(raw_api_key)
+        key_record = db_get_api_key_by_hash(key_hash)
+        if key_record:
+            db_touch_api_key(key_record["id"], time.time())
+            return key_record["username"]
+        return None
+
+    # 2. Standard JWT Bearer
     header = request.headers.get("Authorization", "")
     if not header.startswith("Bearer "):
         return None
@@ -534,6 +554,21 @@ def _read_token(request: Request) -> str | None:
         return payload.get("sub")
     except Exception:
         return None
+
+
+def _get_request_api_key_scopes(request: Request) -> list[str]:
+    """Return scopes for the API key used in this request, or [] if JWT auth."""
+    raw_api_key = request.headers.get("X-API-Key", "").strip()
+    if not raw_api_key:
+        hdr = request.headers.get("Authorization", "")
+        if hdr.startswith("Bearer nxk_"):
+            raw_api_key = hdr[7:]
+    if raw_api_key and raw_api_key.startswith("nxk_"):
+        key_hash = _hash_api_key(raw_api_key)
+        key_record = db_get_api_key_by_hash(key_hash)
+        if key_record:
+            return list(key_record.get("scopes") or [])
+    return ["*"]  # JWT auth = all scopes
 
 def require_auth(request: Request) -> str:
     from fastapi import HTTPException
@@ -4513,9 +4548,16 @@ async def resolve_approval(approval_id: str, request: Request):
     return resolved
 
 
+def _run_scheduled_task_extended(task: str) -> str:
+    if task == "__internal_quota_cleanup__":
+        return _quota_cleanup_task()
+    return _run_scheduled_task(task)
+
+
 def startup_event() -> None:
-    set_run_function(_run_scheduled_task)
+    set_run_function(_run_scheduled_task_extended)
     restore_from_db()
+    _register_quota_reset_scheduler()
     asyncio.create_task(_register_with_nexus_cloud())
     asyncio.create_task(_heartbeat_loop())
 
@@ -4698,4 +4740,334 @@ async def db_restore(request: Request):
         return _api_error(f"Restore failed: {e}", "restore_error", 500)
     return {"ok": True, "message": "Database restored successfully"}
 
+
+# ── API key management ────────────────────────────────────────────────────────
+
+_VALID_SCOPES = {"chat", "read", "admin", "embeddings", "tools"}
+
+
+def _generate_api_key() -> tuple[str, str, str]:
+    """Return (raw_key, key_hash, key_prefix)."""
+    raw = "nxk_" + secrets.token_urlsafe(40)
+    key_hash = hashlib.sha256(raw.encode()).hexdigest()
+    prefix = raw[:12]
+    return raw, key_hash, prefix
+
+
+@router.post("/auth/api-keys")
+async def create_api_key(request: Request):
+    username = require_auth(request)
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    name = str(data.get("name", "")).strip()
+    if not name:
+        return _api_error("name is required", "validation_error", 422)
+
+    raw_scopes = data.get("scopes", ["chat", "read"])
+    if not isinstance(raw_scopes, list):
+        raw_scopes = [str(raw_scopes)]
+    scopes = [s for s in raw_scopes if s in _VALID_SCOPES]
+    if not scopes:
+        scopes = ["chat", "read"]
+
+    role = _get_token_role(request)
+    if "admin" in scopes and role != "admin":
+        return _api_error("admin scope requires admin role", "forbidden", 403)
+
+    raw_key, key_hash, prefix = _generate_api_key()
+    key_id = str(uuid.uuid4())
+    ts = time.time()
+    ok = db_create_api_key(key_id, username, key_hash, prefix, name, scopes, ts)
+    if not ok:
+        return _api_error("Failed to create API key", "server_error", 500)
+
+    return {
+        "id": key_id,
+        "key": raw_key,
+        "key_prefix": prefix,
+        "name": name,
+        "scopes": scopes,
+        "created_at": ts,
+        "note": "Store this key securely — it will not be shown again.",
+    }
+
+
+@router.get("/auth/api-keys")
+def list_api_keys_endpoint(request: Request):
+    username = require_auth(request)
+    keys = db_list_api_keys(username)
+    safe = []
+    for k in keys:
+        safe.append({
+            "id": k["id"],
+            "key_prefix": k["key_prefix"],
+            "name": k["name"],
+            "scopes": k["scopes"],
+            "created_at": k["created_at"],
+            "last_used_at": k.get("last_used_at"),
+            "revoked_at": k.get("revoked_at"),
+            "active": k.get("revoked_at") is None,
+        })
+    return {"keys": safe, "total": len(safe)}
+
+
+@router.delete("/auth/api-keys/{key_id}")
+def delete_api_key(key_id: str, request: Request):
+    username = require_auth(request)
+    ok = db_revoke_api_key(key_id, username)
+    if not ok:
+        return _api_error("key not found or not owned by you", "not_found", 404)
+    return {"ok": True, "revoked": key_id}
+
+
+# ── email verification ────────────────────────────────────────────────────────
+
+_SMTP_HOST = os.getenv("SMTP_HOST", "")
+_SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+_SMTP_USER = os.getenv("SMTP_USER", "")
+_SMTP_PASS = os.getenv("SMTP_PASS", "")
+_EMAIL_FROM = os.getenv("EMAIL_FROM", _SMTP_USER or "nexus@localhost")
+_APP_URL = os.getenv("APP_URL", "http://localhost:8000")
+
+
+def _send_verification_email(email: str, token: str, username: str) -> bool:
+    link = f"{_APP_URL}/auth/verify-email?token={token}&username={username}"
+    body = f"Hello {username},\n\nVerify your email:\n{link}\n\nThis link expires in 24 hours."
+    if not _SMTP_HOST:
+        print(f"[email-verify] Token for {username}: {token} (SMTP not configured)")
+        return True
+    try:
+        import smtplib
+        from email.mime.text import MIMEText
+        msg = MIMEText(body)
+        msg["Subject"] = "Verify your Nexus AI account"
+        msg["From"] = _EMAIL_FROM
+        msg["To"] = email
+        with smtplib.SMTP(_SMTP_HOST, _SMTP_PORT) as s:
+            s.starttls()
+            if _SMTP_USER:
+                s.login(_SMTP_USER, _SMTP_PASS)
+            s.send_message(msg)
+        return True
+    except Exception as e:
+        print(f"[email-verify] SMTP error: {e}")
+        return False
+
+
+@router.post("/auth/send-verification")
+async def send_verification_email(request: Request):
+    username = require_auth(request)
+    try:
+        data = await _read_json_body(request)
+    except HTTPException:
+        data = {}
+    email = str(data.get("email", "")).strip().lower()
+    if not email or "@" not in email:
+        return _api_error("valid email required", "validation_error", 422)
+
+    token = secrets.token_urlsafe(32)
+    db_save_pref(f"email_verify_token.{username}", f"{token}:{email}")
+    db_update_user_email(username, email, verified=False)
+    sent = _send_verification_email(email, token, username)
+    return {"ok": True, "email": email, "email_sent": sent}
+
+
+@router.get("/auth/verify-email")
+def verify_email(token: str = "", username: str = ""):
+    if not token or not username:
+        return _api_error("token and username required", "validation_error", 422)
+    stored = db_load_pref(f"email_verify_token.{username}", "")
+    if not stored:
+        return _api_error("no pending verification for this user", "not_found", 404)
+    stored_token, email = (stored.split(":", 1) + [""])[:2]
+    if not secrets.compare_digest(stored_token, token):
+        return _api_error("invalid or expired token", "unauthorized", 401)
+    db_update_user_email(username, email, verified=True)
+    db_save_pref(f"email_verify_token.{username}", "")
+    return {"ok": True, "username": username, "email": email, "verified": True}
+
+
+# ── OAuth2 / OIDC SSO ─────────────────────────────────────────────────────────
+
+_OAUTH_PROVIDERS: dict[str, dict] = {
+    "google": {
+        "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "userinfo_url": "https://www.googleapis.com/oauth2/v3/userinfo",
+        "client_id_env": "GOOGLE_CLIENT_ID",
+        "client_secret_env": "GOOGLE_CLIENT_SECRET",  # pragma: allowlist secret
+        "scope": "openid email profile",
+    },
+    "github": {
+        "auth_url": "https://github.com/login/oauth/authorize",
+        "token_url": "https://github.com/login/oauth/access_token",
+        "userinfo_url": "https://api.github.com/user",
+        "client_id_env": "GITHUB_CLIENT_ID",
+        "client_secret_env": "GITHUB_CLIENT_SECRET",  # pragma: allowlist secret
+        "scope": "read:user user:email",
+    },
+}
+
+
+@router.get("/auth/oauth/{provider}")
+def oauth_redirect(provider: str, request: Request):
+    cfg = _OAUTH_PROVIDERS.get(provider)
+    if not cfg:
+        return _api_error(f"Unknown provider: {provider}. Valid: {list(_OAUTH_PROVIDERS)}", "not_found", 404)
+    client_id = os.getenv(cfg["client_id_env"], "")
+    if not client_id:
+        return _api_error(f"{provider} OAuth not configured (missing {cfg['client_id_env']})", "not_configured", 503)
+    state = secrets.token_urlsafe(16)
+    db_save_pref(f"oauth_state.{state}", provider)
+    callback = f"{_APP_URL}/auth/oauth/{provider}/callback"
+    import urllib.parse
+    params = urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": callback,
+        "scope": cfg["scope"],
+        "response_type": "code",
+        "state": state,
+    })
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(f"{cfg['auth_url']}?{params}")
+
+
+@router.get("/auth/oauth/{provider}/callback")
+async def oauth_callback(provider: str, code: str = "", state: str = "", error: str = ""):
+    if error:
+        return _api_error(f"OAuth error: {error}", "oauth_error", 400)
+    if not code:
+        return _api_error("Missing authorization code", "oauth_error", 400)
+
+    cfg = _OAUTH_PROVIDERS.get(provider)
+    if not cfg:
+        return _api_error(f"Unknown provider: {provider}", "not_found", 404)
+
+    stored_provider = db_load_pref(f"oauth_state.{state}", "")
+    if stored_provider != provider:
+        return _api_error("Invalid OAuth state — possible CSRF", "unauthorized", 401)
+    db_save_pref(f"oauth_state.{state}", "")
+
+    client_id = os.getenv(cfg["client_id_env"], "")
+    client_secret = os.getenv(cfg["client_secret_env"], "")
+    callback = f"{_APP_URL}/auth/oauth/{provider}/callback"
+
+    import httpx as _httpx
+    try:
+        headers = {"Accept": "application/json"}
+        token_resp = _httpx.post(cfg["token_url"], data={
+            "client_id": client_id, "client_secret": client_secret,
+            "code": code, "redirect_uri": callback,
+            "grant_type": "authorization_code",
+        }, headers=headers, timeout=10)
+        token_data = token_resp.json()
+        access_token = token_data.get("access_token", "")
+        if not access_token:
+            return _api_error("Failed to obtain access token", "oauth_error", 502)
+
+        user_resp = _httpx.get(cfg["userinfo_url"],
+                               headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+                               timeout=10)
+        user_data = user_resp.json()
+    except Exception as e:
+        return _api_error(f"OAuth exchange failed: {e}", "oauth_error", 502)
+
+    if provider == "google":
+        provider_id = str(user_data.get("sub", ""))
+        email = str(user_data.get("email", ""))
+        display_name = str(user_data.get("name", ""))
+    elif provider == "github":
+        provider_id = str(user_data.get("id", ""))
+        email = str(user_data.get("email", "") or "")
+        display_name = str(user_data.get("name", "") or user_data.get("login", ""))
+    else:
+        return _api_error("Unsupported provider", "not_found", 404)
+
+    if not provider_id:
+        return _api_error("Could not retrieve provider user ID", "oauth_error", 502)
+
+    user = db_get_or_create_oauth_user(provider, provider_id, email, display_name)
+    if not user:
+        return _api_error("Failed to create or retrieve user", "server_error", 500)
+
+    username = user["username"]
+    jwt_token = _make_token(username)
+    refresh = _make_refresh_token(username)
+    return {"token": jwt_token, "refresh_token": refresh, "username": username,
+            "provider": provider, "email": email}
+
+
+@router.get("/auth/oauth/providers")
+def list_oauth_providers():
+    result = {}
+    for name, cfg in _OAUTH_PROVIDERS.items():
+        client_id = os.getenv(cfg["client_id_env"], "")
+        result[name] = {"configured": bool(client_id), "auth_url": f"/auth/oauth/{name}"}
+    return {"providers": result}
+
+
+# ── quota reset scheduler ─────────────────────────────────────────────────────
+
+def _quota_cleanup_task() -> str:
+    """Purge stale daily quota pref keys older than 8 days."""
+    from ..db import _backend as _b, SQLiteBackend
+    from datetime import timedelta
+    cutoff_day = (datetime.now(timezone.utc) - timedelta(days=8)).strftime("%Y-%m-%d")
+    deleted = 0
+    if isinstance(_b, SQLiteBackend):
+        try:
+            rows = _b._conn().execute(
+                "SELECT key FROM user_prefs WHERE key LIKE 'quota.%' AND key < ?",
+                (f"quota.tokens_used.zzz.{cutoff_day}",)
+            ).fetchall()
+            for r in rows:
+                key = r["key"]
+                parts = key.split(".")
+                if len(parts) >= 4 and parts[-1] < cutoff_day:
+                    _b._conn().execute("DELETE FROM user_prefs WHERE key=?", (key,))
+                    deleted += 1
+            _b._conn().commit()
+        except Exception as e:
+            return f"quota cleanup error: {e}"
+    return f"quota cleanup: removed {deleted} stale daily keys"
+
+
+def _register_quota_reset_scheduler():
+    """Register weekly quota cleanup job if not already registered."""
+    existing = list_jobs()
+    if any(j.get("name") == "quota-weekly-cleanup" for j in existing):
+        return
+    schedule_job(
+        name="quota-weekly-cleanup",
+        task="__internal_quota_cleanup__",
+        schedule="0 3 * * 0",  # every Sunday at 03:00 UTC
+    )
+
+
+@router.post("/admin/quota/reset/{username}")
+async def admin_reset_quota(username: str, request: Request):
+    require_admin(request)
+    user = db_get_user(username)
+    if not user:
+        return _api_error("user not found", "not_found", 404)
+    from ..db import _backend as _b, SQLiteBackend, _sql_execute
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if isinstance(_b, SQLiteBackend):
+        _sql_execute(
+            "DELETE FROM user_prefs WHERE key LIKE ?", (f"quota.tokens_used.{username}.%",)
+        )
+        _sql_execute(
+            "DELETE FROM user_prefs WHERE key LIKE ?", (f"quota.requests_used.{username}.%",)
+        )
+    else:
+        _sql_execute(
+            "DELETE FROM user_prefs WHERE key LIKE %s", (f"quota.tokens_used.{username}.%",)
+        )
+        _sql_execute(
+            "DELETE FROM user_prefs WHERE key LIKE %s", (f"quota.requests_used.{username}.%",)
+        )
+    return {"ok": True, "username": username, "reset_at": datetime.now(timezone.utc).isoformat()}
 
