@@ -28,8 +28,8 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] Railway deploy config (`railway.toml`)
 - [x] Health check endpoint (`GET /health`)
 - [x] System resource endpoint (`GET /api/system/resources`)
-- [ ] Kubernetes / Helm chart deployment manifests
-- [ ] Horizontal scaling / worker process mode (Gunicorn + Uvicorn workers)
+- [x] Kubernetes / Helm chart deployment manifests (`deploy/k8s/`, `deploy/helm/nexus-ai/`)
+- [x] Horizontal scaling / worker process mode (Gunicorn + Uvicorn workers) (`gunicorn.conf.py`)
 
 ### 1.2 Database / persistence
 
@@ -38,10 +38,10 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] Chat history table (create / read / delete)
 - [x] Usage records table (token counts, cost)
 - [x] User accounts table (with `role` column + migration)
-- [ ] Alembic-compatible schema (manual migration handling)
-- [ ] Alembic migration files (tracked, runnable migrations)
+- [x] Alembic-compatible schema (manual migration handling) (`migrations/env.py`, `alembic.ini`)
+- [x] Alembic migration files (tracked, runnable migrations) (`migrations/versions/0001_initial_schema.py`)
 - [x] Native SQLite introspection tool (`tool_inspect_sqlite`)
-- [ ] Native PostgreSQL introspection and query tool (beyond `tool_query_db`)
+- [x] Native PostgreSQL introspection and query tool (`tool_inspect_postgres` in `src/tools_builtin.py`)
 - [x] Database connection pooling configuration (PostgreSQL ThreadedConnectionPool)
 - [x] Database backup / restore endpoint (`GET /api/backup`, `POST /api/restore`)
 
@@ -57,10 +57,10 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] `POST /auth/logout` (token revocation / blacklist)
 - [x] `POST /auth/refresh` (JWT refresh token rotation)
 - [x] `POST /auth/password-reset` (self-service + admin override)
-- [ ] Email verification on register
-- [ ] OAuth2 / OIDC SSO provider support
-- [ ] Per-user API key management (`POST /auth/api-keys`, `GET`, `DELETE`)
-- [ ] API key scopes / permissions
+- [x] Email verification on register (`POST /auth/send-verification`, `GET /auth/verify-email`)
+- [x] OAuth2 / OIDC SSO provider support (Google OIDC + GitHub OAuth, `GET /auth/oauth/{provider}`)
+- [x] Per-user API key management (`POST /auth/api-keys`, `GET /auth/api-keys`, `DELETE /auth/api-keys/{key_id}`)
+- [x] API key scopes / permissions (`chat`, `read`, `admin`, `embeddings`, `tools`)
 
 ### 1.4 Per-user quotas and rate limiting
 
@@ -71,7 +71,7 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] Per-user spend cap with soft/hard limits (`set_quota()` / `check_quota()`)
 - [x] Quota overage 429 response with `X-RateLimit-*` headers (Limit, Remaining, Reset, Policy, Retry-After)
 - [x] Admin dashboard for quota monitoring (`GET /admin/quota`, `POST /admin/quota/{username}`)
-- [ ] Quota reset scheduler (daily/weekly)
+- [x] Quota reset scheduler (daily/weekly) (weekly cron `0 3 * * 0` + stale-key cleanup in `src/api/routes.py`)
 
 ---
 

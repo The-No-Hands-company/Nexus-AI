@@ -1379,3 +1379,103 @@ def tool_inspect_sqlite(query: str = "", db_path: str = "") -> str:
 def tool_query_sqlite(sql: str, db_path: str = "") -> str:
     """Alias for tool_inspect_sqlite — run a read-only SQL query against the database."""
     return tool_inspect_sqlite(sql, db_path)
+
+
+# ── POSTGRESQL INTROSPECTION ──────────────────────────────────────────────────
+
+def tool_inspect_postgres(query: str = "", database_url: str = "") -> str:
+    """Introspect a PostgreSQL database: list tables, describe schema, or run a read-only query."""
+    import os as _os
+    url = database_url or _os.getenv("DATABASE_URL", "")
+    if not url:
+        return "❌ DATABASE_URL not set and no database_url provided."
+    try:
+        import psycopg2
+        from psycopg2.extras import RealDictCursor
+        conn = psycopg2.connect(url, cursor_factory=RealDictCursor)
+    except Exception as e:
+        return f"❌ Cannot connect to PostgreSQL: {e}"
+
+    try:
+        q = (query or "").strip()
+        with conn.cursor() as cur:
+            if not q or q.lower() in ("tables", "list tables", "\\dt"):
+                cur.execute("""
+                    SELECT table_name, table_type
+                    FROM information_schema.tables
+                    WHERE table_schema = 'public'
+                    ORDER BY table_name
+                """)
+                rows = cur.fetchall()
+                if not rows:
+                    return "No tables found."
+                lines = ["**Tables (public schema):**"]
+                for r in rows:
+                    lines.append(f"• `{r['table_name']}` ({r['table_type']})")
+                return "\n".join(lines)
+
+            if q.lower().startswith("schema") or q.lower().startswith("\\d "):
+                tbl = q.split(None, 1)[1].strip() if len(q.split()) > 1 else ""
+                if tbl:
+                    cur.execute("""
+                        SELECT column_name, data_type, is_nullable, column_default
+                        FROM information_schema.columns
+                        WHERE table_schema='public' AND table_name=%s
+                        ORDER BY ordinal_position
+                    """, (tbl,))
+                    rows = cur.fetchall()
+                    if not rows:
+                        return f"Table `{tbl}` not found."
+                    lines = [f"**Schema for `{tbl}`:**", "| Column | Type | Nullable | Default |",
+                             "| --- | --- | --- | --- |"]
+                    for r in rows:
+                        lines.append(f"| {r['column_name']} | {r['data_type']} | "
+                                     f"{r['is_nullable']} | {r['column_default'] or ''} |")
+                    return "\n".join(lines)
+                return "Usage: schema <table_name>"
+
+            if q.lower().startswith("indexes") or q.lower().startswith("indices"):
+                tbl = q.split(None, 1)[1].strip() if len(q.split()) > 1 else ""
+                where = "AND t.relname = %s" if tbl else ""
+                params = (tbl,) if tbl else ()
+                cur.execute(f"""
+                    SELECT i.relname AS index_name, t.relname AS table_name,
+                           ix.indisunique AS is_unique, ix.indisprimary AS is_primary,
+                           array_to_string(array_agg(a.attname ORDER BY a.attnum), ', ') AS columns
+                    FROM pg_index ix
+                    JOIN pg_class t ON t.oid = ix.indrelid
+                    JOIN pg_class i ON i.oid = ix.indexrelid
+                    JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
+                    WHERE t.relkind = 'r' {where}
+                    GROUP BY i.relname, t.relname, ix.indisunique, ix.indisprimary
+                    ORDER BY t.relname, i.relname
+                """, params)
+                rows = cur.fetchall()
+                if not rows:
+                    return "No indexes found."
+                lines = ["**Indexes:**", "| Index | Table | Unique | Primary | Columns |",
+                         "| --- | --- | --- | --- | --- |"]
+                for r in rows:
+                    lines.append(f"| {r['index_name']} | {r['table_name']} | "
+                                 f"{r['is_unique']} | {r['is_primary']} | {r['columns']} |")
+                return "\n".join(lines)
+
+            lower_q = q.lower().lstrip()
+            if any(lower_q.startswith(kw) for kw in ("insert", "update", "delete", "drop",
+                                                       "alter", "create", "replace", "truncate")):
+                return "❌ Only read-only queries are allowed."
+
+            cur.execute(q)
+            rows = cur.fetchmany(200)
+            if not rows:
+                return "Query returned no rows."
+            cols = list(rows[0].keys())
+            lines = ["| " + " | ".join(cols) + " |",
+                     "| " + " | ".join("---" for _ in cols) + " |"]
+            for r in rows:
+                lines.append("| " + " | ".join(str(r[c]) for c in cols) + " |")
+            return "\n".join(lines)
+    except Exception as e:
+        return f"❌ PostgreSQL error: {e}"
+    finally:
+        conn.close()

@@ -99,6 +99,34 @@ class DatabaseBackend(ABC):
     @abstractmethod
     def count_users(self) -> int: pass
 
+    @abstractmethod
+    def update_user_email(self, username: str, email: str, verified: bool = False) -> bool: pass
+
+    @abstractmethod
+    def get_user_by_email(self, username: str) -> dict | None: pass
+
+    # ── API keys ──────────────────────────────────────────────────────────────
+    @abstractmethod
+    def create_api_key(self, key_id: str, username: str, key_hash: str, key_prefix: str,
+                       name: str, scopes: list[str], created_at: float) -> bool: pass
+
+    @abstractmethod
+    def list_api_keys(self, username: str) -> list[dict]: pass
+
+    @abstractmethod
+    def get_api_key_by_hash(self, key_hash: str) -> dict | None: pass
+
+    @abstractmethod
+    def revoke_api_key(self, key_id: str, username: str) -> bool: pass
+
+    @abstractmethod
+    def touch_api_key(self, key_id: str, ts: float) -> None: pass
+
+    # ── OAuth ─────────────────────────────────────────────────────────────────
+    @abstractmethod
+    def get_or_create_oauth_user(self, provider: str, provider_id: str,
+                                  email: str, display_name: str) -> dict: pass
+
 # ── SQLITE BACKEND ────────────────────────────────────────────────────────────
 
 class SQLiteBackend(DatabaseBackend):
@@ -170,13 +198,38 @@ class SQLiteBackend(DatabaseBackend):
                 UNIQUE (chat_id, message_idx)
             );
         """)
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS auth_api_keys (
+                id           TEXT PRIMARY KEY,
+                username     TEXT NOT NULL,
+                key_hash     TEXT NOT NULL UNIQUE,
+                key_prefix   TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                scopes       TEXT NOT NULL,
+                created_at   REAL NOT NULL,
+                last_used_at REAL,
+                revoked_at   REAL
+            );
+            CREATE TABLE IF NOT EXISTS oauth_accounts (
+                id          TEXT PRIMARY KEY,
+                username    TEXT NOT NULL,
+                provider    TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                UNIQUE(provider, provider_id)
+            );
+        """)
         c.commit()
-        # Migrate existing databases that lack the role column
-        try:
-            c.execute("ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'")
-            c.commit()
-        except Exception:
-            pass
+        # Migrate existing databases
+        for col_sql in [
+            "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+            "ALTER TABLE users ADD COLUMN email TEXT",
+            "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0",
+        ]:
+            try:
+                c.execute(col_sql)
+                c.commit()
+            except Exception:
+                pass
 
     def save_chat(self, cid: str, title: str, created_at: str, updated_at: str, messages: list):
         self._conn().execute(
@@ -387,6 +440,90 @@ class SQLiteBackend(DatabaseBackend):
         row = self._conn().execute("SELECT COUNT(*) as n FROM users").fetchone()
         return int(row["n"]) if row else 0
 
+    def update_user_email(self, username: str, email: str, verified: bool = False) -> bool:
+        cur = self._conn().execute(
+            "UPDATE users SET email=?, email_verified=? WHERE username=?",
+            (email, 1 if verified else 0, username)
+        )
+        self._conn().commit()
+        return cur.rowcount > 0
+
+    def get_user_by_email(self, email: str) -> dict | None:
+        row = self._conn().execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        return dict(row) if row else None
+
+    def create_api_key(self, key_id: str, username: str, key_hash: str, key_prefix: str,
+                       name: str, scopes: list[str], created_at: float) -> bool:
+        try:
+            self._conn().execute(
+                "INSERT INTO auth_api_keys(id,username,key_hash,key_prefix,name,scopes,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (key_id, username, key_hash, key_prefix, name, json.dumps(scopes), created_at)
+            )
+            self._conn().commit()
+            return True
+        except Exception:
+            return False
+
+    def list_api_keys(self, username: str) -> list[dict]:
+        rows = self._conn().execute(
+            "SELECT id,username,key_prefix,name,scopes,created_at,last_used_at,revoked_at "
+            "FROM auth_api_keys WHERE username=? ORDER BY created_at DESC",
+            (username,)
+        ).fetchall()
+        result = []
+        for r in rows:
+            d = dict(r)
+            d["scopes"] = json.loads(d["scopes"])
+            result.append(d)
+        return result
+
+    def get_api_key_by_hash(self, key_hash: str) -> dict | None:
+        row = self._conn().execute(
+            "SELECT * FROM auth_api_keys WHERE key_hash=? AND revoked_at IS NULL", (key_hash,)
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        d["scopes"] = json.loads(d["scopes"])
+        return d
+
+    def revoke_api_key(self, key_id: str, username: str) -> bool:
+        cur = self._conn().execute(
+            "UPDATE auth_api_keys SET revoked_at=? WHERE id=? AND username=?",
+            (datetime.now(timezone.utc).timestamp(), key_id, username)
+        )
+        self._conn().commit()
+        return cur.rowcount > 0
+
+    def touch_api_key(self, key_id: str, ts: float) -> None:
+        self._conn().execute(
+            "UPDATE auth_api_keys SET last_used_at=? WHERE id=?", (ts, key_id)
+        )
+        self._conn().commit()
+
+    def get_or_create_oauth_user(self, provider: str, provider_id: str,
+                                  email: str, display_name: str) -> dict:
+        row = self._conn().execute(
+            "SELECT username FROM oauth_accounts WHERE provider=? AND provider_id=?",
+            (provider, provider_id)
+        ).fetchone()
+        if row:
+            user = self.get_user(row["username"])
+            return user if user else {}
+        import uuid as _uuid
+        username = f"{provider}_{provider_id[:16]}_{_uuid.uuid4().hex[:6]}"
+        role = "admin" if self.count_users() == 0 else "user"
+        self.create_user(username, "", display_name, role)
+        self.update_user_email(username, email, verified=True)
+        oid = _uuid.uuid4().hex
+        self._conn().execute(
+            "INSERT OR IGNORE INTO oauth_accounts(id,username,provider,provider_id) VALUES(?,?,?,?)",
+            (oid, username, provider, provider_id)
+        )
+        self._conn().commit()
+        return self.get_user(username) or {}
+
 # ── POSTGRES BACKEND ──────────────────────────────────────────────────────────
 
 class PostgresBackend(DatabaseBackend):
@@ -481,7 +618,9 @@ class PostgresBackend(DatabaseBackend):
                     password    TEXT NOT NULL,
                     created_at  TEXT NOT NULL,
                     display_name TEXT,
-                    role        TEXT NOT NULL DEFAULT 'user'
+                    role        TEXT NOT NULL DEFAULT 'user',
+                    email       TEXT,
+                    email_verified INTEGER NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS message_feedback (
                     id          SERIAL PRIMARY KEY,
@@ -493,11 +632,34 @@ class PostgresBackend(DatabaseBackend):
                     ts          DOUBLE PRECISION NOT NULL,
                     UNIQUE (chat_id, message_idx)
                 );
+                CREATE TABLE IF NOT EXISTS auth_api_keys (
+                    id           TEXT PRIMARY KEY,
+                    username     TEXT NOT NULL,
+                    key_hash     TEXT NOT NULL UNIQUE,
+                    key_prefix   TEXT NOT NULL,
+                    name         TEXT NOT NULL,
+                    scopes       TEXT NOT NULL,
+                    created_at   DOUBLE PRECISION NOT NULL,
+                    last_used_at DOUBLE PRECISION,
+                    revoked_at   DOUBLE PRECISION
+                );
+                CREATE TABLE IF NOT EXISTS oauth_accounts (
+                    id          TEXT PRIMARY KEY,
+                    username    TEXT NOT NULL,
+                    provider    TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    UNIQUE(provider, provider_id)
+                );
             """)
-            try:
-                cur.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'")
-            except Exception:
-                pass
+            for col_sql in [
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT",
+                "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified INTEGER NOT NULL DEFAULT 0",
+            ]:
+                try:
+                    cur.execute(col_sql)
+                except Exception:
+                    pass
         conn.commit()
         self._put_conn(conn)
 
@@ -748,6 +910,113 @@ class PostgresBackend(DatabaseBackend):
         self._put_conn(conn)
         return int(row["n"]) if row else 0
 
+    def update_user_email(self, username: str, email: str, verified: bool = False) -> bool:
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE users SET email=%s, email_verified=%s WHERE username=%s",
+                        (email, 1 if verified else 0, username))
+            changed = cur.rowcount > 0
+        conn.commit()
+        self._put_conn(conn)
+        return changed
+
+    def get_user_by_email(self, email: str) -> dict | None:
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM users WHERE email=%s", (email,))
+            row = cur.fetchone()
+        self._put_conn(conn)
+        return dict(row) if row else None
+
+    def create_api_key(self, key_id: str, username: str, key_hash: str, key_prefix: str,
+                       name: str, scopes: list[str], created_at: float) -> bool:
+        conn = self._get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO auth_api_keys(id,username,key_hash,key_prefix,name,scopes,created_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+                    (key_id, username, key_hash, key_prefix, name, json.dumps(scopes), created_at)
+                )
+            conn.commit()
+            return True
+        except Exception:
+            return False
+        finally:
+            self._put_conn(conn)
+
+    def list_api_keys(self, username: str) -> list[dict]:
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT id,username,key_prefix,name,scopes,created_at,last_used_at,revoked_at "
+                "FROM auth_api_keys WHERE username=%s ORDER BY created_at DESC",
+                (username,)
+            )
+            rows = cur.fetchall()
+        self._put_conn(conn)
+        result = []
+        for r in rows:
+            d = dict(r)
+            if isinstance(d.get("scopes"), str):
+                d["scopes"] = json.loads(d["scopes"])
+            result.append(d)
+        return result
+
+    def get_api_key_by_hash(self, key_hash: str) -> dict | None:
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT * FROM auth_api_keys WHERE key_hash=%s AND revoked_at IS NULL", (key_hash,))
+            row = cur.fetchone()
+        self._put_conn(conn)
+        if not row:
+            return None
+        d = dict(row)
+        if isinstance(d.get("scopes"), str):
+            d["scopes"] = json.loads(d["scopes"])
+        return d
+
+    def revoke_api_key(self, key_id: str, username: str) -> bool:
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE auth_api_keys SET revoked_at=%s WHERE id=%s AND username=%s",
+                        (datetime.now(timezone.utc).timestamp(), key_id, username))
+            changed = cur.rowcount > 0
+        conn.commit()
+        self._put_conn(conn)
+        return changed
+
+    def touch_api_key(self, key_id: str, ts: float) -> None:
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute("UPDATE auth_api_keys SET last_used_at=%s WHERE id=%s", (ts, key_id))
+        conn.commit()
+        self._put_conn(conn)
+
+    def get_or_create_oauth_user(self, provider: str, provider_id: str,
+                                  email: str, display_name: str) -> dict:
+        conn = self._get_conn()
+        with conn.cursor() as cur:
+            cur.execute("SELECT username FROM oauth_accounts WHERE provider=%s AND provider_id=%s",
+                        (provider, provider_id))
+            row = cur.fetchone()
+        self._put_conn(conn)
+        if row:
+            return self.get_user(row["username"]) or {}
+        import uuid as _uuid
+        username = f"{provider}_{provider_id[:16]}_{_uuid.uuid4().hex[:6]}"
+        role = "admin" if self.count_users() == 0 else "user"
+        self.create_user(username, "", display_name, role)
+        self.update_user_email(username, email, verified=True)
+        oid = _uuid.uuid4().hex
+        conn2 = self._get_conn()
+        with conn2.cursor() as cur:
+            cur.execute("INSERT INTO oauth_accounts(id,username,provider,provider_id) VALUES(%s,%s,%s,%s) "
+                        "ON CONFLICT DO NOTHING", (oid, username, provider, provider_id))
+        conn2.commit()
+        self._put_conn(conn2)
+        return self.get_user(username) or {}
+
 # ── FACTORY ──────────────────────────────────────────────────────────────────
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
@@ -789,6 +1058,14 @@ def save_feedback(cid, mi, r, p="", m=""): _backend.save_feedback(cid, mi, r, p,
 def list_users(): return _backend.list_users()
 def update_user_role(username, role): return _backend.update_user_role(username, role)
 def count_users(): return _backend.count_users()
+def update_user_email(username, email, verified=False): return _backend.update_user_email(username, email, verified)
+def get_user_by_email(email): return _backend.get_user_by_email(email)
+def create_api_key(key_id, username, key_hash, key_prefix, name, scopes, created_at): return _backend.create_api_key(key_id, username, key_hash, key_prefix, name, scopes, created_at)
+def list_api_keys(username): return _backend.list_api_keys(username)
+def get_api_key_by_hash(key_hash): return _backend.get_api_key_by_hash(key_hash)
+def revoke_api_key(key_id, username): return _backend.revoke_api_key(key_id, username)
+def touch_api_key(key_id, ts): return _backend.touch_api_key(key_id, ts)
+def get_or_create_oauth_user(provider, provider_id, email, display_name): return _backend.get_or_create_oauth_user(provider, provider_id, email, display_name)
 
 # Special cases (mapped to pref table)
 def save_custom_instructions(i): save_pref("custom_instructions", i)
