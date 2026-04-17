@@ -863,9 +863,9 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 | Status | Count (approx) |
 |--------|---------------|
-| `[x]` Fully implemented | 58 |
+| `[x]` Fully implemented | 98 |
 | `[~]` Stub / partial | 0 |
-| `[ ]` Not yet started | 550 |
+| `[ ]` Not yet started | 510 |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).
