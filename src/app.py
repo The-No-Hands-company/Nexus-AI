@@ -118,6 +118,14 @@ async def lifespan(app: FastAPI):
     if hasattr(api_routes, "startup_event"):
         api_routes.startup_event()
 
+    # Pre-warm the default agent context to reduce first-call cold-start latency
+    try:
+        from .agent import warmup_agent
+        warmup_agent(sid="runtime", persona="general")
+        _logger.info("agent_warmup_complete")
+    except Exception as exc:
+        _logger.warning("agent_warmup_failed error=%s", exc)
+
     # Zero-downtime online DDL migrations (non-blocking, idempotent)
     try:
         from .online_ddl import run_pending_migrations
