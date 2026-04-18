@@ -15,3 +15,32 @@ python-pptx>=1.0.2
 gunicorn>=22.0.0
 alembic>=1.13.0
 psycopg2-binary>=2.9.9
+
+# ── Section 1: Foundational Infrastructure (optional, graceful fallback) ──────
+# Distributed state / rate limiting
+redis>=5.0.0
+
+# Async-safe PostgreSQL pool
+asyncpg>=0.29.0
+
+# MFA / TOTP
+pyotp>=2.9.0
+qrcode[pil]>=7.4.2
+
+# WebAuthn / passkeys
+py_webauthn>=2.0.0
+
+# SAML 2.0 enterprise SSO
+pysaml2>=7.0.0
+
+# Observability — metrics + structured logging
+prometheus-client>=0.20.0
+structlog>=24.1.0
+
+# Secrets management
+cryptography>=42.0.0
+
+# OpenTelemetry (tracing)
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp-proto-grpc>=1.24.0
+opentelemetry-instrumentation-fastapi>=0.45b0

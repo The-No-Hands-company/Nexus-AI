@@ -16,6 +16,7 @@ start_worker() / stop_worker()
 
 from __future__ import annotations
 
+import hashlib
 import heapq
 import json
 import threading
@@ -163,17 +164,54 @@ def submit_task(
     deps: Optional[List[str]] = None,
     metadata: Optional[Dict[str, Any]] = None,
     schedule_cron: str = "",
+    dedupe: bool = True,
 ) -> str:
-    """Submit a task to the priority queue. Returns the new task_id."""
+    """Submit a task to the priority queue. Returns the new task_id.
+
+    Identical pending/running tasks are deduplicated via a distributed key,
+    preventing retry storms from enqueuing duplicate work.
+    """
+    from .redis_state import distributed_lock, redis_get, redis_set
+
+    dep_list = list(deps or [])
+    meta = dict(metadata or {})
+    # Ignore ephemeral metadata fields that should not affect task identity.
+    dedup_meta = {k: v for k, v in meta.items() if not str(k).startswith("_")}
+    dedup_payload = {
+        "description": str(description).strip(),
+        "priority": int(priority),
+        "deps": sorted(str(d) for d in dep_list),
+        "metadata": dedup_meta,
+        "schedule_cron": str(schedule_cron or ""),
+    }
+    dedup_sig = hashlib.sha256(
+        json.dumps(dedup_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    dedup_key = f"task:dedup:{dedup_sig}"
+
+    # Serialise dedup checks across workers so only one task is enqueued.
+    if dedupe:
+        with distributed_lock(f"task-submit:{dedup_sig}", ttl=10, retry_count=30) as acquired:
+            if acquired:
+                existing_id = redis_get(dedup_key)
+                if isinstance(existing_id, str):
+                    existing = _tasks.get(existing_id)
+                    if existing and existing.status in (TASK_PENDING, TASK_RUNNING):
+                        return existing_id
+                    persisted = get_task(existing_id)
+                    if persisted and persisted.get("status") in (TASK_PENDING, TASK_RUNNING):
+                        return existing_id
+
     task_id = f"task-{uuid.uuid4().hex[:12]}"
     task = QueuedTask(
         task_id=task_id,
         description=description,
         priority=priority,
-        dependencies=list(deps or []),
-        metadata=dict(metadata or {}),
+        dependencies=dep_list,
+        metadata=meta,
         schedule_cron=schedule_cron,
     )
+    task.metadata["_dedup_signature"] = dedup_sig
     _tasks[task_id] = task
     db_save_task_job(
         task_id=task.task_id,
@@ -191,6 +229,9 @@ def submit_task(
     )
     with _heap_lock:
         heapq.heappush(_heap, task)
+    # Keep a short-lived mapping for dedup across workers and restarts.
+    if dedupe:
+        redis_set(dedup_key, task_id, ex=3600)
     _new_task_event.set()
     return task_id
 
@@ -383,6 +424,16 @@ def _worker_loop() -> None:
                 started_at=ready.started_at,
                 finished_at=ready.finished_at,
             )
+            try:
+                from .redis_state import redis_delete, redis_get
+
+                dedup_sig = str(ready.metadata.get("_dedup_signature", "")).strip()
+                if dedup_sig:
+                    dedup_key = f"task:dedup:{dedup_sig}"
+                    if redis_get(dedup_key) == ready.task_id:
+                        redis_delete(dedup_key)
+            except Exception:
+                pass
 
         # Re-enqueue if this is a scheduled (cron) task
         if ready.schedule_cron and ready.status == TASK_DONE:
