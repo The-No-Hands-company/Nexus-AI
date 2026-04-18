@@ -1,0 +1,71 @@
+{
+  "counts": {
+    "total_rows": 608,
+    "x_rows": 356,
+    "tilde_rows": 14,
+    "blank_rows": 238
+  },
+  "contradiction_rows": 0,
+  "contradiction_lines": [],
+  "issues_total": 0,
+  "issues_sample": [],
+  "duplicate_names_total": 14,
+  "duplicate_names_top": [
+    {
+      "name": "`GET /tasks/{trace_id}/replay` \u2014 deterministic trace replay",
+      "count": 2
+    },
+    {
+      "name": "`screenshot_capture` \u2014 headless browser screenshot",
+      "count": 2
+    },
+    {
+      "name": "`generate_image_local` \u2014 local Flux / SD3 image generation via Ollama",
+      "count": 2
+    },
+    {
+      "name": "`generate_video` \u2014 local video generation",
+      "count": 2
+    },
+    {
+      "name": "`Nexus Tunnel integration` (Nexus Systems #80)",
+      "count": 2
+    },
+    {
+      "name": "`Nexus Guardian integration`",
+      "count": 2
+    },
+    {
+      "name": "`Nexus Edge integration`",
+      "count": 2
+    },
+    {
+      "name": "Dark / light theme toggle",
+      "count": 2
+    },
+    {
+      "name": "Font size preference",
+      "count": 2
+    },
+    {
+      "name": "Screenshot capture tool (headless browser)",
+      "count": 2
+    },
+    {
+      "name": "Local image generation \u2014 Flux / SD3 via Ollama or ComfyUI",
+      "count": 2
+    },
+    {
+      "name": "Audio analysis tool (sentiment / diarization / speaker ID)",
+      "count": 2
+    },
+    {
+      "name": "Local video generation tool",
+      "count": 2
+    },
+    {
+      "name": "Real-time collaboration (multi-human + multi-agent on same session)",
+      "count": 2
+    }
+  ]
+}

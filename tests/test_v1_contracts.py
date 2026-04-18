@@ -1,6 +1,9 @@
 import unittest
 import asyncio
 import threading
+import time
+import os
+import json
 from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
@@ -22,6 +25,74 @@ client = TestClient(app)
 
 
 class TestV1Contracts(unittest.TestCase):
+    def test_v1_fine_tuning_job_lifecycle_persisted(self):
+        from src.api import routes as api_routes
+
+        test_files_dir = "/tmp/nexus_ai_test_files"
+        os.makedirs(test_files_dir, exist_ok=True)
+        api_routes._FILES_DIR = test_files_dir
+
+        file_id = "file-test-ft-001"
+        train_bytes = b'{"messages":[{"role":"user","content":"hi"}]}\n'
+        with open(os.path.join(test_files_dir, file_id), "wb") as fh:
+            fh.write(train_bytes)
+        with open(api_routes._file_meta_path(file_id), "w") as fh:
+            json.dump(
+                {
+                    "id": file_id,
+                    "object": "file",
+                    "bytes": len(train_bytes),
+                    "created_at": int(time.time()),
+                    "filename": "train.jsonl",
+                    "purpose": "fine-tune",
+                    "status": "processed",
+                },
+                fh,
+            )
+
+        create = client.post(
+            "/v1/fine-tuning/jobs",
+            json={"training_file": file_id, "model": "gpt-3.5-turbo"},
+        )
+        self.assertEqual(create.status_code, 200)
+        job = create.json()
+        self.assertEqual(job.get("object"), "fine_tuning.job")
+        self.assertEqual(job.get("status"), "queued")
+        job_id = job.get("id")
+        self.assertTrue(job_id)
+
+        listed = client.get("/v1/fine-tuning/jobs?limit=20")
+        self.assertEqual(listed.status_code, 200)
+        payload = listed.json()
+        self.assertEqual(payload.get("object"), "list")
+        self.assertTrue(any(item.get("id") == job_id for item in payload.get("data", [])))
+
+        # Job lifecycle should progress in the background.
+        final_status = None
+        final_payload = None
+        for _ in range(20):
+            resp = client.get(f"/v1/fine-tuning/jobs/{job_id}")
+            self.assertEqual(resp.status_code, 200)
+            final_payload = resp.json()
+            final_status = final_payload.get("status")
+            if final_status in {"succeeded", "failed", "cancelled"}:
+                break
+            time.sleep(0.15)
+
+        self.assertIn(final_status, {"succeeded", "failed", "cancelled"})
+        if final_status == "succeeded":
+            self.assertTrue(final_payload.get("fine_tuned_model"))
+            self.assertIsInstance(final_payload.get("trained_tokens"), int)
+
+    def test_v1_fine_tuning_rejects_missing_training_file(self):
+        response = client.post(
+            "/v1/fine-tuning/jobs",
+            json={"training_file": "file-does-not-exist", "model": "gpt-3.5-turbo"},
+        )
+        self.assertEqual(response.status_code, 400)
+        payload = response.json()
+        self.assertEqual(payload.get("type"), "invalid_request_error")
+
     def test_auth_register_login_refresh_logout_flow(self):
         username = "authflow_user"
         password = "StrongPass123"  # pragma: allowlist secret

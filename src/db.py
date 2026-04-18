@@ -217,6 +217,21 @@ class SQLiteBackend(DatabaseBackend):
                 provider_id TEXT NOT NULL,
                 UNIQUE(provider, provider_id)
             );
+            CREATE TABLE IF NOT EXISTS fine_tuning_jobs (
+                id               TEXT PRIMARY KEY,
+                created_at       INTEGER NOT NULL,
+                finished_at      INTEGER,
+                model            TEXT NOT NULL,
+                fine_tuned_model TEXT,
+                organization_id  TEXT NOT NULL,
+                status           TEXT NOT NULL,
+                training_file    TEXT NOT NULL,
+                validation_file  TEXT,
+                hyperparameters  TEXT NOT NULL,
+                trained_tokens   INTEGER,
+                error            TEXT,
+                result_files     TEXT NOT NULL
+            );
         """)
         c.commit()
         # Migrate existing databases
@@ -649,6 +664,21 @@ class PostgresBackend(DatabaseBackend):
                     provider    TEXT NOT NULL,
                     provider_id TEXT NOT NULL,
                     UNIQUE(provider, provider_id)
+                );
+                CREATE TABLE IF NOT EXISTS fine_tuning_jobs (
+                    id               TEXT PRIMARY KEY,
+                    created_at       INTEGER NOT NULL,
+                    finished_at      INTEGER,
+                    model            TEXT NOT NULL,
+                    fine_tuned_model TEXT,
+                    organization_id  TEXT NOT NULL,
+                    status           TEXT NOT NULL,
+                    training_file    TEXT NOT NULL,
+                    validation_file  TEXT,
+                    hyperparameters  TEXT NOT NULL,
+                    trained_tokens   INTEGER,
+                    error            TEXT,
+                    result_files     TEXT NOT NULL
                 );
             """)
             for col_sql in [
@@ -1316,6 +1346,118 @@ def load_feedback_export(limit: int = 5000) -> list[dict]:
             (safe_limit,),
         )
     return rows
+
+
+# ── Fine-tuning jobs persistence ────────────────────────────────────────────
+
+def _decode_ft_row(row: dict) -> dict:
+    out = dict(row)
+    for key, default in (("hyperparameters", {}), ("result_files", []), ("error", None)):
+        val = out.get(key)
+        if isinstance(val, str) and val:
+            try:
+                out[key] = json.loads(val)
+            except Exception:
+                out[key] = default
+        elif val in (None, ""):
+            out[key] = default
+    return out
+
+
+def create_fine_tuning_job(job: dict) -> bool:
+    hp = json.dumps(job.get("hyperparameters") or {})
+    err = json.dumps(job.get("error")) if job.get("error") is not None else None
+    files = json.dumps(job.get("result_files") or [])
+    if isinstance(_backend, SQLiteBackend):
+        changed = _sql_execute(
+            "INSERT INTO fine_tuning_jobs(id, created_at, finished_at, model, fine_tuned_model, organization_id, status, training_file, validation_file, hyperparameters, trained_tokens, error, result_files) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (
+                job.get("id"),
+                int(job.get("created_at") or 0),
+                job.get("finished_at"),
+                job.get("model"),
+                job.get("fine_tuned_model"),
+                job.get("organization_id") or "org-nexus",
+                job.get("status") or "queued",
+                job.get("training_file"),
+                job.get("validation_file"),
+                hp,
+                job.get("trained_tokens"),
+                err,
+                files,
+            ),
+        )
+    else:
+        changed = _sql_execute(
+            "INSERT INTO fine_tuning_jobs(id, created_at, finished_at, model, fine_tuned_model, organization_id, status, training_file, validation_file, hyperparameters, trained_tokens, error, result_files) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+            (
+                job.get("id"),
+                int(job.get("created_at") or 0),
+                job.get("finished_at"),
+                job.get("model"),
+                job.get("fine_tuned_model"),
+                job.get("organization_id") or "org-nexus",
+                job.get("status") or "queued",
+                job.get("training_file"),
+                job.get("validation_file"),
+                hp,
+                job.get("trained_tokens"),
+                err,
+                files,
+            ),
+        )
+    return changed > 0
+
+
+def get_fine_tuning_job(job_id: str) -> dict | None:
+    if isinstance(_backend, SQLiteBackend):
+        rows = _sql_fetchall("SELECT * FROM fine_tuning_jobs WHERE id=?", (job_id,))
+    else:
+        rows = _sql_fetchall("SELECT * FROM fine_tuning_jobs WHERE id=%s", (job_id,))
+    if not rows:
+        return None
+    return _decode_ft_row(rows[0])
+
+
+def list_fine_tuning_jobs(limit: int = 20, after: str = "") -> list[dict]:
+    if isinstance(_backend, SQLiteBackend):
+        rows = _sql_fetchall("SELECT * FROM fine_tuning_jobs ORDER BY created_at DESC, id DESC")
+    else:
+        rows = _sql_fetchall("SELECT * FROM fine_tuning_jobs ORDER BY created_at DESC, id DESC")
+    jobs = [_decode_ft_row(r) for r in rows]
+    if after:
+        idx = next((i for i, j in enumerate(jobs) if j.get("id") == after), -1)
+        if idx >= 0:
+            jobs = jobs[idx + 1:]
+    return jobs[: max(1, int(limit))]
+
+
+def update_fine_tuning_job(job_id: str, **fields) -> bool:
+    if not fields:
+        return False
+    allowed = {
+        "finished_at", "fine_tuned_model", "status", "trained_tokens", "error", "result_files", "hyperparameters"
+    }
+    patch = {k: v for k, v in fields.items() if k in allowed}
+    if not patch:
+        return False
+    if "error" in patch and patch["error"] is not None:
+        patch["error"] = json.dumps(patch["error"])
+    if "result_files" in patch and patch["result_files"] is not None:
+        patch["result_files"] = json.dumps(patch["result_files"])
+    if "hyperparameters" in patch and patch["hyperparameters"] is not None:
+        patch["hyperparameters"] = json.dumps(patch["hyperparameters"])
+
+    keys = list(patch.keys())
+    if isinstance(_backend, SQLiteBackend):
+        set_sql = ", ".join(f"{k}=?" for k in keys)
+        params = tuple(patch[k] for k in keys) + (job_id,)
+        changed = _sql_execute(f"UPDATE fine_tuning_jobs SET {set_sql} WHERE id=?", params)
+    else:
+        set_sql = ", ".join(f"{k}=%s" for k in keys)
+        params = tuple(patch[k] for k in keys) + (job_id,)
+        changed = _sql_execute(f"UPDATE fine_tuning_jobs SET {set_sql} WHERE id=%s", params)
+    return changed > 0
 
 
 def get_feedback_stats() -> dict:

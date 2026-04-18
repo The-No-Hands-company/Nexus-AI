@@ -1,0 +1,56 @@
+{
+  "summary": {
+    "marked_implemented_count": 356,
+    "truly_implemented_count": 18,
+    "marked_but_broken": 6,
+    "marked_partial_count": 14,
+    "marked_not_started_count": 238,
+    "total_inventory_rows": 608
+  },
+  "implementation_breakdown": {
+    "truly_implemented": 18,
+    "raises_notimplementederror": 0,
+    "marked_stub": 6,
+    "missing_files": 0,
+    "symbols_not_defined": 0,
+    "no_module_pointer": 332
+  },
+  "problematic_items": [
+    {
+      "line": 395,
+      "name": "`Nexus Guardian integration`",
+      "status": "Stub",
+      "reason": "register_with_guardian marked as stub/todo"
+    },
+    {
+      "line": 397,
+      "name": "`Nexus Edge integration`",
+      "status": "Stub",
+      "reason": "register_edge_node marked as stub/todo"
+    },
+    {
+      "line": 398,
+      "name": "`screenshot_to_text`",
+      "status": "Stub",
+      "reason": "ocr_image_bytes marked as stub/todo"
+    },
+    {
+      "line": 399,
+      "name": "`image_describe`",
+      "status": "Stub",
+      "reason": "describe_image marked as stub/todo"
+    },
+    {
+      "line": 634,
+      "name": "Image analysis tool (`image_describe`)",
+      "status": "Stub",
+      "reason": "describe_image marked as stub/todo"
+    },
+    {
+      "line": 636,
+      "name": "OCR tool (extract text from image)",
+      "status": "Stub",
+      "reason": "ocr_image_bytes marked as stub/todo"
+    }
+  ]
+}
