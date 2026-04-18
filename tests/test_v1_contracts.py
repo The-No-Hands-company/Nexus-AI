@@ -2273,10 +2273,13 @@ class TestSprintF(unittest.TestCase):
         from src.agent import _provider_exhausted_error
         
         error_payload = _provider_exhausted_error(scope="agents", tried=["groq", "openai"])
-        self.assertEqual(error_payload.get("type"), "provider_exhausted")
-        self.assertIn("hints", error_payload)
-        self.assertIn("retry_after_seconds", error_payload)
-        self.assertIsInstance(error_payload.get("retry_after_seconds"), (int, float))
+        self.assertIn("error", error_payload)
+        error_obj = error_payload["error"]
+        self.assertIn("type", error_obj)
+        self.assertEqual(error_obj.get("code"), "provider_exhausted")
+        self.assertEqual(error_obj.get("scope"), "agents")
+        self.assertIn("providers_tried", error_obj)
+        self.assertIsInstance(error_obj.get("retry_after_s"), int)
 
     @patch("src.agent.call_llm_with_fallback")
     def test_budget_routing_api_endpoint(self, mock_call):
@@ -2295,7 +2298,8 @@ class TestSprintF(unittest.TestCase):
         self.assertEqual(response.status_code, 503)
         payload = response.json()
         self.assertEqual(payload.get("type"), "provider_exhausted")
-        self.assertIn("retry_after_seconds", payload)
+        self.assertIn("error", payload)
+        self.assertEqual(payload.get("type"), "provider_exhausted")
 
     def test_budget_routing_prefers_low_latency_with_tight_time_budget(self):
         """Part 6: When time_budget is tight, prefer low-latency providers."""
