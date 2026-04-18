@@ -146,20 +146,20 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 3.1 Agent execution loop
 
-- [ ] `src/agent.py` — streaming tool-call loop
-- [ ] Tool-call loop (up to 16 iterations)
-- [ ] SSE event stream (`token`, `think`, `plan`, `tool_start`, `tool_result`, `done`)
-- [ ] `POST /agent` — non-streaming agent run
-- [ ] `POST /agent/stream` — SSE streaming agent run
-- [ ] `GET /agent/trace/{trace_id}` — fetch execution trace
-- [ ] `POST /agent/stop/{stream_id}` — cancel active stream
-- [ ] `POST /agents/{agent_id}/run` — run named specialist agent
-- [ ] `GET /agents/{agent_id}` — get agent spec
-- [ ] `GET /agents` — list all specialist agents
-- [ ] `POST /agents/classify` — classify task to best agent
-- [ ] Auto-retry on malformed LLM output
-- [ ] Confidence scoring on responses
-- [ ] `AllProvidersExhausted` → 503 retry guidance on `/agents/{agent_id}/run`
+- [x] `src/agent.py` — streaming tool-call loop
+- [x] Tool-call loop (up to 16 iterations)
+- [x] SSE event stream (`token`, `think`, `plan`, `tool_start`, `tool_result`, `done`)
+- [x] `POST /agent` — non-streaming agent run
+- [x] `POST /agent/stream` — SSE streaming agent run
+- [x] `GET /agent/trace/{trace_id}` — fetch execution trace
+- [x] `POST /agent/stop/{stream_id}` — cancel active stream
+- [x] `POST /agents/{agent_id}/run` — run named specialist agent
+- [x] `GET /agents/{agent_id}` — get agent spec
+- [x] `GET /agents` — list all specialist agents
+- [x] `POST /agents/classify` — classify task to best agent
+- [x] Auto-retry on malformed LLM output
+- [x] Confidence scoring on responses
+- [x] `AllProvidersExhausted` → 503 retry guidance on `/agents/{agent_id}/run`
 - [x] Parallel tool-call execution (fan-out multiple tools simultaneously)
 - [x] Compositional (chained sequential) tool-call support
 - [x] Partial tool-failure recovery (continue after one tool errors) — Pointers: route=`POST /agent`, `POST /agent/stream` (`src/api/routes.py`); tool=`dispatch_builtin` + `_tool_trace(..., status="error")` (`src/tools_builtin.py`); module=`src/agent.py:_execute_parallel_tool_call`, `src/agent.py:_run_parallel_tool_batch`.
@@ -170,15 +170,15 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 3.2 Reasoning and thinking
 
-- [ ] `src/thinking.py` — Chain-of-Thought / Tree-of-Thought helpers
-- [ ] `think_deep` tool — Tree-of-Thought reasoning
-- [ ] Graph-of-Thought reasoning
-- [ ] Self-critique loop (`POST /agent/self-review`)
-- [ ] `GET /agent/self-review/history`
-- [ ] Cross-model consensus (`POST /reason/consensus`)
-- [ ] Generator-critic research flow (`POST /reason/generator-critic`)
-- [ ] Multi-agent debate (`POST /reason/debate`)
-- [ ] Hypothesis testing flow (`POST /reason/hypothesis`)
+- [x] `src/thinking.py` — Chain-of-Thought / Tree-of-Thought helpers
+- [x] `think_deep` tool — Tree-of-Thought reasoning
+- [x] Graph-of-Thought reasoning
+- [x] Self-critique loop (`POST /agent/self-review`)
+- [x] `GET /agent/self-review/history`
+- [x] Cross-model consensus (`POST /reason/consensus`)
+- [x] Generator-critic research flow (`POST /reason/generator-critic`)
+- [x] Multi-agent debate (`POST /reason/debate`)
+- [x] Hypothesis testing flow (`POST /reason/hypothesis`)
 - [x] Reflection / retrospective loop (post-task quality review stored as learning signal)
 - [x] Monte Carlo Tree Search (MCTS) for planning space exploration
 - [x] Socratic reasoning mode (question-driven decomposition)
@@ -186,22 +186,22 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 3.3 Autonomy and orchestration
 
-- [ ] `src/autonomy.py` — multi-step orchestrator + planning system
-- [ ] `POST /autonomy/plan` — dry-run plan generation
-- [ ] `POST /autonomy/execute` — full autonomous task execution
-- [ ] `GET /autonomy/trace/{trace_id}` — trace retrieval
-- [ ] `POST /orchestrate/hierarchical` — Planner→Executor→Reviewer→Verifier pipeline
-- [ ] `GET /orchestrate/hierarchical/{trace_id}` — hierarchical trace
-- [ ] Structured task decomposition (PlanningSystem)
-- [ ] Subtask classification to tool / agent
-- [ ] Sequential and parallel subtask execution
+- [x] `src/autonomy.py` — multi-step orchestrator + planning system
+- [x] `POST /autonomy/plan` — dry-run plan generation
+- [x] `POST /autonomy/execute` — full autonomous task execution
+- [x] `GET /autonomy/trace/{trace_id}` — trace retrieval
+- [x] `POST /orchestrate/hierarchical` — Planner→Executor→Reviewer→Verifier pipeline
+- [x] `GET /orchestrate/hierarchical/{trace_id}` — hierarchical trace
+- [x] Structured task decomposition (PlanningSystem)
+- [x] Subtask classification to tool / agent
+- [x] Sequential and parallel subtask execution
 - [x] SSE events: `plan`, `subtask`, `tool`, `result`, `autonomy_done`
-- [ ] Checkpointed long-run execution (`src/execution_trace.py`)
-- [ ] `GET /tasks` — task list
-- [ ] `GET /tasks/{trace_id}` — task detail
-- [ ] `GET /tasks/{trace_id}/replay` — deterministic trace replay
-- [ ] `POST /tasks/{trace_id}/resume` — resume interrupted task
-- [ ] `DELETE /tasks/{trace_id}` — delete task trace
+- [x] Checkpointed long-run execution (`src/execution_trace.py`)
+- [x] `GET /tasks` — task list
+- [x] `GET /tasks/{trace_id}` — task detail
+- [x] `GET /tasks/{trace_id}/replay` — deterministic trace replay
+- [x] `POST /tasks/{trace_id}/resume` — resume interrupted task
+- [x] `DELETE /tasks/{trace_id}` — delete task trace
 - [x] Task dependency graph (DAG scheduling between subtasks)
 - [x] Cross-task memory sharing (results of task A injected into task B context)
 - [x] Task queue with priority ordering
@@ -211,8 +211,8 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 3.4 Simulation
 
-- [ ] `src/simulation.py` — simulation engine
-- [ ] `POST /simulate` — run agent simulation scenario
+- [x] `src/simulation.py` — simulation engine
+- [x] `POST /simulate` — run agent simulation scenario
 - [x] Scenario library (pre-built simulation templates)
 - [x] Simulation result comparison (A/B run diffing)
 - [x] Simulation → training signal pipeline (export to fine-tuning dataset)
@@ -864,9 +864,9 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 | Status | Count (approx)       |
 |--------|----------------------|
-| `[x]` Fully implemented | 171 |
+| `[x]` Fully implemented | 211 |
 | `[~]` Stub / partial    | 4   |
-| `[ ]` Not yet started   | 445 |
+| `[ ]` Not yet started   | 405 |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).
