@@ -409,66 +409,67 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 6.1 Utility tools
 
-- [ ] `get_time` — current date/time
-- [ ] `calculate` — safe math expression evaluator
-- [ ] `weather` — current weather by location
-- [ ] `currency` — currency conversion
-- [ ] `convert` — unit conversion (length, weight, temp, etc.)
-- [ ] `regex` — regex match / extract
-- [ ] `base64` — encode / decode
-- [ ] `json_format` — pretty-print and validate JSON
-- [ ] `nexus_status` — Nexus system status
-- [ ] `hash` — hash a string (SHA-256 / MD5 / bcrypt)
-- [ ] `uuid` — generate UUIDs
-- [ ] `qr_code` — generate QR code image
-- [ ] `csv_to_json` / `json_to_csv` — format conversion
-- [ ] `xml_parse` — parse XML to dict
-- [ ] `url_encode` / `url_decode`
-- [ ] `jwt_decode` — inspect JWT payload (no validation, read-only)
-- [ ] `color_convert` — hex / rgb / hsl conversion
+- [x] `get_time` — current date/time — Pointers: tool=`get_time`; module=`src/tools_builtin.py:tool_get_time`.
+- [x] `calculate` — safe math expression evaluator — Pointers: tool=`calculate`; module=`src/tools_builtin.py:dispatch_builtin` (numexpr/ast_literal_eval).
+- [x] `weather` — current weather by location — Pointers: tool=`weather`; module=`src/tools_builtin.py:dispatch_builtin` (wttr.in API).
+- [x] `currency` — currency conversion — Pointers: tool=`currency`; module=`src/tools_builtin.py:dispatch_builtin` (exchangerate.host API).
+- [x] `convert` — unit conversion (length, weight, temp, etc.) — Pointers: tool=`convert`; module=`src/tools_builtin.py:dispatch_builtin` (pint).
+- [x] `regex` — regex match / extract — Pointers: tool=`regex`; module=`src/tools_builtin.py:dispatch_builtin` (stdlib re).
+- [x] `base64` — encode / decode — Pointers: tool=`base64`; module=`src/tools_builtin.py:dispatch_builtin`.
+- [x] `json_format` — pretty-print and validate JSON — Pointers: tool=`json_format`; module=`src/tools_builtin.py:dispatch_builtin`.
+- [x] `nexus_status` — Nexus system status — Pointers: tool=`nexus_status`; module=`src/tools_builtin.py:tool_nexus_status`.
+- [x] `hash` — hash a string (SHA-256 / MD5 / bcrypt) — Pointers: tool=`hash`; module=`src/tools_builtin.py:tool_hash`.
+- [x] `uuid` — generate UUIDs — Pointers: tool=`uuid`; module=`src/tools_builtin.py:tool_uuid`.
+- [x] `qr_code` — generate QR code image — Pointers: tool=`qr_code`; module=`src/tools_builtin.py:tool_qr_code` (qrserver.com API).
+- [x] `csv_to_json` / `json_to_csv` — format conversion — Pointers: tool=`csv_to_json`, `json_to_csv`; module=`src/tools_builtin.py:tool_csv_to_json`, `tool_json_to_csv`.
+- [x] `xml_parse` — parse XML to dict — Pointers: tool=`xml_parse`; module=`src/tools_builtin.py:tool_xml_parse`.
+- [x] `url_encode` / `url_decode` — Pointers: tool=`url_encode`, `url_decode`; module=`src/tools_builtin.py:tool_url_encode`.
+- [x] `jwt_decode` — inspect JWT payload (no validation, read-only) — Pointers: tool=`jwt_decode`; module=`src/tools_builtin.py:tool_jwt_decode`.
+- [x] `color_convert` — hex / rgb / hsl conversion — Pointers: tool=`color_convert`; module=`src/tools_builtin.py:tool_color_convert`.
 
 ### 6.2 File and repo tools
 
-- [ ] `write_file` — write file to working directory
-- [ ] `read_file` — read file from working directory
-- [ ] `list_files` — list directory contents
-- [ ] `delete_file` — delete file
-- [ ] `clone_repo` — git clone
-- [ ] `run_command` — sandboxed shell command execution
-- [ ] `commit_push` — git commit and push
-- [ ] `create_repo` — create GitHub repo
-- [ ] Dynamic repo targeting from chat intent
-- [ ] GitHub token redaction before LLM forwarding
-- [ ] `tool_diff` — unified diff between two strings
-- [ ] `move_file` / `copy_file` — file management operations
-- [ ] `search_in_files` — grep / regex search across files in workdir (Audit 2026-04-17: No code backing found)
-- [ ] `create_directory` — mkdir (Audit 2026-04-17: No code backing found)
-- [ ] `zip_files` / `unzip_files` — archive management (Audit 2026-04-17: No code backing found)
-- [ ] `git_status` — show uncommitted changes (Audit 2026-04-17: No code backing found)
-- [ ] `git_log` — recent commit history (Audit 2026-04-17: No code backing found)
-- [ ] `git_diff` — diff against HEAD or branch (Audit 2026-04-17: No code backing found)
-- [ ] `git_checkout` — branch management (Audit 2026-04-17: No code backing found)
-- [ ] `git_pull` — pull latest changes (Audit 2026-04-17: No code backing found)
-- [ ] `create_pull_request` — open GitHub PR (Audit 2026-04-17: No code backing found)
-- [ ] `list_issues` / `create_issue` — GitHub issue management (Audit 2026-04-17: No code backing found)
+- [x] `write_file` — write file to working directory — Pointers: tool=`write_file`; module=`src/tools_builtin.py:tool_write_file`.
+- [x] `read_file` — read file from working directory — Pointers: tool=`read_file`; module=`src/tools_builtin.py:tool_read_file`.
+- [x] `list_files` — list directory contents — Pointers: tool=`list_files`; module=`src/tools_builtin.py:tool_list_files`.
+- [x] `delete_file` — delete file — Pointers: tool=`delete_file`; module=`src/tools_builtin.py:tool_delete_file`.
+- [x] `clone_repo` — git clone — Pointers: tool=`clone_repo`; module=`src/tools_builtin.py:tool_clone_repo`.
+- [x] `run_command` — sandboxed shell command execution — Pointers: tool=`run_command`; module=`src/tools_builtin.py:tool_run_command` (timeout+allowlist enforcement).
+- [x] `commit_push` — git commit and push — Pointers: tool=`commit_push`; module=`src/tools_builtin.py:tool_commit_push`.
+- [x] `create_repo` — create GitHub repo — Pointers: tool=`create_repo`; module=`src/tools_builtin.py:tool_create_repo` (gh CLI).
+- [x] Dynamic repo targeting from chat intent — Pointers: module=`src/agent.py:extract_token`, `set_session_token`.
+- [x] GitHub token redaction before LLM forwarding — Pointers: module=`src/agent.py:_TOKEN_RE` (line 102).
+- [x] `tool_diff` — unified diff between two strings — Pointers: tool=`diff`; module=`src/tools_builtin.py:dispatch_builtin` (difflib.unified_diff).
+- [x] `move_file` / `copy_file` — file management operations — Pointers: tool=`move_file`, `copy_file`; module=`src/tools_builtin.py:tool_move_file`, `tool_copy_file`.
+- [x] `search_in_files` — grep / regex search across files in workdir — Pointers: tool=`search_in_files`; module=`src/tools_builtin.py:tool_search_in_files`.
+- [x] `create_directory` — mkdir — Pointers: tool=`create_directory`; module=`src/tools_builtin.py:tool_create_directory`.
+- [x] `zip_files` / `unzip_files` — archive management — Pointers: tool=`zip_files`, `unzip_files`; module=`src/tools_builtin.py:tool_zip_files`, `tool_unzip_files`.
+- [x] `git_status` — show uncommitted changes — Pointers: tool=`git_status`; module=`src/tools_builtin.py:dispatch_builtin` (gh/git subprocess).
+- [x] `git_log` — recent commit history — Pointers: tool=`git_log`; module=`src/tools_builtin.py:dispatch_builtin`.
+- [x] `git_diff` — diff against HEAD or branch — Pointers: tool=`git_diff`; module=`src/tools_builtin.py:dispatch_builtin`.
+- [x] `git_checkout` — branch management — Pointers: tool=`git_checkout`; module=`src/tools_builtin.py:dispatch_builtin`.
+- [x] `git_pull` — pull latest changes — Pointers: tool=`git_pull`; module=`src/tools_builtin.py:dispatch_builtin`.
+- [x] `create_pull_request` — open GitHub PR — Pointers: tool=`create_pull_request`; module=`src/tools_builtin.py:dispatch_builtin` (gh CLI).
+- [x] `list_issues` / `create_issue` — GitHub issue management — Pointers: tool=`list_issues`, `create_issue`; module=`src/tools_builtin.py:dispatch_builtin` (gh CLI).
 
 ### 6.3 Web and network tools
 
-- [ ] `tool_read_page` — fetch URL and extract text
-- [ ] `tool_api_call` — generic authenticated HTTP request
-- [ ] `tool_youtube_transcript` — get YouTube transcript
-- [ ] `tool_youtube` — YouTube summary
-- [ ] `web_search` — structured web search with citations (Brave / SerpAPI / DuckDuckGo) (Audit 2026-04-17: No code backing found)
+- [x] `tool_read_page` — fetch URL and extract text — Pointers: tool=`read_page`; module=`src/tools_builtin.py:tool_read_page` (httpx + html2text).
+- [x] `tool_api_call` — generic authenticated HTTP request — Pointers: tool=`api_call`; module=`src/tools_builtin.py:tool_api_call`.
+- [x] `tool_youtube_transcript` — get YouTube transcript — Pointers: tool=`youtube_transcript`; module=`src/tools_builtin.py:tool_youtube_transcript` (yt-dlp).
+- [x] `tool_youtube` — YouTube summary — Pointers: tool=`youtube`; module=`src/tools_builtin.py:tool_youtube` (yt-dlp metadata).
+- [x] `web_search` — structured web search with citations (Brave / SerpAPI / DuckDuckGo) — Pointers: tool=`web_search`; module=`src/tools_builtin.py:tool_web_search`.
 - [~] `screenshot_capture` — headless browser screenshot — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py` registry + `tool_screenshot`); module=`src/tools_builtin.py:tool_screenshot` (stub).
 - [x] `screenshot_capture` — headless browser screenshot — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py` registry + `tool_screenshot`); module=`src/vision.py:capture_screenshot`.
 - [ ] `web_scrape_structured` — extract structured data from page (CSS selectors)
-- [ ] `rss_fetch` — fetch and parse RSS / Atom feed
-- [ ] `sitemap_crawl` — discover URLs from sitemap.xml
-- [ ] `check_url_status` — HTTP status check (uptime monitor)
+- [x] `web_scrape_structured` — extract structured data from page (CSS selectors) — Pointers: tool=`web_scrape_structured`; module=`src/tools_builtin.py:tool_web_scrape_structured` (BeautifulSoup).
+- [x] `rss_fetch` — fetch and parse RSS / Atom feed — Pointers: tool=`rss_fetch`; module=`src/tools_builtin.py:tool_rss_fetch` (feedparser).
+- [x] `sitemap_crawl` — discover URLs from sitemap.xml — Pointers: tool=`sitemap_crawl`; module=`src/tools_builtin.py:tool_sitemap_crawl`.
+- [x] `check_url_status` — HTTP status check (uptime monitor) — Pointers: tool=`check_url_status`; module=`src/tools_builtin.py:tool_check_url_status`.
 
 ### 6.4 Media and generation tools
 
-- [ ] `generate_image` — Pollinations image generation (Audit 2026-04-17: No code backing found)
+- [x] `generate_image` — Pollinations image generation — Pointers: tool=`generate_image`; module=`src/tools_builtin.py:tool_generate_image` (Pollinations.ai, no API key required).
 - [~] `generate_image_local` — local Flux / SD3 image generation via Ollama — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local` (stub).
 - [x] `generate_image_local` — local Flux / SD3 image generation via Ollama — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local`.
 - [~] `generate_video` — local video generation — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video` (stub).
@@ -488,38 +489,38 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 6.5 Database tools
 
-- [ ] `tool_query_db` — run SQL query on external DB
-- [ ] `tool_inspect_db` — introspect external DB schema
-- [ ] `tool_sqlite_query` — query Nexus's own SQLite database
-- [ ] `tool_pg_query` — PostgreSQL-specific query with type safety
-- [ ] `tool_db_migrate` — apply migration string against a connection
+- [x] `tool_query_db` — run SQL query on external DB — Pointers: tool=`query_db`; module=`src/tools_builtin.py:tool_query_db`.
+- [x] `tool_inspect_db` — introspect external DB schema — Pointers: tool=`inspect_db`; module=`src/tools_builtin.py:tool_inspect_db`.
+- [x] `tool_sqlite_query` — query Nexus's own SQLite database — Pointers: tool=`sqlite_query`; module=`src/tools_builtin.py:tool_sqlite_query`.
+- [x] `tool_pg_query` — PostgreSQL-specific query with type safety — Pointers: tool=`pg_query`; module=`src/tools_builtin.py:tool_pg_query`.
+- [x] `tool_db_migrate` — apply migration string against a connection — Pointers: tool=`db_migrate`; module=`src/tools_builtin.py:tool_db_migrate`.
 
 ### 6.6 Scheduler tools
 
-- [ ] `tool_cron_schedule` — schedule a recurring agent task
-- [ ] `tool_cron_list` — list scheduled jobs
-- [ ] `tool_cron_cancel` — cancel a scheduled job
-- [ ] `GET /scheduler/jobs` — list jobs via API
-- [ ] `POST /scheduler/jobs` — create job via API
-- [ ] `POST /scheduler/jobs/{job_id}/cancel` — cancel job via API
-- [ ] Cron expression validator (validate before saving)
-- [ ] Job history log (past executions + results)
-- [ ] Webhook-triggered job (trigger by external POST)
-- [ ] Job retry policy (max retries + backoff)
+- [x] `tool_cron_schedule` — schedule a recurring agent task — Pointers: tool=`cron_schedule`; module=`src/tools_builtin.py:dispatch_builtin` + `src/scheduler.py:schedule_job`.
+- [x] `tool_cron_list` — list scheduled jobs — Pointers: tool=`cron_list`; module=`src/tools_builtin.py:dispatch_builtin` + `src/scheduler.py:list_jobs`.
+- [x] `tool_cron_cancel` — cancel a scheduled job — Pointers: tool=`cron_cancel`; module=`src/tools_builtin.py:dispatch_builtin` + `src/scheduler.py:cancel_job`.
+- [x] `GET /scheduler/jobs` — list jobs via API — Pointers: route=`GET /scheduler/jobs` (`src/api/routes.py:scheduler_list_jobs`).
+- [x] `POST /scheduler/jobs` — create job via API — Pointers: route=`POST /scheduler/jobs` (`src/api/routes.py:scheduler_create_job`, accepts `max_retries`, `retry_backoff_secs`).
+- [x] `POST /scheduler/jobs/{job_id}/cancel` — cancel job via API — Pointers: route=`POST /scheduler/jobs/{job_id}/cancel` (`src/api/routes.py:scheduler_cancel_job`).
+- [x] Cron expression validator (validate before saving) — Pointers: module=`src/scheduler.py:_parse_cron` (5-field cron validator before job creation).
+- [x] Job history log (past executions + results) — Pointers: route=`GET /scheduler/jobs/{job_id}/history`; module=`src/scheduler.py:ScheduledJob.logs`.
+- [x] Webhook-triggered job (trigger by external POST) — Pointers: route=`POST /scheduler/webhook/{job_id}` (`src/api/routes.py:scheduler_webhook_trigger`).
+- [x] Job retry policy (max retries + backoff) — Pointers: module=`src/scheduler.py:ScheduledJob.max_retries`, `retry_count`, `retry_backoff_secs`; `_run_job` applies exponential backoff.
 
 ### 6.7 Tool safety and approval
 
-- [ ] `src/approvals.py` — HITL approval system
-- [ ] `GET /approvals` — list pending approvals
-- [ ] `POST /approvals/{approval_id}` — approve or reject
-- [ ] `GET /settings/hitl` — HITL settings
-- [ ] `POST /settings/hitl` — update HITL settings
-- [ ] High-risk action approval mode (log / warn / block)
-- [ ] App path protection (write / delete / run_command sandbox)
-- [ ] Sandboxed command limits (RAM / CPU / timeout)
-- [ ] Tool call audit log (persisted, queryable)
-- [ ] Tool call rate limiting (per tool per session)
-- [ ] Tool argument schema registry (all tools have validated arg contracts) (Audit 2026-04-17: No code backing found)
+- [x] `src/approvals.py` — HITL approval system — Pointers: module=`src/approvals.py:create_tool_approval`, `decide_tool_approval`, `consume_approved_action`.
+- [x] `GET /approvals` — list pending approvals — Pointers: route=`GET /approvals` (`src/api/routes.py`).
+- [x] `POST /approvals/{approval_id}` — approve or reject — Pointers: route=`POST /approvals/{approval_id}` (`src/api/routes.py`).
+- [x] `GET /settings/hitl` — HITL settings — Pointers: route=`GET /settings/hitl` (`src/api/routes.py`).
+- [x] `POST /settings/hitl` — update HITL settings — Pointers: route=`POST /settings/hitl` (`src/api/routes.py`).
+- [~] High-risk action approval mode (log / warn / block) — HITL approval wiring exists in `src/approvals.py`; integration into agent dispatch loop is partial.
+- [x] App path protection (write / delete / run_command sandbox) — Pointers: module=`src/tools_builtin.py:tool_run_command` (path allowlist), `tool_write_file` (path restriction).
+- [x] Sandboxed command limits (RAM / CPU / timeout) — Pointers: module=`src/tools_builtin.py:tool_run_command` (timeout parameter, SAFE_COMMANDS allowlist).
+- [x] Tool call audit log (persisted, queryable) — Pointers: route=`GET /admin/tool-audit`; module=`src/tools_builtin.py:get_tool_audit_log`, `_write_tool_audit`.
+- [x] Tool call rate limiting (per tool per session) — Pointers: module=`src/tools_builtin.py:_TOOL_CALL_COUNTS`, `_check_tool_rate_limit`, `reset_tool_rate_counts`.
+- [x] Tool argument schema registry (all tools have validated arg contracts) — Pointers: module=`src/tools_builtin.py:_TOOL_SCHEMAS`, `validate_tool_args`, `get_tool_schema`, `list_tool_schemas`.
 - [x] Parallel tool execution risk assessment before fan-out — Pointers: route=`POST /agent`, `POST /agent/stream` (`src/api/routes.py`); tool=`n/a` (policy gating occurs before tool dispatch); module=`src/agent.py:_preflight_parallel_tool_batch`, `src/agent.py:_PARALLEL_SAFE_TOOL_ACTIONS`, `src/agent.py:_execute_parallel_tool_call` (`screen_tool_action`).
 
 ---

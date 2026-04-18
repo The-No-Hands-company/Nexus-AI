@@ -283,11 +283,8 @@ def _tool_trace(
 
 
 # ── DISPATCH ──────────────────────────────────────────────────────────────────
-def dispatch_builtin(action: dict) -> dict | None:
-    """
-    Returns a structured trace dict or None if action is not a built-in tool.
-    Shape: { action, tool_name, status, input, result, metadata, error }
-    """
+def _dispatch_builtin_core(action: dict) -> dict | None:
+    """Inner dispatch — no rate limiting or audit.  Called by dispatch_builtin()."""
     kind = action.get("action")
     if kind == "calculate":
         r = tool_calculate(action.get("expr", ""))
@@ -635,6 +632,49 @@ def dispatch_builtin(action: dict) -> dict | None:
         return _tool_trace(action, r, {"dry_run": action.get("dry_run", True)})
     return None
 
+
+def dispatch_builtin(action: dict, session_id: str = "") -> dict | None:
+    """
+    Returns a structured trace dict or None if action is not a built-in tool.
+    Shape: { action, tool_name, status, input, result, metadata, error }
+
+    Applies per-tool rate limiting (if session_id provided), schema validation,
+    and writes an audit record after each call.
+    """
+    import time as _time
+    kind = action.get("action")
+
+    # ── Schema validation ────────────────────────────────────────────────────
+    schema_err = validate_tool_args(action)
+    if schema_err:
+        return _tool_trace(action, schema_err, status="error", error="schema_validation")
+
+    # ── Per-tool rate limiting ────────────────────────────────────────────────
+    if kind and session_id:
+        if not _check_tool_rate_limit(session_id, kind):
+            return _tool_trace(
+                action,
+                f"❌ Rate limit exceeded for tool `{kind}`. Try again later.",
+                status="error",
+                error="rate_limit_exceeded",
+            )
+
+    t0 = _time.monotonic()
+    result = _dispatch_builtin_core(action)
+    duration_ms = int((_time.monotonic() - t0) * 1000)
+
+    # ── Audit write ──────────────────────────────────────────────────────────
+    if result is not None and kind:
+        _write_tool_audit(
+            kind,
+            action,
+            result.get("result", ""),
+            session_id=session_id,
+            status=result.get("status", "done"),
+            duration_ms=duration_ms,
+        )
+
+    return result
 
 # ── IMAGE GENERATION ──────────────────────────────────────────────────────────
 def tool_generate_image(prompt: str, width: int = 1024, height: int = 1024,
@@ -2464,3 +2504,268 @@ def tool_db_migrate(migration_sql: str, database_url: str = "",
             return "❌ Unsupported DATABASE_URL scheme."
     except Exception as e:
         return f"❌ Migration failed: {e}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool Argument Schema Registry
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Each entry: action_name → { required: [str], optional: [str], types: {arg: type_str} }
+_TOOL_SCHEMAS: dict[str, dict] = {
+    "calculate":            {"required": ["expr"],                   "types": {"expr": "str"}},
+    "weather":              {"required": ["location"],               "types": {"location": "str"}},
+    "currency":             {"required": ["amount", "from", "to"],   "types": {"amount": "number", "from": "str", "to": "str"}},
+    "convert":              {"required": ["value", "from_unit", "to_unit"], "types": {"value": "number", "from_unit": "str", "to_unit": "str"}},
+    "regex":                {"required": ["pattern", "text"],        "types": {"pattern": "str", "text": "str"}},
+    "base64":               {"required": ["text"],                   "optional": ["mode"], "types": {"text": "str", "mode": "str"}},
+    "json_format":          {"required": ["text"],                   "types": {"text": "str"}},
+    "get_time":             {"required": [],                         "optional": ["timezone"], "types": {"timezone": "str"}},
+    "nexus_status":         {"required": [],                         "types": {}},
+    "hash":                 {"required": ["text"],                   "optional": ["algorithm"], "types": {"text": "str", "algorithm": "str"}},
+    "uuid":                 {"required": [],                         "optional": ["version", "namespace", "name"], "types": {"version": "int"}},
+    "qr_code":              {"required": ["text"],                   "optional": ["size"], "types": {"text": "str", "size": "int"}},
+    "csv_to_json":          {"required": ["csv_text"],               "types": {"csv_text": "str"}},
+    "json_to_csv":          {"required": ["json_text"],              "types": {"json_text": "str"}},
+    "xml_parse":            {"required": ["xml_text"],               "optional": ["xpath"], "types": {"xml_text": "str", "xpath": "str"}},
+    "url_encode":           {"required": ["text"],                   "types": {"text": "str"}},
+    "url_decode":           {"required": ["text"],                   "types": {"text": "str"}},
+    "jwt_decode":           {"required": ["token"],                  "types": {"token": "str"}},
+    "color_convert":        {"required": ["color"],                  "optional": ["to_format"], "types": {"color": "str"}},
+    "select_model":         {"required": ["task"],                   "types": {"task": "str"}},
+    "write_file":           {"required": ["path", "content"],        "optional": ["workdir", "mode"], "types": {"path": "str", "content": "str"}},
+    "read_file":            {"required": ["path"],                   "optional": ["workdir", "start_line", "end_line"], "types": {"path": "str"}},
+    "list_files":           {"required": [],                         "optional": ["path", "workdir", "recursive", "max_entries"]},
+    "delete_file":          {"required": ["path"],                   "optional": ["workdir"], "types": {"path": "str"}},
+    "move_file":            {"required": ["src", "dst"],             "optional": ["workdir"], "types": {"src": "str", "dst": "str"}},
+    "copy_file":            {"required": ["src", "dst"],             "optional": ["workdir"], "types": {"src": "str", "dst": "str"}},
+    "clone_repo":           {"required": ["url"],                    "optional": ["dest", "workdir", "branch", "depth"], "types": {"url": "str"}},
+    "run_command":          {"required": ["command"],                "optional": ["workdir", "timeout", "allow_write"], "types": {"command": "str"}},
+    "commit_push":          {"required": ["message"],                "optional": ["repo_path", "workdir", "remote", "branch"], "types": {"message": "str"}},
+    "create_repo":          {"required": ["name"],                   "optional": ["description", "private", "repo_path", "workdir"], "types": {"name": "str"}},
+    "search_in_files":      {"required": ["pattern"],                "optional": ["include_glob", "workdir", "max_results"], "types": {"pattern": "str"}},
+    "create_directory":     {"required": ["path"],                   "optional": ["workdir"], "types": {"path": "str"}},
+    "zip_files":            {"required": ["paths", "output_path"],   "optional": ["workdir"], "types": {"paths": "list", "output_path": "str"}},
+    "unzip_files":          {"required": ["zip_path"],               "optional": ["dest_path", "workdir"], "types": {"zip_path": "str"}},
+    "git_status":           {"required": [],                         "optional": ["repo_path", "workdir"]},
+    "git_log":              {"required": [],                         "optional": ["repo_path", "max_count", "workdir"]},
+    "git_diff":             {"required": [],                         "optional": ["repo_path", "ref", "workdir"]},
+    "git_checkout":         {"required": ["branch"],                 "optional": ["repo_path", "create", "workdir"], "types": {"branch": "str"}},
+    "git_pull":             {"required": [],                         "optional": ["repo_path", "remote", "branch", "ff_only", "workdir"]},
+    "create_pull_request":  {"required": ["title"],                  "optional": ["body", "base", "head", "repo_path", "workdir"], "types": {"title": "str"}},
+    "list_issues":          {"required": [],                         "optional": ["repo_path", "state", "limit", "workdir"]},
+    "create_issue":         {"required": ["title"],                  "optional": ["body", "labels", "repo_path", "workdir"], "types": {"title": "str"}},
+    "read_page":            {"required": ["url"],                    "types": {"url": "str"}},
+    "api_call":             {"required": ["url"],                    "optional": ["method", "headers", "body", "timeout"], "types": {"url": "str"}},
+    "youtube_transcript":   {"required": ["url"],                    "types": {"url": "str"}},
+    "youtube":              {"required": ["url"],                    "types": {"url": "str"}},
+    "web_search":           {"required": ["query"],                  "optional": ["max_results", "engine"], "types": {"query": "str"}},
+    "screenshot":           {"required": ["url"],                    "types": {"url": "str"}},
+    "web_scrape_structured":{"required": ["url"],                    "optional": ["selectors", "output_format"], "types": {"url": "str"}},
+    "rss_fetch":            {"required": ["url"],                    "optional": ["max_items"], "types": {"url": "str"}},
+    "sitemap_crawl":        {"required": ["url"],                    "optional": ["max_urls"], "types": {"url": "str"}},
+    "check_url_status":     {"required": ["urls"],                   "optional": ["timeout"]},
+    "generate_image":       {"required": ["prompt"],                 "optional": ["width", "height", "model"], "types": {"prompt": "str"}},
+    "rag_ingest":           {"required": [],                         "optional": ["text", "path", "metadata", "doc_id_prefix", "workdir"]},
+    "rag_query":            {"required": ["query"],                  "optional": ["top_k", "filter_metadata"], "types": {"query": "str"}},
+    "rag_status":           {"required": [],                         "types": {}},
+    "inspect_db":           {"required": ["connection_string"],      "types": {"connection_string": "str"}},
+    "query_db":             {"required": ["connection_string", "query"], "types": {"connection_string": "str", "query": "str"}},
+    "pg_query":             {"required": ["sql"],                    "optional": ["database_url", "max_rows"], "types": {"sql": "str"}},
+    "db_migrate":           {"required": ["migration_sql"],          "optional": ["database_url", "dry_run"], "types": {"migration_sql": "str"}},
+    "cron_schedule":        {"required": ["task"],                   "optional": ["name", "schedule"], "types": {"task": "str"}},
+    "cron_list":            {"required": [],                         "types": {}},
+    "cron_cancel":          {"required": ["job_id"],                 "types": {"job_id": "str"}},
+    "kg_store":             {"required": ["name"],                   "optional": ["entity_type", "facts", "relations"], "types": {"name": "str"}},
+    "kg_query":             {"required": ["query"],                  "optional": ["limit"], "types": {"query": "str"}},
+    "kg_list":              {"required": [],                         "optional": ["entity_type"]},
+    "diff":                 {"required": ["original", "modified"],   "optional": ["filename"], "types": {"original": "str", "modified": "str"}},
+    "read_csv":             {"required": ["path"],                   "optional": ["workdir"], "types": {"path": "str"}},
+    "write_csv":            {"required": ["path", "data"],           "optional": ["workdir"], "types": {"path": "str", "data": "list"}},
+    "read_pdf":             {"required": ["path"],                   "optional": ["workdir"], "types": {"path": "str"}},
+    "read_docx":            {"required": ["path"],                   "optional": ["workdir"], "types": {"path": "str"}},
+    "read_xlsx":            {"required": ["path"],                   "optional": ["workdir"], "types": {"path": "str"}},
+    "read_pptx":            {"required": ["path"],                   "optional": ["workdir"], "types": {"path": "str"}},
+    "inspect_sqlite":       {"required": [],                         "optional": ["query", "db_path"]},
+    "inspect_postgres":     {"required": [],                         "optional": ["query", "database_url"]},
+    "stt":                  {"required": [],                         "optional": ["audio_b64", "audio_url", "model", "language"]},
+    "tts":                  {"required": ["text"],                   "types": {"text": "str"}},
+    "audio_analyse":        {"required": [],                         "optional": ["audio_b64", "audio_url"]},
+    "vision_understand":    {"required": [],                         "optional": ["image_b64", "image_url", "prompt"]},
+    "ocr":                  {"required": [],                         "optional": ["image_b64", "image_url"]},
+}
+
+
+def validate_tool_args(action: dict) -> str | None:
+    """Validate an action dict against the schema registry.
+
+    Returns an error message string if validation fails, or None if valid.
+    """
+    kind = action.get("action", "")
+    schema = _TOOL_SCHEMAS.get(kind)
+    if schema is None:
+        return None  # Unknown tools pass through — they may be LLM-dispatched
+
+    required = schema.get("required", [])
+    for field in required:
+        val = action.get(field)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            return f"Missing required argument `{field}` for tool `{kind}`."
+
+    type_checks = schema.get("types", {})
+    for field, expected_type in type_checks.items():
+        val = action.get(field)
+        if val is None:
+            continue
+        if expected_type == "number" and not isinstance(val, (int, float)):
+            try:
+                float(val)
+            except (TypeError, ValueError):
+                return f"Argument `{field}` for tool `{kind}` must be a number."
+        elif expected_type == "int" and not isinstance(val, int):
+            try:
+                int(val)
+            except (TypeError, ValueError):
+                return f"Argument `{field}` for tool `{kind}` must be an integer."
+        elif expected_type == "list" and not isinstance(val, list):
+            return f"Argument `{field}` for tool `{kind}` must be a list."
+        elif expected_type == "str" and not isinstance(val, str):
+            return f"Argument `{field}` for tool `{kind}` must be a string."
+    return None
+
+
+def get_tool_schema(tool_name: str) -> dict | None:
+    """Return the argument schema for a tool, or None if not registered."""
+    return _TOOL_SCHEMAS.get(tool_name)
+
+
+def list_tool_schemas() -> dict[str, dict]:
+    """Return the full tool argument schema registry."""
+    return dict(_TOOL_SCHEMAS)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-tool per-session Rate Limiting
+# ─────────────────────────────────────────────────────────────────────────────
+
+import threading as _threading
+_tool_rate_lock = _threading.Lock()
+# { session_id: { tool_name: call_count_this_window } }
+_TOOL_CALL_COUNTS: dict[str, dict[str, int]] = {}
+# { session_id: window_start_epoch }
+_TOOL_RATE_WINDOWS: dict[str, float] = {}
+
+# Default: max N calls per tool per session per 5-minute window
+_TOOL_RATE_WINDOW_SECS = 300
+_TOOL_RATE_DEFAULTS: dict[str, int] = {
+    "run_command":   10,
+    "commit_push":   5,
+    "delete_file":   20,
+    "clone_repo":    5,
+    "create_repo":   5,
+    "db_migrate":    5,
+    "web_search":    30,
+    "api_call":      50,
+    "read_page":     50,
+    "screenshot":    20,
+    "generate_image": 20,
+    "_default":      100,
+}
+
+
+def _check_tool_rate_limit(session_id: str, tool_name: str) -> bool:
+    """Return True if the call is allowed, False if the per-tool rate limit is exceeded."""
+    import time as _time
+    if not session_id:
+        return True  # No session — skip rate limiting
+    limit = _TOOL_RATE_DEFAULTS.get(tool_name, _TOOL_RATE_DEFAULTS["_default"])
+    now = _time.time()
+    with _tool_rate_lock:
+        window_start = _TOOL_RATE_WINDOWS.get(session_id, 0.0)
+        if now - window_start > _TOOL_RATE_WINDOW_SECS:
+            # Reset window
+            _TOOL_CALL_COUNTS[session_id] = {}
+            _TOOL_RATE_WINDOWS[session_id] = now
+        counts = _TOOL_CALL_COUNTS.setdefault(session_id, {})
+        count = counts.get(tool_name, 0)
+        if count >= limit:
+            return False
+        counts[tool_name] = count + 1
+    return True
+
+
+def reset_tool_rate_counts(session_id: str = "") -> None:
+    """Reset rate limit counters for a session (or all sessions if empty)."""
+    with _tool_rate_lock:
+        if session_id:
+            _TOOL_CALL_COUNTS.pop(session_id, None)
+            _TOOL_RATE_WINDOWS.pop(session_id, None)
+        else:
+            _TOOL_CALL_COUNTS.clear()
+            _TOOL_RATE_WINDOWS.clear()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Tool Call Audit Log
+# ─────────────────────────────────────────────────────────────────────────────
+
+_audit_lock = _threading.Lock()
+_TOOL_AUDIT: list[dict] = []
+_TOOL_AUDIT_MAX = 5000  # keep last N records in memory
+
+
+def _write_tool_audit(
+    tool_name: str,
+    action: dict,
+    result: str,
+    session_id: str = "",
+    status: str = "done",
+    duration_ms: int = 0,
+) -> None:
+    """Append a record to the in-memory tool audit log (and DB if available)."""
+    from datetime import datetime as _dt, timezone as _tz
+    record = {
+        "tool": tool_name,
+        "session_id": session_id or "",
+        "status": status,
+        "duration_ms": duration_ms,
+        "result_preview": str(result)[:200],
+        "ts": _dt.now(_tz.utc).isoformat().replace("+00:00", "Z"),
+        # Sanitise: drop any fields that look like tokens / passwords
+        "args": {k: v for k, v in action.items()
+                 if k not in ("token", "password", "secret", "api_key",
+                              "content", "text", "xml_text", "csv_text", "json_text")},
+    }
+    with _audit_lock:
+        _TOOL_AUDIT.append(record)
+        if len(_TOOL_AUDIT) > _TOOL_AUDIT_MAX:
+            del _TOOL_AUDIT[: len(_TOOL_AUDIT) - _TOOL_AUDIT_MAX]
+    # Best-effort DB persist
+    try:
+        from .db import append_tool_audit_log
+        append_tool_audit_log(record)
+    except Exception:
+        pass
+
+
+def get_tool_audit_log(
+    limit: int = 100,
+    kind: str | None = None,
+    session_id: str | None = None,
+) -> list[dict]:
+    """Return audit log records, newest first. Optionally filter by tool kind and session."""
+    # Try DB first
+    try:
+        from .db import load_tool_audit_log
+        rows = load_tool_audit_log(limit=limit, kind=kind or "", session_id=session_id or "")
+        if rows:
+            return rows
+    except Exception:
+        pass
+    # Fall back to in-memory
+    with _audit_lock:
+        records = list(reversed(_TOOL_AUDIT))
+    if kind:
+        records = [r for r in records if r.get("tool") == kind]
+    if session_id:
+        records = [r for r in records if r.get("session_id") == session_id]
+    return records[:limit]

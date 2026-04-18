@@ -1303,7 +1303,13 @@ async def scheduler_create_job(request: Request):
     if not task:
         return _api_error("task is required", "validation_error", 422)
     try:
-        job = schedule_job(name=name, task=task, schedule=schedule)
+        job = schedule_job(
+            name=name,
+            task=task,
+            schedule=schedule,
+            max_retries=int(body.get("max_retries", 0)),
+            retry_backoff_secs=int(body.get("retry_backoff_secs", 60)),
+        )
         return {"job": job_to_dict(job)}
     except Exception as exc:
         return _api_error(f"Failed to create job: {exc}", "validation_error", 422)
@@ -1319,7 +1325,7 @@ def scheduler_cancel_job(job_id: str):
 @router.get("/scheduler/jobs/{job_id}/history")
 def scheduler_job_history(job_id: str, limit: int = 50):
     """Return past execution records for a scheduled job."""
-    job = next((j for j in list_jobs() if j.job_id == job_id), None)
+    job = next((j for j in list_jobs() if j.id == job_id), None)
     if job is None:
         return _api_error("job not found", "not_found", 404)
     history = getattr(job, "history", [])
@@ -1338,7 +1344,7 @@ async def scheduler_webhook_trigger(job_id: str, request: Request):
         body = await _read_json_body(request)
     except HTTPException:
         body = {}
-    job = next((j for j in list_jobs() if j.job_id == job_id), None)
+    job = next((j for j in list_jobs() if j.id == job_id), None)
     if job is None:
         return _api_error("job not found", "not_found", 404)
     try:

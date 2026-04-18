@@ -37,6 +37,9 @@ class ScheduledJob:
     last_run: Optional[str] = None
     run_count: int = 0
     logs: List[JobLog] = field(default_factory=list)
+    max_retries: int = 0          # 0 = no automatic retry on error
+    retry_count: int = 0          # how many retries have been attempted so far
+    retry_backoff_secs: int = 60  # seconds to wait before first retry (doubles each attempt)
 
 
 # ── Registry ──────────────────────────────────────────────────────────────────
@@ -103,7 +106,8 @@ def _schedule_is_cron(schedule: str) -> bool:
 
 # ── Public API ────────────────────────────────────────────────────────────────
 
-def schedule_job(name: str, task: str, schedule: str) -> ScheduledJob:
+def schedule_job(name: str, task: str, schedule: str,
+                 max_retries: int = 0, retry_backoff_secs: int = 60) -> ScheduledJob:
     """Create and register a new scheduled job.  Starts the runner if not running."""
     interval = _parse_interval_secs(schedule)
     if interval is None and not _schedule_is_cron(schedule):
@@ -122,6 +126,8 @@ def schedule_job(name: str, task: str, schedule: str) -> ScheduledJob:
         created_at=now.isoformat(),
         interval_secs=interval,
         next_run=_compute_next_run(schedule, interval, now),
+        max_retries=max(0, int(max_retries)),
+        retry_backoff_secs=max(1, int(retry_backoff_secs)),
     )
     with _lock:
         _jobs[job.id] = job
@@ -245,7 +251,23 @@ def _run_job(job: ScheduledJob) -> None:
         now = datetime.now(timezone.utc)
         job.next_run = _compute_next_run(job.schedule, job.interval_secs, now)
         if log_status == "error":
-            job.status = "error"
+            if job.max_retries > 0 and job.retry_count < job.max_retries:
+                # Schedule a retry with exponential backoff
+                import datetime as _dt
+                backoff = job.retry_backoff_secs * (2 ** job.retry_count)
+                job.retry_count += 1
+                retry_at = (datetime.now(timezone.utc)
+                            + _dt.timedelta(seconds=backoff)).isoformat()
+                job.next_run = retry_at
+                job.status = "active"  # keep active so scheduler will retry
+                job.logs[-1] = JobLog(
+                    run_at=run_at,
+                    status="retry",
+                    summary=f"[retry {job.retry_count}/{job.max_retries} in {backoff}s] {summary}",
+                )
+            else:
+                job.status = "error"
+                job.retry_count = 0  # reset for future manual resume
     _persist_job(job)
 
 
@@ -298,6 +320,9 @@ def _persist_job(job: ScheduledJob) -> None:
             "run_count": job.run_count,
             "logs": [{"run_at": l.run_at, "status": l.status, "summary": l.summary}
                      for l in job.logs],
+            "max_retries": job.max_retries,
+            "retry_count": job.retry_count,
+            "retry_backoff_secs": job.retry_backoff_secs,
         })
     except Exception:
         pass  # never crash the scheduler over a persistence failure
@@ -345,6 +370,9 @@ def restore_from_db() -> None:
                     for l in (row.get("logs") or [])
                     if isinstance(l, dict)
                 ],
+                max_retries=row.get("max_retries", 0),
+                retry_count=row.get("retry_count", 0),
+                retry_backoff_secs=row.get("retry_backoff_secs", 60),
             )
             _jobs[job.id] = job
 
@@ -367,4 +395,7 @@ def job_to_dict(job: ScheduledJob) -> Dict[str, Any]:
         "run_count": job.run_count,
         "logs": [{"run_at": l.run_at, "status": l.status, "summary": l.summary}
                  for l in job.logs[-10:]],  # last 10 in summary view
+        "max_retries": job.max_retries,
+        "retry_count": job.retry_count,
+        "retry_backoff_secs": job.retry_backoff_secs,
     }
