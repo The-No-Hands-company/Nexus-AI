@@ -5839,3 +5839,246 @@ async def huggingface_download(request: Request):
 
     return result
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 3 — Agent Loop / Reflection / Autonomy SSE / Task Queue
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── Agent reflection ──────────────────────────────────────────────────────────
+
+@router.post("/agent/reflect")
+async def agent_reflect(request: Request):
+    """Run a reflection/retrospective loop on a completed task."""
+    body = await request.json()
+    task        = str(body.get("task", ""))
+    result      = str(body.get("result", ""))
+    tool_trace  = body.get("tool_trace", [])
+
+    if not task:
+        return _api_error("'task' is required", "invalid_request_error", 400)
+
+    from ..thinking import build_reflection_prompt, parse_reflection_response
+    prompt = build_reflection_prompt(task, result, tool_trace or [])
+    try:
+        raw = call_llm_with_fallback([{"role": "user", "content": prompt}])
+    except Exception as exc:
+        return _api_error(f"LLM call failed: {exc}", "model_error", 502)
+
+    parsed = parse_reflection_response(raw)
+    return {
+        "task":         task,
+        "reflection":   parsed,
+        "raw_response": raw,
+    }
+
+
+# ── Autonomy SSE streaming ─────────────────────────────────────────────────────
+
+@router.post("/autonomy/execute/stream")
+async def autonomy_execute_stream(request: Request):
+    """Stream autonomy execution events via SSE."""
+    body = await request.json()
+    goal         = str(body.get("goal", "")).strip()
+    strategy     = str(body.get("strategy", "parallel"))
+    max_subtasks = int(body.get("max_subtasks", 6))
+    sid          = str(body.get("sid", ""))
+
+    if not goal:
+        return _api_error("'goal' is required", "invalid_request_error", 400)
+
+    import queue as _queue
+    event_queue: "_queue.Queue[dict | None]" = _queue.Queue()
+
+    def _run_autonomy():
+        try:
+            llm_fn = lambda msgs: call_llm_with_fallback(msgs)
+            orchestrator = Orchestrator(llm=llm_fn)
+            event_queue.put({"type": "autonomy_start", "goal": goal})
+            result = orchestrator.execute(goal, context={"strategy": strategy, "max_subtasks": max_subtasks, "sid": sid})
+            for subtask in result.get("subtasks", []):
+                event_queue.put({"type": "subtask_done", "subtask": subtask})
+            event_queue.put({"type": "autonomy_done", "result": result.get("result", ""), "plan_summary": result.get("plan_summary", ""), "execution_time": result.get("execution_time", 0)})
+        except Exception as exc:
+            event_queue.put({"type": "error", "error": str(exc)})
+        finally:
+            event_queue.put(None)  # sentinel
+
+    threading.Thread(target=_run_autonomy, daemon=True).start()
+
+    async def _gen():
+        loop = asyncio.get_event_loop()
+        while True:
+            event = await loop.run_in_executor(None, event_queue.get)
+            if event is None:
+                yield "data: [DONE]\n\n"
+                break
+            yield f"data: {json.dumps(event)}\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
+
+
+# ── Task queue routes ─────────────────────────────────────────────────────────
+
+@router.post("/tasks/queue")
+async def task_queue_submit(request: Request):
+    """Submit a task to the priority queue."""
+    from ..task_queue import submit_task, start_worker
+    body          = await request.json()
+    description   = str(body.get("description", "")).strip()
+    priority      = int(body.get("priority", 5))
+    deps          = body.get("deps", [])
+    metadata      = body.get("metadata", {})
+    schedule_cron = str(body.get("schedule_cron", ""))
+
+    if not description:
+        return _api_error("'description' is required", "invalid_request_error", 400)
+
+    start_worker()
+    task_id = submit_task(
+        description=description,
+        priority=priority,
+        deps=list(deps) if isinstance(deps, list) else [],
+        metadata=dict(metadata) if isinstance(metadata, dict) else {},
+        schedule_cron=schedule_cron,
+    )
+    return {"task_id": task_id, "status": "pending"}
+
+
+@router.delete("/tasks/queue/{task_id}")
+async def task_queue_cancel(task_id: str):
+    """Cancel a pending or running task."""
+    from ..task_queue import cancel_task
+    cancelled = cancel_task(task_id)
+    if not cancelled:
+        return _api_error(f"Task '{task_id}' not found or already terminal", "not_found_error", 404)
+    return {"task_id": task_id, "cancelled": True}
+
+
+@router.get("/tasks/queue")
+async def task_queue_list(request: Request):
+    """List tasks (optionally filtered by status)."""
+    from ..task_queue import list_tasks
+    status = request.query_params.get("status", "")
+    limit  = int(request.query_params.get("limit", 50))
+    return {"tasks": list_tasks(status=status, limit=limit)}
+
+
+@router.get("/tasks/queue/dag")
+async def task_queue_dag():
+    """Return current DAG state (blocked/ready/running/done)."""
+    from ..task_queue import get_dag_status
+    return get_dag_status()
+
+
+@router.get("/tasks/queue/{task_id}")
+async def task_queue_get(task_id: str):
+    """Get a single task by ID."""
+    from ..task_queue import get_task
+    task = get_task(task_id)
+    if task is None:
+        return _api_error(f"Task '{task_id}' not found", "not_found_error", 404)
+    return task
+
+
+# ── Task queue shared memory ──────────────────────────────────────────────────
+
+@router.get("/tasks/memory")
+async def task_memory_list():
+    """List all cross-task shared memory entries."""
+    from ..task_queue import list_shared_memory
+    return {"memory": list_shared_memory()}
+
+
+@router.get("/tasks/memory/{key}")
+async def task_memory_get(key: str):
+    """Get a single shared memory entry."""
+    from ..task_queue import get_shared_memory
+    value = get_shared_memory(key)
+    if value is None:
+        return _api_error(f"Key '{key}' not found", "not_found_error", 404)
+    return {"key": key, "value": value}
+
+
+@router.put("/tasks/memory/{key}")
+async def task_memory_set(key: str, request: Request):
+    """Set a shared memory entry."""
+    from ..task_queue import set_shared_memory
+    body  = await request.json()
+    value = body.get("value")
+    set_shared_memory(key, value)
+    return {"key": key, "value": value}
+
+
+@router.delete("/tasks/memory/{key}")
+async def task_memory_delete(key: str):
+    """Delete a shared memory entry."""
+    from ..task_queue import delete_shared_memory
+    deleted = delete_shared_memory(key)
+    if not deleted:
+        return _api_error(f"Key '{key}' not found", "not_found_error", 404)
+    return {"key": key, "deleted": True}
+
+
+# ── Task worker control ───────────────────────────────────────────────────────
+
+@router.get("/tasks/worker/status")
+async def task_worker_status():
+    """Return task worker status (running, queue depth, active tasks)."""
+    from ..task_queue import worker_status
+    return worker_status()
+
+
+@router.post("/tasks/worker/start")
+async def task_worker_start():
+    """Start the background task worker."""
+    from ..task_queue import start_worker
+    start_worker()
+    return {"started": True}
+
+
+@router.post("/tasks/worker/stop")
+async def task_worker_stop():
+    """Stop the background task worker."""
+    from ..task_queue import stop_worker
+    stop_worker()
+    return {"stopped": True}
+
+
+# ── Simulation scenario library & comparison ─────────────────────────────────
+
+@router.get("/simulation/scenarios")
+async def simulation_scenarios():
+    """List pre-built simulation scenario templates."""
+    from ..simulation import SCENARIO_LIBRARY
+    return {
+        "scenarios": [
+            {"id": k, "topic": v["topic"], "n_personas": v.get("n_personas", 5),
+             "n_rounds": v.get("n_rounds", 3)}
+            for k, v in SCENARIO_LIBRARY.items()
+        ]
+    }
+
+
+@router.post("/simulation/compare")
+async def simulation_compare(request: Request):
+    """A/B diff two simulation results."""
+    from ..simulation import compare_simulations
+    body  = await request.json()
+    sim_a = body.get("sim_a")
+    sim_b = body.get("sim_b")
+    if not sim_a or not sim_b:
+        return _api_error("Both 'sim_a' and 'sim_b' are required", "invalid_request_error", 400)
+    return compare_simulations(sim_a, sim_b)
+
+
+@router.post("/simulation/export-training")
+async def simulation_export_training(request: Request):
+    """Export simulation results as a fine-tuning training dataset."""
+    from ..simulation import export_training_dataset
+    body    = await request.json()
+    results = body.get("results", [])
+    if not isinstance(results, list) or not results:
+        return _api_error("'results' must be a non-empty array", "invalid_request_error", 400)
+    dataset = export_training_dataset(results)
+    return {"count": len(dataset), "dataset": dataset}
+
