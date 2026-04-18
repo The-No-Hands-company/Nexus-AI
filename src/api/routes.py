@@ -3390,6 +3390,28 @@ def _build_self_review_prompt(traces: list[dict]) -> str:
     return "\n".join(lines)
 
 
+@router.post("/agent/warmup")
+async def agent_warmup(request: Request):
+    """Pre-load agent context for a session to reduce first-call latency.
+
+    POST body (optional):
+      { "session_id": "my-sid", "persona": "coder" }
+
+    Returns:
+      { "warmed": bool, "cached": bool, "provider": str }
+    """
+    from ..agent import warmup_agent
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    sid = str(body.get("session_id") or body.get("sid") or "")
+    persona = str(body.get("persona") or "")
+    result = warmup_agent(sid=sid, persona=persona)
+    return JSONResponse(result)
+
+
 @router.post("/agent/self-review")
 async def agent_self_review(request: Request):
     """Analyze recent execution traces and generate self-improvement suggestions.
@@ -7317,8 +7339,8 @@ def health_ready():
 
 @router.get("/health/deep")
 def health_deep():
-    """Deep health check — database, Redis, and provider connectivity."""
-    import asyncio
+    """Deep health check — database, Redis, vector store, and provider connectivity."""
+    import urllib.request
     results: dict = {"ts": _time.time()}
 
     # DB check
@@ -7336,12 +7358,53 @@ def health_deep():
     except Exception as exc:
         results["redis"] = f"error: {exc}"
 
-    # Provider check
+    # Vector store (ChromaDB) check
     try:
-        cfg = get_config()
-        results["provider"] = cfg.get("provider", "unknown")
-    except Exception:
-        results["provider"] = "unknown"
+        import chromadb
+        from ..memory import _get_chroma_client
+        client = _get_chroma_client()
+        client.heartbeat()
+        results["vector_store"] = "ok"
+    except Exception as exc:
+        try:
+            # Fallback: try instantiating the RAG vector store directly
+            from ..rag.rag_system import get_rag_system
+            rag = get_rag_system()
+            vs = getattr(rag, "vector_store", None)
+            if vs is not None:
+                results["vector_store"] = "ok"
+            else:
+                results["vector_store"] = "unavailable"
+        except Exception as exc2:
+            results["vector_store"] = f"error: {exc2}"
+
+    # Provider reachability check (attempt a lightweight HTTP probe on the active provider)
+    try:
+        from ..agent import PROVIDERS, _has_key, _provider_api_key
+        reachable: dict = {}
+        probe_providers = {
+            "ollama": ("http", str(__import__("os").getenv("OLLAMA_BASE_URL", "http://localhost:11434")) + "/api/tags"),
+            "groq": ("https", "https://api.groq.com/openai/v1/models"),
+            "openai": ("https", "https://api.openai.com/v1/models"),
+            "gemini": ("https", "https://generativelanguage.googleapis.com/v1beta/models"),
+        }
+        for pid, (scheme, url) in probe_providers.items():
+            cfg = PROVIDERS.get(pid)
+            if not cfg or not _has_key(cfg):
+                continue
+            try:
+                api_key = _provider_api_key(cfg)
+                req = urllib.request.Request(url, method="GET")
+                if api_key and pid != "ollama":
+                    req.add_header("Authorization", f"Bearer {api_key}")
+                req.add_header("User-Agent", "NexusAI-HealthProbe/1.0")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    reachable[pid] = "ok" if resp.status < 500 else f"http_{resp.status}"
+            except Exception as e:
+                reachable[pid] = f"error: {type(e).__name__}"
+        results["providers"] = reachable if reachable else {"note": "no configured providers probed"}
+    except Exception as exc:
+        results["providers"] = f"error: {exc}"
 
     overall = "healthy" if results.get("db") == "ok" else "degraded"
     results["status"] = overall
