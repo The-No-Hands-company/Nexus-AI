@@ -25,6 +25,101 @@ client = TestClient(app)
 
 
 class TestV1Contracts(unittest.TestCase):
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_reasoning_routes_contracts(self, call_llm_with_fallback):
+        def _mock_reasoning(messages, task=""):
+            prompt = messages[-1]["content"]
+            if "Graph-of-Thought" in prompt:
+                return ({"content": json.dumps({
+                    "nodes": [{"id": "n1", "thought": "observe"}],
+                    "edges": [],
+                    "merges": [],
+                    "conclusion": "done",
+                    "confidence": 0.9,
+                })}, "mock-got")
+            if "Monte Carlo Tree Search" in prompt and "Generate exactly 3" in prompt:
+                return ({"content": json.dumps({"steps": ["step a", "step b", "step c"]})}, "mock-mcts")
+            if "Score this plan" in prompt:
+                return ({"content": json.dumps({"score": 0.8, "rationale": "good"})}, "mock-mcts")
+            if "Socratic reasoning agent" in prompt:
+                return ({"content": json.dumps({
+                    "root_question": "Why?",
+                    "sub_questions": [{"question": "What changed?", "sub_questions": []}],
+                })}, "mock-socratic-tree")
+            if "Answer the following question hierarchy" in prompt:
+                return ({"content": "Because the inputs changed."}, "mock-socratic-answer")
+            if "formal verification agent" in prompt:
+                return ({"content": json.dumps({
+                    "steps": [{"step": 1, "valid": True, "issue": ""}],
+                    "overall": "valid",
+                    "confidence": 0.88,
+                    "corrected_claim": "",
+                    "explanation": "looks good",
+                })}, "mock-verify")
+            raise AssertionError(f"Unexpected prompt: {prompt[:120]}")
+
+        call_llm_with_fallback.side_effect = _mock_reasoning
+
+        got = client.post("/reason/graph-of-thought", json={"task": "Analyze this problem"})
+        self.assertEqual(got.status_code, 200)
+        self.assertEqual(got.json()["provider"], "mock-got")
+        self.assertEqual(got.json()["conclusion"], "done")
+
+        mcts = client.post("/reason/mcts", json={"goal": "Ship feature", "iterations": 2, "max_depth": 2})
+        self.assertEqual(mcts.status_code, 200)
+        self.assertTrue(len(mcts.json()["best_plan"]) >= 1)
+
+        socratic = client.post("/reason/socratic", json={"topic": "Debug latency", "depth": 2})
+        self.assertEqual(socratic.status_code, 200)
+        self.assertIn("question_tree", socratic.json()["providers"])
+        self.assertIn("answer", socratic.json()["providers"])
+        self.assertTrue(socratic.json()["question_tree"])
+
+        verify = client.post(
+            "/reason/verify",
+            json={"claim": "2+2=4", "steps": ["Add 2 and 2"], "domain": "math"},
+        )
+        self.assertEqual(verify.status_code, 200)
+        self.assertEqual(verify.json()["overall"], "valid")
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_reflection_creates_and_exports_fine_tuning_samples(self, call_llm_with_fallback):
+        from src.api import routes as api_routes
+
+        test_files_dir = "/tmp/nexus_ai_test_files_reflection"
+        os.makedirs(test_files_dir, exist_ok=True)
+        api_routes._FILES_DIR = test_files_dir
+
+        call_llm_with_fallback.return_value = ({"content": json.dumps({
+            "quality_score": 0.91,
+            "what_worked": ["clear plan"],
+            "what_failed": [],
+            "lessons": ["keep checkpoints", "persist traces"],
+            "suggested_improvements": ["export samples"],
+            "summary": "strong run",
+        })}, "mock-reflection")
+
+        reflect = client.post(
+            "/agent/reflect",
+            json={"task": "Implement persistence", "result": "Done", "tool_trace": []},
+        )
+        self.assertEqual(reflect.status_code, 200)
+        payload = reflect.json()
+        self.assertTrue(payload.get("fine_tuning_sample_id"))
+
+        samples = client.get("/v1/fine-tuning/training-samples?limit=5&min_quality=0.8")
+        self.assertEqual(samples.status_code, 200)
+        self.assertGreaterEqual(len(samples.json()["data"]), 1)
+
+        export = client.post(
+            "/v1/fine-tuning/training-samples/export",
+            json={"min_quality": 0.8, "limit": 10},
+        )
+        self.assertEqual(export.status_code, 200)
+        export_meta = export.json()
+        self.assertEqual(export_meta["purpose"], "fine-tune")
+        self.assertTrue(os.path.exists(os.path.join(test_files_dir, export_meta["id"])))
+
     def test_v1_fine_tuning_job_lifecycle_persisted(self):
         from src.api import routes as api_routes
 
@@ -83,6 +178,12 @@ class TestV1Contracts(unittest.TestCase):
         if final_status == "succeeded":
             self.assertTrue(final_payload.get("fine_tuned_model"))
             self.assertIsInstance(final_payload.get("trained_tokens"), int)
+
+        events = client.get(f"/v1/fine-tuning/jobs/{job_id}/events?limit=20")
+        self.assertEqual(events.status_code, 200)
+        events_payload = events.json()
+        self.assertEqual(events_payload.get("object"), "list")
+        self.assertGreaterEqual(len(events_payload.get("data", [])), 1)
 
     def test_v1_fine_tuning_rejects_missing_training_file(self):
         response = client.post(
@@ -1227,6 +1328,22 @@ class TestContextWindowManager(unittest.TestCase):
         result = mgr.compress_history(history)
         contents = [m.get("content", "") for m in result]
         self.assertTrue(any("[EARLIER CONVERSATION SUMMARY]" in c for c in contents))
+
+    def test_context_budget_and_token_breakdown(self):
+        mgr = ContextWindowManager()
+        history = self._make_history(18)
+        breakdown = mgr.token_breakdown(history)
+        self.assertEqual(len(breakdown), len(history))
+        self.assertGreater(sum(item["tokens"] for item in breakdown), 0)
+
+        # Force tight budget to ensure deterministic truncation path is exercised.
+        compressed = mgr.compress_to_token_budget(history, token_budget=300, reserve_tokens=250)
+        self.assertLessEqual(len(compressed), len(history))
+
+    def test_model_context_budget_detection(self):
+        mgr = ContextWindowManager()
+        self.assertGreaterEqual(mgr.get_model_context_budget("gpt-4o"), 100000)
+        self.assertEqual(mgr.get_model_context_budget("unknown-model", default_budget=8192), 8192)
 
     def test_agent_trace_endpoint_returns_404_for_missing_trace(self):
         response = client.get("/agent/trace/nonexistent-trace-id")
@@ -3212,6 +3329,48 @@ class TestSprintJ(unittest.TestCase):
         data = resp.json()
         self.assertEqual(data.get("name"), "get-test-ent")
 
+    def test_kg_graph_merge_import_and_hybrid_endpoints(self):
+        client.post("/kg/store", json={"name": "merge-primary", "entity_type": "concept", "facts": {"a": 1}, "relations": []})
+        client.post("/kg/store", json={"name": "merge-duplicate", "entity_type": "concept", "facts": {"b": 2}, "relations": []})
+
+        graph_resp = client.get("/kg/graph?limit=100")
+        self.assertEqual(graph_resp.status_code, 200)
+        graph = graph_resp.json()
+        self.assertIn("nodes", graph)
+        self.assertIn("edges", graph)
+
+        merge_resp = client.post("/kg/merge", json={"primary": "merge-primary", "duplicate": "merge-duplicate"})
+        self.assertEqual(merge_resp.status_code, 200)
+        self.assertTrue(merge_resp.json().get("merged"))
+
+        import_payload = "<http://ex/a> <http://ex/rel> <http://ex/b> ."
+        import_resp = client.post("/kg/import", json={"content": import_payload, "format": "auto", "limit": 20})
+        self.assertEqual(import_resp.status_code, 200)
+        self.assertGreaterEqual(import_resp.json().get("triples_processed", 0), 1)
+
+        hybrid_resp = client.get("/kg/hybrid-search?q=merge-primary&limit=5")
+        self.assertEqual(hybrid_resp.status_code, 200)
+        hybrid = hybrid_resp.json()
+        self.assertIn("kg", hybrid)
+        self.assertIn("semantic", hybrid)
+
+    def test_memory_export_import_and_episodic_endpoints(self):
+        add_sem_resp = client.post("/memory/semantic", json={"summary": "Memory export test", "tags": ["export"]})
+        self.assertEqual(add_sem_resp.status_code, 200)
+
+        export_resp = client.get("/memory/export?limit=50")
+        self.assertEqual(export_resp.status_code, 200)
+        bundle = export_resp.json()
+        self.assertIn("entries", bundle)
+
+        episodic_resp = client.get("/memory/episodic?limit=20")
+        self.assertEqual(episodic_resp.status_code, 200)
+        self.assertIn("events", episodic_resp.json())
+
+        import_resp = client.post("/memory/import", json=bundle)
+        self.assertEqual(import_resp.status_code, 200)
+        self.assertGreaterEqual(import_resp.json().get("imported", 0), 1)
+
     # ── Trace endpoints ───────────────────────────────────────────────────
 
     def test_trace_list_endpoint(self):
@@ -4268,6 +4427,67 @@ class TestIntegrationAutonomyRAGReasoning(unittest.TestCase):
         payload = response.json()
         self.assertIn("trace_id", payload, "Execution must return trace_id")
         self.assertNotIn("error", payload, "Execution should not return error on valid goal")
+
+    @patch("src.api.routes.Orchestrator")
+    def test_autonomy_execute_writes_checkpoints(self, mock_orchestrator_cls):
+        """POST /autonomy/execute writes replay checkpoints for long-run recovery."""
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.execute.return_value = {
+            "result": "ok",
+            "subtasks": [
+                {"task_id": "1", "success": True, "result": "step one"},
+                {"task_id": "2", "success": True, "result": "step two"},
+            ],
+            "execution_time": 0.05,
+            "plan_summary": "2-step plan",
+        }
+        mock_orchestrator_cls.return_value = mock_orchestrator
+
+        goal = "Run a checkpointed autonomy workflow"
+        response = client.post("/autonomy/execute", json={"goal": goal, "strategy": "parallel", "max_subtasks": 2})
+        self.assertEqual(response.status_code, 200)
+        trace_id = response.json().get("trace_id")
+        self.assertTrue(trace_id)
+
+        from src.execution_trace import get_latest_checkpoint
+        cp = get_latest_checkpoint(trace_id)
+        self.assertIsNotNone(cp)
+        self.assertEqual(cp.get("trace_id"), trace_id)
+        self.assertEqual(cp.get("task"), goal)
+        self.assertTrue(any(evt.get("type") == "autonomy_done" for evt in cp.get("events", [])))
+
+    @patch("src.api.routes.Orchestrator")
+    def test_autonomy_execute_stream_writes_checkpoints(self, mock_orchestrator_cls):
+        """POST /autonomy/execute/stream persists checkpoints and exposes trace id."""
+        mock_orchestrator = MagicMock()
+        mock_orchestrator.execute.return_value = {
+            "result": "stream-ok",
+            "subtasks": [{"task_id": "1", "success": True, "result": "done"}],
+            "execution_time": 0.04,
+            "plan_summary": "stream plan",
+        }
+        mock_orchestrator_cls.return_value = mock_orchestrator
+
+        with client.stream("POST", "/autonomy/execute/stream", json={"goal": "Stream checkpoint test", "max_subtasks": 1}) as response:
+            self.assertEqual(response.status_code, 200)
+            trace_id = response.headers.get("X-Trace-Id")
+            # Drain the SSE stream until done to ensure worker thread finishes.
+            for line in response.iter_lines():
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", errors="replace")
+                if "[DONE]" in str(line):
+                    break
+        self.assertTrue(trace_id)
+
+        from src.execution_trace import get_latest_checkpoint
+        cp = None
+        for _ in range(20):
+            cp = get_latest_checkpoint(trace_id)
+            if cp and any(evt.get("type") == "autonomy_done" for evt in cp.get("events", [])):
+                break
+            time.sleep(0.05)
+        self.assertIsNotNone(cp)
+        self.assertTrue(any(evt.get("type") == "autonomy_done" for evt in cp.get("events", [])))
 
     def test_autonomy_execute_missing_goal_returns_400(self):
         """POST /autonomy/execute without goal returns 400."""

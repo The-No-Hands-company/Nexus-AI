@@ -5,7 +5,15 @@ from typing import Dict, Any, List, Iterator, Optional
 from .tools_builtin import dispatch_builtin
 from .autonomy import Orchestrator, classify_subtask, PlanningSystem
 from .personas import build_system_prompt, get_active_persona_name, get_persona
-from .thinking import build_tot_prompt, parse_tot_response, build_critique_prompt, parse_critique_response, build_got_prompt, parse_got_response
+from .thinking import (
+    build_tot_prompt,
+    parse_tot_response,
+    build_critique_prompt,
+    parse_critique_response,
+    build_got_prompt,
+    parse_got_response,
+    run_mcts_planning,
+)
 from .context_window import ContextWindowManager
 from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk, get_ensemble_enabled, set_ensemble_enabled
 from .db import load_custom_instructions, log_usage, init_usage_table, add_safety_audit_entry
@@ -407,6 +415,37 @@ def _build_complexity_profile(task: str) -> Dict[str, Any]:
 
 def _score_complexity(task: str) -> str:
     return _build_complexity_profile(task).get("label", "low")
+
+
+def _auto_mcts_guidance(task: str) -> Dict[str, Any] | None:
+    profile = _build_complexity_profile(task)
+    if profile.get("label") != "high":
+        return None
+    if profile.get("specialization") not in ("coding", "reasoning", None):
+        return None
+
+    providers_used: List[str] = []
+
+    def _llm_fn(prompt: str) -> str:
+        result, provider = call_llm_with_fallback([{"role": "user", "content": prompt}], task)
+        providers_used.append(provider)
+        return result.get("content") or str(result)
+
+    try:
+        plan = run_mcts_planning(task, llm_fn=_llm_fn, iterations=6, max_depth=4, branching=3)
+    except Exception:
+        return None
+
+    best_plan = plan.get("best_plan") or []
+    if not best_plan:
+        return None
+    return {
+        "complexity_profile": profile,
+        "providers": providers_used,
+        "best_plan": best_plan,
+        "best_score": plan.get("best_score", 0.0),
+        "best_rationale": plan.get("best_rationale", ""),
+    }
 
 # ── Ollama model registry (Phase 1: auto-select best model by task type) ─────
 # Maps task-type → ordered list of preferred Ollama model names.
@@ -1738,7 +1777,19 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                       f"Original task: {clean_task}\n\n"
                       f"Now read key files, make improvements, commit and push.")
 
-    messages: List[Dict] = CONTEXT_WINDOW.compress_history(list(history))
+    history_list = list(history)
+    raw_tokens = sum(item.get("tokens", 0) for item in CONTEXT_WINDOW.token_breakdown(history_list))
+    model_budget = CONTEXT_WINDOW.get_model_context_budget(_config.get("model") or "")
+    if raw_tokens > int(model_budget * 0.85):
+        yield {
+            "type": "context_overflow_warning",
+            "history_tokens": raw_tokens,
+            "model_budget": model_budget,
+            "usage_ratio": round(raw_tokens / max(1, model_budget), 4),
+        }
+
+    messages: List[Dict] = _maybe_compress_history(history_list)
+    messages = CONTEXT_WINDOW.compress_to_token_budget(messages, token_budget=model_budget, reserve_tokens=4096)
     # Inject long-term knowledge graph context when relevant entities exist
     _kg_ctx = kg_to_context_string(clean_task, limit=5)
     if _kg_ctx:
@@ -1754,11 +1805,36 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             {"role": "assistant", "content": "Noted — I have context from previous conversations."},
         ] + messages
     messages.append({"role":"user","content":_build_content(clean_task, files or [])})
+    yield {
+        "type": "token_breakdown",
+        "messages": CONTEXT_WINDOW.token_breakdown(messages),
+    }
     input_token_estimate = _messages_token_estimate(messages)
 
     providers_used: List[str] = []
     complexity = _score_complexity(clean_task)
     yield {"type":"complexity","level":complexity}
+
+    mcts_guidance = _auto_mcts_guidance(clean_task)
+    if mcts_guidance:
+        best_plan = mcts_guidance.get("best_plan", [])
+        plan_text = "\n".join(f"{idx + 1}. {step}" for idx, step in enumerate(best_plan))
+        messages.append({
+            "role": "assistant",
+            "content": (
+                "Automatic MCTS planning guidance for this high-complexity task:\n"
+                f"{plan_text}\n\n"
+                f"Best plan score: {mcts_guidance.get('best_score', 0.0):.3f}. "
+                "Use this plan as guidance, but update it if tool evidence contradicts it."
+            ),
+        })
+        yield {
+            "type": "mcts_plan",
+            "plan": best_plan,
+            "score": mcts_guidance.get("best_score", 0.0),
+            "providers": mcts_guidance.get("providers", []),
+            "complexity_profile": mcts_guidance.get("complexity_profile", {}),
+        }
 
     # ── per-request execution budget ─────────────────────────────────────────
     _budget_start = time.time()

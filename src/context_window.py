@@ -2,6 +2,21 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional
 
 
+_MODEL_CONTEXT_BUDGETS: Dict[str, int] = {
+    "gpt-4o": 128000,
+    "gpt-4.1": 128000,
+    "gpt-5": 200000,
+    "claude-3": 200000,
+    "claude-4": 200000,
+    "gemini": 1000000,
+    "llama": 128000,
+    "qwen": 128000,
+    "deepseek": 128000,
+    "mistral": 128000,
+    "mixtral": 32768,
+}
+
+
 def _is_user_turn(message: Dict) -> bool:
     return message.get("role") in ("user", "assistant")
 
@@ -70,6 +85,77 @@ class ContextWindowManager:
             {"role": "assistant", "content": "Understood — I have context from the earlier conversation."},
         ]
         return compressed + new_turns
+
+    @staticmethod
+    def estimate_tokens(text: str) -> int:
+        if not text:
+            return 0
+        return max(1, len(text) // 4)
+
+    def token_breakdown(self, history: List[Dict]) -> List[Dict]:
+        breakdown: List[Dict] = []
+        for idx, msg in enumerate(history):
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                text_parts: List[str] = []
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text_parts.append(str(part.get("text", "")))
+                text = "\n".join(text_parts)
+            else:
+                text = content if isinstance(content, str) else str(content)
+            breakdown.append(
+                {
+                    "index": idx,
+                    "role": msg.get("role", ""),
+                    "tokens": self.estimate_tokens(text),
+                    "preview": text[:120],
+                }
+            )
+        return breakdown
+
+    def get_model_context_budget(self, model_name: str, default_budget: int = 32768) -> int:
+        low = (model_name or "").lower()
+        if not low:
+            return default_budget
+        for prefix, budget in _MODEL_CONTEXT_BUDGETS.items():
+            if prefix in low:
+                return budget
+        return default_budget
+
+    def compress_to_token_budget(
+        self,
+        history: List[Dict],
+        token_budget: int,
+        reserve_tokens: int = 4096,
+    ) -> List[Dict]:
+        target_budget = max(2048, int(token_budget) - int(reserve_tokens))
+        if target_budget <= 0:
+            return history[-self.config.max_turns :]
+
+        compressed = self.compress_history(history)
+        if sum(item["tokens"] for item in self.token_breakdown(compressed)) <= target_budget:
+            return compressed
+
+        # Deterministic fallback: keep latest messages that fit budget.
+        out: List[Dict] = []
+        running = 0
+        for msg in reversed(compressed):
+            content = msg.get("content", "")
+            if isinstance(content, list):
+                joined = "\n".join(
+                    str(part.get("text", ""))
+                    for part in content
+                    if isinstance(part, dict) and part.get("type") == "text"
+                )
+            else:
+                joined = content if isinstance(content, str) else str(content)
+            cost = self.estimate_tokens(joined)
+            if running + cost > target_budget:
+                continue
+            out.append(msg)
+            running += cost
+        return list(reversed(out)) if out else compressed[-self.config.max_turns :]
 
     def compress_history_with_llm(
         self,

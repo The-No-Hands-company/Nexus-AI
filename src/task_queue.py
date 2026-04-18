@@ -25,6 +25,15 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from .db import (
+    db_delete_shared_memory,
+    db_get_shared_memory,
+    db_list_shared_memory,
+    db_save_task_job,
+    db_set_shared_memory,
+    db_list_task_jobs,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Task data model
 # ─────────────────────────────────────────────────────────────────────────────
@@ -78,31 +87,70 @@ _stop_event = threading.Event()
 _task_runner: Optional[Callable[[str, str, threading.Event], str]] = None
 
 
+def _restore_tasks_from_db() -> None:
+    """Rehydrate non-terminal tasks from persistent storage into the live worker heap."""
+    persisted = db_list_task_jobs(limit=1000)
+    with _heap_lock:
+        for row in persisted:
+            task_id = str(row.get("task_id") or "")
+            if not task_id or task_id in _tasks:
+                continue
+            status = str(row.get("status") or TASK_PENDING)
+            if status in (TASK_DONE, TASK_FAILED, TASK_CANCELLED):
+                continue
+            task = QueuedTask(
+                task_id=task_id,
+                description=str(row.get("description") or ""),
+                priority=int(row.get("priority") or 5),
+                dependencies=list(row.get("dependencies") or []),
+                metadata=dict(row.get("metadata") or {}),
+                schedule_cron=str(row.get("schedule_cron") or ""),
+                status=TASK_PENDING,
+                result=str(row.get("result") or ""),
+                error=str(row.get("error") or ""),
+                created_at=float(row.get("created_at") or time.time()),
+                started_at=None,
+                finished_at=float(row.get("finished_at")) if row.get("finished_at") else None,
+            )
+            _tasks[task_id] = task
+            heapq.heappush(_heap, task)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Shared memory
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_shared_memory(key: str) -> Any:
     with _shared_memory_lock:
-        return _shared_memory.get(key)
+        if key in _shared_memory:
+            return _shared_memory.get(key)
+    value = db_get_shared_memory(key)
+    if value is not None:
+        with _shared_memory_lock:
+            _shared_memory[key] = value
+    return value
 
 
 def set_shared_memory(key: str, value: Any) -> None:
     with _shared_memory_lock:
         _shared_memory[key] = value
+    db_set_shared_memory(key, value)
 
 
 def delete_shared_memory(key: str) -> bool:
     with _shared_memory_lock:
         if key in _shared_memory:
             del _shared_memory[key]
+            db_delete_shared_memory(key)
             return True
-        return False
+    return db_delete_shared_memory(key)
 
 
 def list_shared_memory() -> Dict[str, Any]:
     with _shared_memory_lock:
-        return dict(_shared_memory)
+        merged = dict(db_list_shared_memory())
+        merged.update(_shared_memory)
+        return merged
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -127,6 +175,20 @@ def submit_task(
         schedule_cron=schedule_cron,
     )
     _tasks[task_id] = task
+    db_save_task_job(
+        task_id=task.task_id,
+        description=task.description,
+        priority=task.priority,
+        dependencies=task.dependencies,
+        metadata=task.metadata,
+        schedule_cron=task.schedule_cron,
+        status=task.status,
+        result=task.result,
+        error=task.error,
+        created_at=task.created_at,
+        started_at=task.started_at,
+        finished_at=task.finished_at,
+    )
     with _heap_lock:
         heapq.heappush(_heap, task)
     _new_task_event.set()
@@ -143,20 +205,45 @@ def cancel_task(task_id: str) -> bool:
     task.cancel_event.set()
     task.status = TASK_CANCELLED
     task.finished_at = time.time()
+    db_save_task_job(
+        task_id=task.task_id,
+        description=task.description,
+        priority=task.priority,
+        dependencies=task.dependencies,
+        metadata=task.metadata,
+        schedule_cron=task.schedule_cron,
+        status=task.status,
+        result=task.result,
+        error=task.error,
+        created_at=task.created_at,
+        started_at=task.started_at,
+        finished_at=task.finished_at,
+    )
     return True
 
 
 def get_task(task_id: str) -> Optional[Dict[str, Any]]:
     task = _tasks.get(task_id)
-    return _task_to_dict(task) if task else None
+    if task:
+        return _task_to_dict(task)
+    for persisted in db_list_task_jobs(limit=500):
+        if persisted.get("task_id") == task_id:
+            return persisted
+    return None
 
 
 def list_tasks(status: str = "", limit: int = 50) -> List[Dict[str, Any]]:
-    tasks = list(_tasks.values())
+    persisted = db_list_task_jobs(status=status, limit=limit)
+    live_tasks = list(_tasks.values())
     if status:
-        tasks = [t for t in tasks if t.status == status]
-    tasks.sort(key=lambda t: t.created_at, reverse=True)
-    return [_task_to_dict(t) for t in tasks[:limit]]
+        live_tasks = [t for t in live_tasks if t.status == status]
+    live_tasks.sort(key=lambda t: t.created_at, reverse=True)
+    merged = {t["task_id"]: t for t in persisted}
+    for task in live_tasks:
+        merged[task.task_id] = _task_to_dict(task)
+    result = list(merged.values())
+    result.sort(key=lambda t: t.get("created_at", ""), reverse=True)
+    return result[:limit]
 
 
 def _task_to_dict(task: QueuedTask) -> Dict[str, Any]:
@@ -249,6 +336,20 @@ def _worker_loop() -> None:
         # Run the task
         ready.status = TASK_RUNNING
         ready.started_at = time.time()
+        db_save_task_job(
+            task_id=ready.task_id,
+            description=ready.description,
+            priority=ready.priority,
+            dependencies=ready.dependencies,
+            metadata=ready.metadata,
+            schedule_cron=ready.schedule_cron,
+            status=ready.status,
+            result=ready.result,
+            error=ready.error,
+            created_at=ready.created_at,
+            started_at=ready.started_at,
+            finished_at=ready.finished_at,
+        )
         try:
             if _task_runner is None:
                 raise RuntimeError("No task runner registered. Call set_task_runner() at startup.")
@@ -268,6 +369,20 @@ def _worker_loop() -> None:
             ready.error = str(exc)
         finally:
             ready.finished_at = time.time()
+            db_save_task_job(
+                task_id=ready.task_id,
+                description=ready.description,
+                priority=ready.priority,
+                dependencies=ready.dependencies,
+                metadata=ready.metadata,
+                schedule_cron=ready.schedule_cron,
+                status=ready.status,
+                result=ready.result,
+                error=ready.error,
+                created_at=ready.created_at,
+                started_at=ready.started_at,
+                finished_at=ready.finished_at,
+            )
 
         # Re-enqueue if this is a scheduled (cron) task
         if ready.schedule_cron and ready.status == TASK_DONE:
@@ -293,6 +408,7 @@ def start_worker() -> None:
     if _worker_thread is not None and _worker_thread.is_alive():
         return
     _stop_event.clear()
+    _restore_tasks_from_db()
     _worker_thread = threading.Thread(target=_worker_loop, name="task-queue-worker", daemon=True)
     _worker_thread.start()
 

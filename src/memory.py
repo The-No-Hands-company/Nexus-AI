@@ -1,5 +1,6 @@
 """Nexus AI Memory - Phase 1 Super Intelligence Layer."""
-import os, time, threading
+import os, time, threading, json, hashlib
+from pathlib import Path
 from typing import List, Dict
 from .db import (add_memory_entry, load_memory_entries,
                   delete_all_memory as _db_delete_all,
@@ -9,6 +10,90 @@ MEMORY_IN_CONTEXT  = 5
 COLLECTION_NAME    = "nexus_memory"
 MEMORY_MAX_AGE_DAYS = int(os.getenv("MEMORY_MAX_AGE_DAYS", "30"))
 MEMORY_MIN_KEEP     = int(os.getenv("MEMORY_MIN_KEEP", "5"))
+_MEMORY_META_PATH = Path(os.getenv("MEMORY_META_PATH", "/tmp/nexus_memory_meta.json"))
+_EMBED_TIMEOUT_S = float(os.getenv("MEMORY_EMBED_TIMEOUT_S", "2.0"))
+
+
+def _memory_key(summary: str, ts: float) -> str:
+    base = f"{summary}|{int(ts)}"
+    return hashlib.sha1(base.encode("utf-8", errors="ignore")).hexdigest()[:16]
+
+
+def _load_meta() -> dict:
+    try:
+        if _MEMORY_META_PATH.exists():
+            return json.loads(_MEMORY_META_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {"entries": {}, "episodic": []}
+
+
+def _save_meta(meta: dict) -> None:
+    try:
+        _MEMORY_META_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _MEMORY_META_PATH.write_text(json.dumps(meta), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _register_memory_metadata(
+    summary: str,
+    tags: List[str],
+    ts: float,
+    persona: str = "",
+    session_id: str = "",
+    task_id: str = "",
+    source: str = "conversation",
+) -> str:
+    key = _memory_key(summary, ts)
+    meta = _load_meta()
+    entries = meta.setdefault("entries", {})
+    entries[key] = {
+        "key": key,
+        "summary": summary,
+        "tags": tags,
+        "created_at": ts,
+        "persona": persona,
+        "session_id": session_id,
+        "task_id": task_id,
+        "source": source,
+        "importance": float(entries.get(key, {}).get("importance", 0.65)),
+        "access_count": int(entries.get(key, {}).get("access_count", 0)),
+    }
+    episodic = meta.setdefault("episodic", [])
+    episodic.append(
+        {
+            "id": key,
+            "event_type": "memory_created",
+            "created_at": ts,
+            "summary": summary,
+            "session_id": session_id,
+            "task_id": task_id,
+            "source": source,
+        }
+    )
+    meta["episodic"] = episodic[-2000:]
+    _save_meta(meta)
+    return key
+
+
+def _touch_memory(summary: str, ts: float) -> None:
+    key = _memory_key(summary, ts)
+    meta = _load_meta()
+    entry = meta.get("entries", {}).get(key)
+    if not entry:
+        return
+    access = int(entry.get("access_count", 0)) + 1
+    entry["access_count"] = access
+    # Small boost on access, capped.
+    entry["importance"] = min(1.0, float(entry.get("importance", 0.65)) + 0.03)
+    _save_meta(meta)
+
+
+def _importance_with_decay(base_importance: float, created_at: float) -> float:
+    age_days = max(0.0, (time.time() - float(created_at or 0)) / 86400.0)
+    decay = max(0.45, 1.0 - age_days * 0.01)
+    return round(max(0.0, min(1.0, base_importance * decay)), 4)
 
 
 def _get_embed(text: str) -> List[float] | None:
@@ -19,7 +104,7 @@ def _get_embed(text: str) -> List[float] | None:
         resp = requests.post(
             f"{ollama_url}/embeddings",
             json={"model": os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text"), "prompt": text},
-            timeout=10,
+            timeout=_EMBED_TIMEOUT_S,
         )
         if resp.status_code == 200:
             return resp.json()["embedding"]
@@ -31,7 +116,7 @@ def _get_embed(text: str) -> List[float] | None:
             headers={"Authorization": f"Bearer {os.getenv('GROQ_API_KEY', '')}",
                      "Content-Type": "application/json"},
             json={"model": "llma3-8b-8192", "input": text},
-            timeout=10,
+            timeout=_EMBED_TIMEOUT_S,
         )
         if resp.status_code == 200:
             return resp.json()["data"][0]["embedding"]
@@ -66,19 +151,47 @@ def _get_collection():
         return None
 
 
-def add_memory(summary: str, tags: List[str] | None = None, persona: str = "") -> None:
+def add_memory(
+    summary: str,
+    tags: List[str] | None = None,
+    persona: str = "",
+    session_id: str = "",
+    task_id: str = "",
+    source: str = "conversation",
+    index_semantic: bool = True,
+) -> None:
     tags = tags or []
-    add_memory_entry(summary, tags, time.time())
-    emb = _get_embed(summary)
+    ts = time.time()
+    add_memory_entry(summary, tags, ts)
+    _register_memory_metadata(
+        summary=summary,
+        tags=tags,
+        ts=ts,
+        persona=persona,
+        session_id=session_id,
+        task_id=task_id,
+        source=source,
+    )
+    emb = _get_embed(summary) if index_semantic else None
     if emb:
         coll = _get_collection()
         if coll:
             try:
+                memory_id = _memory_key(summary, ts)
                 coll.add(
                     embeddings=[emb],
                     documents=[summary],
-                    metadatas=[{"tags": ",".join(tags), "ts": time.time(), "persona": persona}],
-                    ids=[f"mem_{int(time.time() * 1000)}"],
+                    metadatas=[{
+                        "tags": ",".join(tags),
+                        "ts": ts,
+                        "persona": persona,
+                        "session_id": session_id,
+                        "task_id": task_id,
+                        "source": source,
+                        "importance": 0.65,
+                        "access_count": 0,
+                    }],
+                    ids=[memory_id],
                 )
             except Exception:
                 pass
@@ -146,6 +259,7 @@ def summarize_history(history: List[Dict], call_llm_fn) -> str:
 
 def delete_all() -> None:
     _db_delete_all()
+    _save_meta({"entries": {}, "episodic": []})
     try:
         coll = _get_collection()
         if coll:
@@ -155,7 +269,26 @@ def delete_all() -> None:
 
 
 def get_all() -> List[Dict]:
-    return load_memory_entries(50)
+    entries = load_memory_entries(50)
+    meta = _load_meta().get("entries", {})
+    enriched: List[Dict] = []
+    for entry in entries:
+        key = _memory_key(str(entry.get("summary", "")), float(entry.get("created_at", 0)))
+        m = meta.get(key, {})
+        importance = _importance_with_decay(float(m.get("importance", 0.65)), float(entry.get("created_at", 0)))
+        enriched.append(
+            {
+                **entry,
+                "importance": importance,
+                "access_count": int(m.get("access_count", 0)),
+                "provenance": {
+                    "session_id": m.get("session_id", ""),
+                    "task_id": m.get("task_id", ""),
+                    "source": m.get("source", ""),
+                },
+            }
+        )
+    return enriched
 
 
 def get_semantic_memory(query: str, limit: int = 5) -> List[Dict]:
@@ -213,15 +346,24 @@ def get_semantic_memory_filtered(
                             "tags":       meta.get("tags", "").split(","),
                             "created_at": meta.get("ts", 0),
                             "persona":    meta.get("persona", ""),
+                            "importance": _importance_with_decay(float(meta.get("importance", 0.65)), float(meta.get("ts", 0))),
+                            "provenance": {
+                                "session_id": meta.get("session_id", ""),
+                                "task_id": meta.get("task_id", ""),
+                                "source": meta.get("source", ""),
+                            },
                         }
                         for doc, meta in zip(docs, metas)
                     ]
+                    for e in entries:
+                        _touch_memory(e.get("summary", ""), float(e.get("created_at", 0)))
                     # Post-filter by tags (substring match against comma-joined tag string)
                     if tags:
                         entries = [
                             e for e in entries
                             if any(t.lower() in e["tags"] for t in tags)
                         ]
+                    entries.sort(key=lambda item: float(item.get("importance", 0.0)), reverse=True)
                     return entries[:limit]
                 except Exception:
                     pass
@@ -240,7 +382,27 @@ def get_semantic_memory_filtered(
         ]
     if persona:
         filtered = [e for e in filtered if e.get("persona", "") == persona]
-    return filtered[:limit]
+    meta_entries = _load_meta().get("entries", {})
+    enriched = []
+    for e in filtered:
+        key = _memory_key(str(e.get("summary", "")), float(e.get("created_at", 0)))
+        m = meta_entries.get(key, {})
+        importance = _importance_with_decay(float(m.get("importance", 0.65)), float(e.get("created_at", 0)))
+        _touch_memory(str(e.get("summary", "")), float(e.get("created_at", 0)))
+        enriched.append(
+            {
+                **e,
+                "importance": importance,
+                "access_count": int(m.get("access_count", 0)),
+                "provenance": {
+                    "session_id": m.get("session_id", ""),
+                    "task_id": m.get("task_id", ""),
+                    "source": m.get("source", ""),
+                },
+            }
+        )
+    enriched.sort(key=lambda item: float(item.get("importance", 0.0)), reverse=True)
+    return enriched[:limit]
 
 
 def prune_old_memories(max_age_days: int | None = None, min_keep: int | None = None) -> int:
@@ -277,3 +439,39 @@ def prune_old_memories(max_age_days: int | None = None, min_keep: int | None = N
 def add_semantic_memory(summary: str, tags: List[str] | None = None) -> None:
     """Alias for add_memory — stores entry in both sqlite and chroma."""
     add_memory(summary, tags)
+
+
+def get_episodic_timeline(limit: int = 100) -> List[Dict]:
+    meta = _load_meta()
+    events = list(meta.get("episodic", []))
+    events.sort(key=lambda event: float(event.get("created_at", 0)), reverse=True)
+    return events[: max(1, min(int(limit), 1000))]
+
+
+def export_memory_bundle(limit: int = 1000) -> Dict:
+    return {
+        "version": 1,
+        "exported_at": time.time(),
+        "entries": get_all()[: max(1, min(int(limit), 5000))],
+        "episodic": get_episodic_timeline(limit=limit),
+    }
+
+
+def import_memory_bundle(bundle: Dict, source: str = "import") -> Dict:
+    rows = bundle.get("entries", []) if isinstance(bundle, dict) else []
+    imported = 0
+    for row in rows:
+        summary = str(row.get("summary", "")).strip()
+        if not summary:
+            continue
+        add_memory(
+            summary,
+            tags=list(row.get("tags", []) or []),
+            persona=str(row.get("persona", "") or ""),
+            session_id=str(row.get("provenance", {}).get("session_id", "") or ""),
+            task_id=str(row.get("provenance", {}).get("task_id", "") or ""),
+            source=source,
+            index_semantic=False,
+        )
+        imported += 1
+    return {"imported": imported}
