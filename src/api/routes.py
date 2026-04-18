@@ -4035,6 +4035,8 @@ async def run_specialist_agent(agent_id: str, request: Request):
             "provider":  pid,
             "content":   content,
         }
+    except AllProvidersExhausted as exc:
+        return _api_error(str(exc), "provider_exhausted", 503)
     except Exception as exc:
         return _api_error(str(exc), "agent_error", 500)
 
