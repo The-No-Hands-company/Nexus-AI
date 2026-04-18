@@ -1508,7 +1508,54 @@ def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, 
             if _is_rl_error(e): _mark_rate_limited(pid); print(f"↩️ {pid} rate-limited")
             elif isinstance(e, (_r.ConnectionError, _r.Timeout)): print(f"⚠️ {pid} connection error")
             else: print(f"⚠️ {pid}: {e}")
-    raise AllProvidersExhausted(f"All exhausted. Last: {last_err}")
+    return _graceful_degraded_response(messages, task, str(last_err))
+
+
+def _graceful_degraded_response(messages: List[Dict], task: str, reason: str) -> tuple[Dict, str]:
+    """Graceful degradation when all cloud providers are exhausted.
+
+    Fallback ladder:
+      1. Response cache hit for identical prompt fingerprint.
+      2. Local Ollama if reachable and has at least one model.
+      3. Raise AllProvidersExhausted with structured payload (never bare 503 caller-side).
+    """
+    # 1 — Response cache
+    try:
+        from .redis_state import cache_get
+        import hashlib as _hl
+        prompt_txt = str(messages[-1].get("content", "")) if messages else ""
+        cache_key = _hl.md5(prompt_txt[:512].encode(), usedforsecurity=False).hexdigest()
+        cached = cache_get(cache_key)
+        if cached:
+            print("⚡ Graceful degradation: serving from response cache")
+            if isinstance(cached, dict):
+                cached = dict(cached)
+                cached["_source"] = "cache"
+                return cached, "cache"
+            return {"action": "respond", "content": str(cached), "_source": "cache"}, "cache"
+    except Exception:
+        pass
+
+    # 2 — Local Ollama fallback
+    try:
+        import requests as _r
+        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        test = _r.get(f"{ollama_url}/api/tags", timeout=2)
+        if test.status_code == 200:
+            tags = test.json().get("models", [])
+            if tags:
+                first_model = tags[0].get("name", "llama3")
+                print(f"⚡ Graceful degradation: Ollama local model {first_model}")
+                cfg = {"base_url": ollama_url, "model": first_model, "openai_compat": True}
+                result = _call_openai(cfg, messages)
+                result["_source"] = "ollama_local"
+                return result, "ollama_local"
+    except Exception:
+        pass
+
+    # 3 — All fallbacks exhausted: raise structured error for caller.
+    print(f"⚡ Graceful degradation failed — all fallbacks exhausted (reason={reason})")
+    raise AllProvidersExhausted(f"All providers exhausted and no local fallback available. reason={reason}")
 
 
 def call_llm_smart(

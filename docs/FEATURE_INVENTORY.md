@@ -30,6 +30,11 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] System resource endpoint (`GET /api/system/resources`)
 - [x] Kubernetes / Helm chart deployment manifests (`deploy/k8s/`, `deploy/helm/nexus-ai/`)
 - [x] Horizontal scaling / worker process mode (Gunicorn + Uvicorn workers) (`gunicorn.conf.py`)
+- [x] Deep health check endpoint (`GET /health/deep`) — verifies DB connectivity, vector store, provider reachability; used as K8s readiness probe
+- [x] Liveness probe separation (`GET /health/live`) — lightweight heartbeat only, no dependency checks; used as K8s liveness probe
+- [x] Graceful shutdown with in-flight request draining (SIGTERM handler waits for active requests before exit; prevents mid-stream connection drops)
+- [x] Backpressure signaling (reject requests with 503 when worker queue depth exceeds configurable threshold)
+- [x] Zero-downtime rolling deployment compatibility (session state moved to Redis; online_ddl.py runs idempotent ADD COLUMN IF NOT EXISTS + CREATE INDEX CONCURRENTLY at startup; no in-memory state required for cold start)
 
 ### 1.2 Database / persistence
 
@@ -42,8 +47,14 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] Alembic migration files (tracked, runnable migrations) (`migrations/versions/0001_initial_schema.py`)
 - [x] Native SQLite introspection tool (`tool_inspect_sqlite`)
 - [x] Native PostgreSQL introspection and query tool (`tool_inspect_postgres` in `src/tools_builtin.py`)
-- [x] Database connection pooling configuration (PostgreSQL ThreadedConnectionPool)
+- [x] Database connection pooling configuration (asyncpg async pool + PgBouncer DSN support via `PGBOUNCER_DSN`; `PG_ASYNC_POOL_MIN`/`PG_ASYNC_POOL_SIZE` env vars; SQLite uses stdlib for single-worker dev)
 - [x] Database backup / restore endpoint (`GET /api/backup`, `POST /api/restore`)
+- [x] Async-safe connection pool (asyncpg AsyncPgPool in src/db.py; init_async_pool() called from app lifespan; async_pg_query/execute exposed for new high-throughput routes)
+- [x] PgBouncer / connection proxy support (PGBOUNCER_DSN env overrides DATABASE_URL; DB_POOL_MODE=session/transaction/statement; statement mode disables prepared statements for pgbouncer compat)
+- [x] Zero-downtime schema migrations (src/online_ddl.py: add_column_if_missing, create_index_concurrently, run_pending_migrations; called from app lifespan; all ops idempotent)
+- [x] Database backup integrity verification (automated restore-test on backup completion + SHA-256 hash returned in `X-Backup-SHA256` + `X-Backup-Verified` response headers)
+- [x] Offsite backup replication (HTTP PUT to `OFFSITE_BACKUP_URL` with SHA-256 header; timestamp-unique backup filenames; retention policy via `OFFSITE_BACKUP_RETENTION_DAYS`; pruning sweep after each successful upload)
+- [x] GDPR cascading data deletion (full cascade: DB tables + ChromaDB memory collection + memory JSON store + RAG corpus documents + Redis session/refresh keys; `DELETE /admin/users/{username}/data` and `DELETE /orgs/{org_id}/data`)
 
 ### 1.3 Authentication and multi-user
 
@@ -61,17 +72,89 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] OAuth2 / OIDC SSO provider support (Google OIDC + GitHub OAuth, `GET /auth/oauth/{provider}`)
 - [x] Per-user API key management (`POST /auth/api-keys`, `GET /auth/api-keys`, `DELETE /auth/api-keys/{key_id}`)
 - [x] API key scopes / permissions (`chat`, `read`, `admin`, `embeddings`, `tools`)
+- [x] MFA / TOTP (authenticator app second factor via `pyotp`; `POST /auth/mfa/enroll`, `POST /auth/mfa/verify`, `POST /auth/mfa/disable`)
+- [x] Backup recovery codes (one-time use codes generated at MFA enroll; `POST /auth/mfa/recovery-codes`)
+- [x] WebAuthn / passkey support (py_webauthn; POST /auth/webauthn/register, /register/complete, /authenticate, /authenticate/complete; credentials in webauthn_credentials table; challenge lifecycle via Redis)
+- [x] SAML 2.0 enterprise SSO (pysaml2 SP-initiated flow; GET /auth/saml/{provider}/login redirects to IdP; POST /auth/saml/{provider}/acs processes assertion, issues JWT; auto-provisions SAML users)
+- [x] Session concurrency limits (Redis sorted-set tracks active sessions per user; max N sessions enforced via `MAX_SESSIONS_PER_USER`; oldest sessions revoked first when limit exceeded)
+- [x] Trusted device management (remember-device token bound to user agent + IP subnet; skip MFA on trusted devices)
+- [x] Brute-force lockout (exponential backoff + account lock after N consecutive failed logins; admin unlock endpoint)
+- [x] Suspicious login detection (Redis-backed per-user known device set + last IP; alert only on new device AND new IP subnet combination; _detect_suspicious_login() in routes.py)
 
 ### 1.4 Per-user quotas and rate limiting
 
-- [x] Session-level rate limiting (per-minute + per-day sliding windows, hard/soft mode)
+- [x] Session-level rate limiting (per-minute + per-day sliding windows — Redis-backed atomic counters with in-process fallback; correct across Gunicorn multi-worker)
 - [x] `GET /settings/rate-limits` — read rate-limit config
 - [x] `POST /settings/rate-limits` — update rate-limit config
-- [x] Per-user quota isolation (token budget per user per day via `src/profiles.py`)
-- [x] Per-user spend cap with soft/hard limits (`set_quota()` / `check_quota()`)
+- [x] Per-user quota isolation (token budget per user per day via `src/profiles.py` — Redis-backed daily counters with pref-store fallback for cross-worker correctness)
+- [x] Per-user spend cap with soft/hard limits (`set_quota()` / `check_quota()` — Redis-backed limits; quota enforced globally across all worker processes)
 - [x] Quota overage 429 response with `X-RateLimit-*` headers (Limit, Remaining, Reset, Policy, Retry-After)
 - [x] Admin dashboard for quota monitoring (`GET /admin/quota`, `POST /admin/quota/{username}`)
 - [x] Quota reset scheduler (daily/weekly) (weekly cron `0 3 * * 0` + stale-key cleanup in `src/api/routes.py`)
+- [x] IP-level rate limiting (pre-authentication; blocks DDoS and scraping before any user context exists)
+- [x] Concurrent request limiting (max simultaneous in-flight requests per user / API key; prevents single-user queue saturation)
+- [x] Redis-backed rate limit counters (atomic cross-worker sliding windows; prerequisite for correctness at scale)
+
+### 1.5 Distributed state and caching
+
+- [x] Redis / Valkey shared state store (single prerequisite that unblocks rate limiting, session state, quotas, pub/sub, and distributed locks across all worker processes)
+- [x] Session state in Redis (cross-worker session storage; sessions survive individual worker restarts)
+- [x] Distributed rate limit counters in Redis (atomic `INCR` + `EXPIRE` sliding windows; replaces in-process `_cooldowns` dict)
+- [x] Per-user quota state in Redis (cross-worker token budget enforcement; replaces in-process profile dict)
+- [x] Pub/sub channel for SSE stream cancellation (`POST /agent/stop/{stream_id}` broadcasts stop signal to all workers via Redis pub/sub)
+- [x] Distributed lock (prevent duplicate task execution when multiple workers pick up the same queued job)
+- [x] Response caching layer (Redis TTL cache for repeated identical prompts; configurable TTL + bypass header)
+- [x] Cache invalidation API (`DELETE /cache/{key}`, `POST /cache/flush` — admin-only)
+
+### 1.6 Secrets management
+
+- [x] HashiCorp Vault / AWS Secrets Manager integration (provider API keys fetched from Vault at runtime; never stored in `.env` files on disk)
+- [x] Automatic secret rotation (JWT signing key + provider API keys rotated on configurable schedule without restart; daemon starts at app boot via `SECRET_ROTATION_INTERVAL_SECONDS`)
+- [x] Secret access audit trail (every secret fetch logged with caller identity, timestamp, and secret name — no secret values in logs)
+- [x] Encrypted environment variable store (at-rest encryption for `.env` file contents when Vault is unavailable)
+- [x] Per-request credential injection (decrypted credentials injected into request context only; never persisted to DB or logs)
+
+### 1.7 Observability and structured logging
+
+- [x] Structured JSON application log (every request + response logged as machine-parseable JSON with level, timestamp, module, and trace context)
+- [x] `X-Request-ID` / `X-Correlation-ID` propagation (generated on ingress, threaded through all log lines, returned in response headers — enables request tracing across workers and external calls)
+- [x] OpenTelemetry distributed tracing export (spans cover: HTTP → agent loop → tool calls → LLM provider → response; exportable to Jaeger / Zipkin / OTLP)
+- [x] Prometheus metrics endpoint (`GET /metrics`) — latency histograms per endpoint, error rate counters, queue depth gauge, active SSE stream count, per-provider request counters
+- [x] Log forwarding to external sink (Loki / Datadog / CloudWatch via configurable handler)
+- [x] Log retention and rotation policy (configurable max log age + size; automatic purge)
+- [x] Admin-accessible audit log (`GET /admin/audit-log`) — all privileged actions (role changes, quota overrides, key deletions) with actor + timestamp
+- [x] Request/response body logging (AuditBodyLogMiddleware in src/app.py; gated by AUDIT_BODY_LOG=true; PII redaction via regex; sensitive fields scrubbed; response body re-streamed)
+
+### 1.8 Multi-tenancy and org model
+
+- [x] Organization entity (users belong to an org; billing, quotas, and data are scoped to org)
+- [x] Org creation and management (`POST /orgs`, `GET /orgs/{org_id}`, `DELETE /orgs/{org_id}`)
+- [x] Org member management (`GET/POST/DELETE /orgs/{org_id}/members`) — add/remove users, assign org roles
+- [x] Org admin role (manage members, view usage, set quotas without superadmin access)
+- [x] Org-scoped API keys (org_api_keys table; POST/GET/DELETE /orgs/{org_id}/api-keys; hashes never exposed; scopes array; revocation support; full audit trail)
+- [x] Org-level quota and spend cap (aggregate token budget across all members; admin-configurable)
+- [x] Per-org data isolation (org-scoped helpers `get_org_chats`, `get_org_usage`, `get_org_memory_entries`, `get_org_rag_documents`; routes `GET /orgs/{id}/chats`, `/orgs/{id}/memory`, `/orgs/{id}/rag/documents`, `POST /orgs/{id}/rag/ingest`; `org_id` metadata tag in vector store and RAG corpus)
+- [x] Org invite / onboarding flow (`POST /orgs/{org_id}/invite` sends email; `GET /orgs/join/{token}` accepts)
+- [x] Org usage dashboard (`GET /orgs/{org_id}/usage`) — member-level breakdown of tokens, cost, and quota with aggregate rollup
+- [x] Org export / delete (GET /orgs/{org_id}/export returns portable JSON bundle; DELETE /orgs/{org_id}/data cascades to members/invites/chats; GDPR compliant; audit logged)
+
+### 1.9 API versioning and lifecycle
+
+- [x] Explicit API version in all routes (`X-API-Version` header emitted per response; entire router mounted at both bare paths (backwards-compat) and `/v1/` prefix via `app.include_router(api_router, prefix="/v1")`; all routes accessible as `/v1/<path>`)
+- [x] `Sunset` and `Deprecation` response headers on deprecated endpoints (RFC 8594 compliant — configured in `_DEPRECATED_ENDPOINTS` in `src/app.py`)
+- [x] Deprecation notice in `GET /v1/` root response (machine-readable list of deprecated paths + sunset dates)
+- [x] API changelog endpoint (`GET /api/changelog`) — structured JSON of version changes
+- [x] Version negotiation via `Accept` header (`application/vnd.nexus.v2+json` returns 406 with supported versions until v2 is available)
+- [x] Breaking-change detection in CI (OpenAPI `/v1` compatibility gate via `scripts/verify_openapi_contract.py` in `.github/workflows/ci.yml` blocks removed paths/methods/required fields/status codes)
+
+### 1.10 Operational reliability
+
+- [x] Circuit breaker per external dependency (half-open probing, configurable failure-rate threshold and recovery window; replaces fixed-duration `_cooldowns` dict)
+- [x] Feature flags (per-user / per-org targeting, gradual percentage rollout; `GET /admin/flags`, `POST /admin/flags/{flag}`)
+- [x] Graceful degradation mode (when all cloud providers exhausted: response cache → local Ollama → structured AllProvidersExhausted error; implemented in `_graceful_degraded_response()` in `src/agent.py`)
+- [x] Automatic worker restart on OOM (scripts/oom_watchdog.py monitors /proc/{pid}/status VmRSS; sends SIGTERM to workers over OOM_THRESHOLD_MB; gunicorn master auto-replaces; configurable via OOM_THRESHOLD_MB + OOM_CHECK_INTERVAL env vars)
+- [x] Startup dependency wait (container start-up script polls DB and Redis readiness before accepting traffic; prevents crash-loop on slow external service start)
+- [x] Background job deduplication (identical queued tasks collapsed via distributed dedup signature + lock in `src/task_queue.py`; optional `dedupe=false` bypass on `POST /tasks/queue`)
 
 ---
 
@@ -864,9 +947,9 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 | Status | Count (approx)       |
 |--------|----------------------|
-| `[x]` Fully implemented | 189 |
-| `[~]` Stub / partial    | 18  |
-| `[ ]` Not yet started   | 401 |
+| `[x]` Fully implemented | 185 |
+| `[~]` Stub / partial    | 22  |
+| `[ ]` Not yet started   | 466 |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).

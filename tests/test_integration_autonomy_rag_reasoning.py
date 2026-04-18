@@ -1,6 +1,8 @@
 # ════════════════════════════════════════════════════════════════════════════
 # Integration Tests: Autonomy, RAG, and Reasoning Endpoints
 # ════════════════════════════════════════════════════════════════════════════
+import unittest
+
 
 class TestIntegrationAutonomyRAGReasoning(unittest.TestCase):
     """Integration tests for autonomy, RAG, and reasoning endpoint workflows."""

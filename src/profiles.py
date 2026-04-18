@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from .db import load_pref, save_pref
+from .redis_state import redis_get, redis_set, redis_incr, redis_expire, redis_keys, redis_delete
 
 
 # ---------------------------------------------------------------------------
@@ -108,10 +109,15 @@ def get_quota_state(username: str) -> dict:
     day_key = now.strftime("%Y-%m-%d")
     next_reset = datetime(now.year, now.month, now.day, tzinfo=timezone.utc).timestamp() + 86400
 
-    tokens_limit_day = int(load_pref(f"quota.tokens_limit_day.{username}", "0") or "0")
-    requests_limit_day = int(load_pref(f"quota.requests_limit_day.{username}", "0") or "0")
-    tokens_used_today = int(load_pref(f"quota.tokens_used.{username}.{day_key}", "0") or "0")
-    requests_used_today = int(load_pref(f"quota.requests_used.{username}.{day_key}", "0") or "0")
+    tokens_limit_key = f"quota.tokens_limit_day.{username}"
+    requests_limit_key = f"quota.requests_limit_day.{username}"
+    tokens_used_key = f"quota.tokens_used.{username}.{day_key}"
+    requests_used_key = f"quota.requests_used.{username}.{day_key}"
+
+    tokens_limit_day = int(redis_get(tokens_limit_key) or load_pref(tokens_limit_key, "0") or "0")
+    requests_limit_day = int(redis_get(requests_limit_key) or load_pref(requests_limit_key, "0") or "0")
+    tokens_used_today = int(redis_get(tokens_used_key) or load_pref(tokens_used_key, "0") or "0")
+    requests_used_today = int(redis_get(requests_used_key) or load_pref(requests_used_key, "0") or "0")
 
     return {
         "tokens_used_today": tokens_used_today,
@@ -151,6 +157,14 @@ def consume_quota(username: str, tokens: int) -> None:
     day_key = now.strftime("%Y-%m-%d")
     token_key = f"quota.tokens_used.{username}.{day_key}"
     req_key = f"quota.requests_used.{username}.{day_key}"
+
+    # Redis-backed counters keep quota enforcement correct across workers.
+    redis_incr(token_key, max(0, int(tokens or 0)))
+    redis_expire(token_key, 2 * 86400)
+    redis_incr(req_key, 1)
+    redis_expire(req_key, 2 * 86400)
+
+    # Compatibility mirror for existing pref-based tooling.
     current_tokens = int(load_pref(token_key, "0") or "0")
     current_requests = int(load_pref(req_key, "0") or "0")
     save_pref(token_key, str(max(0, current_tokens + int(tokens or 0))))
@@ -164,11 +178,41 @@ def set_quota(username: str, tokens_per_day: int, requests_per_day: int | None =
     Persist daily token/request quota limits and return the updated state.
     """
     safe_tokens = max(0, int(tokens_per_day or 0))
+    redis_set(f"quota.tokens_limit_day.{username}", safe_tokens)
     save_pref(f"quota.tokens_limit_day.{username}", str(safe_tokens))
     if requests_per_day is not None:
         safe_requests = max(0, int(requests_per_day or 0))
+        redis_set(f"quota.requests_limit_day.{username}", safe_requests)
         save_pref(f"quota.requests_limit_day.{username}", str(safe_requests))
     return get_quota_state(username)
+
+
+def reset_quota_usage(username: str) -> None:
+    """Reset daily quota usage counters for a user."""
+    token_keys = redis_keys(f"quota.tokens_used.{username}.*")
+    req_keys = redis_keys(f"quota.requests_used.{username}.*")
+    if token_keys:
+        redis_delete(*token_keys)
+    if req_keys:
+        redis_delete(*req_keys)
+
+    # Keep pref-store in sync for compatibility.
+    for key in token_keys + req_keys:
+        save_pref(key, "0")
+
+
+def cleanup_stale_quota_days(days_to_keep: int = 8) -> int:
+    """Delete stale daily quota keys older than the retention window."""
+    from datetime import timedelta
+
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, int(days_to_keep)))).strftime("%Y-%m-%d")
+    removed = 0
+    for key in redis_keys("quota.*"):
+        parts = key.split(".")
+        if len(parts) >= 4 and parts[-1] < cutoff and ("tokens_used" in key or "requests_used" in key):
+            redis_delete(key)
+            removed += 1
+    return removed
 
 
 # ---------------------------------------------------------------------------

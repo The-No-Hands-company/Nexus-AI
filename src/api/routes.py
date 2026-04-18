@@ -34,7 +34,10 @@ from ..memory import (
 )
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
 from ..safety import GuardrailViolation, check_user_task, scrub_pii
-from ..safety_pipeline import SAFETY_POLICY_PROFILES, get_safety_policy, screen_input, explain_prompt_injection
+from ..safety_pipeline import (
+    SAFETY_POLICY_PROFILES, get_safety_policy, screen_input,
+    explain_prompt_injection, screen_tool_action,
+)
 from ..knowledge_graph import (
     kg_store as _kg_store,
     kg_query as _kg_query,
@@ -355,67 +358,112 @@ def _evaluate_rate_limit(principal: str) -> dict:
       {"allowed": bool, "mode": "soft|hard", "limit_type": "per_minute|per_day|", ...}
     """
     now = time.time()
-    minute_window = 60.0
-    day_window = 86400.0
+    minute_limit = int(_rate_limit_settings.get("per_minute", 60))
+    day_limit = int(_rate_limit_settings.get("per_day", 2500))
+    mode = _rate_limit_settings.get("mode", "soft")
+    minute_bucket = str(int(now // 60))
+    day_bucket = str(int(now // 86400))
 
-    with _rate_limit_lock:
-        entry = _session_requests.get(principal, {"minute": [], "day": []})
-        minute = [t for t in entry.get("minute", []) if now - t < minute_window]
-        day = [t for t in entry.get("day", []) if now - t < day_window]
+    try:
+        from ..redis_state import get_rate_counter, incr_rate_counter
 
-        minute_limit = int(_rate_limit_settings.get("per_minute", 60))
-        day_limit = int(_rate_limit_settings.get("per_day", 2500))
-        mode = _rate_limit_settings.get("mode", "soft")
+        current_minute = get_rate_counter(principal, f"m:{minute_bucket}")
+        current_day = get_rate_counter(principal, f"d:{day_bucket}")
+        minute_over = current_minute >= minute_limit
+        day_over = current_day >= day_limit
 
-        minute_over = len(minute) >= minute_limit
-        day_over = len(day) >= day_limit
-        is_over = minute_over or day_over
+        if minute_over or day_over:
+            if mode == "hard":
+                return {
+                    "allowed": False,
+                    "mode": mode,
+                    "principal": principal,
+                    "limit_type": "per_minute" if minute_over else "per_day",
+                    "limit": minute_limit if minute_over else day_limit,
+                    "used": current_minute if minute_over else current_day,
+                    "retry_after_seconds": 60 if minute_over else 3600,
+                }
 
-        if not is_over:
-            minute.append(now)
-            day.append(now)
-            _session_requests[principal] = {"minute": minute, "day": day}
-            return {
-                "allowed": True,
-                "mode": mode,
-                "principal": principal,
-                "limit_type": "",
-                "limit": 0,
-                "used": 0,
-                "retry_after_seconds": 0,
-            }
-
-        # Soft mode records pressure but does not block user flow.
-        if mode == "soft":
-            minute.append(now)
-            day.append(now)
-            _session_requests[principal] = {"minute": minute, "day": day}
+            # Soft mode records pressure and still counts usage.
+            new_minute = incr_rate_counter(principal, f"m:{minute_bucket}", 120)
+            new_day = incr_rate_counter(principal, f"d:{day_bucket}", 172800)
             return {
                 "allowed": True,
                 "mode": mode,
                 "principal": principal,
                 "limit_type": "per_minute" if minute_over else "per_day",
                 "limit": minute_limit if minute_over else day_limit,
-                "used": len(minute) if minute_over else len(day),
+                "used": new_minute if minute_over else new_day,
                 "retry_after_seconds": 0,
             }
 
-        # Hard mode blocks and does not count blocked requests against quota.
-        retry_after = 1
-        if minute_over and minute:
-            retry_after = max(1, int(minute_window - (now - minute[0])))
-        elif day_over and day:
-            retry_after = max(1, int(day_window - (now - day[0])))
-        _session_requests[principal] = {"minute": minute, "day": day}
+        # Allowed path: atomically record request in both windows.
+        incr_rate_counter(principal, f"m:{minute_bucket}", 120)
+        incr_rate_counter(principal, f"d:{day_bucket}", 172800)
         return {
-            "allowed": False,
+            "allowed": True,
             "mode": mode,
             "principal": principal,
-            "limit_type": "per_minute" if minute_over else "per_day",
-            "limit": minute_limit if minute_over else day_limit,
-            "used": len(minute) if minute_over else len(day),
-            "retry_after_seconds": retry_after,
+            "limit_type": "",
+            "limit": 0,
+            "used": 0,
+            "retry_after_seconds": 0,
         }
+    except Exception:
+        # Fallback path keeps single-process behavior if Redis is unavailable.
+        minute_window = 60.0
+        day_window = 86400.0
+        with _rate_limit_lock:
+            entry = _session_requests.get(principal, {"minute": [], "day": []})
+            minute = [t for t in entry.get("minute", []) if now - t < minute_window]
+            day = [t for t in entry.get("day", []) if now - t < day_window]
+            minute_over = len(minute) >= minute_limit
+            day_over = len(day) >= day_limit
+            is_over = minute_over or day_over
+
+            if not is_over:
+                minute.append(now)
+                day.append(now)
+                _session_requests[principal] = {"minute": minute, "day": day}
+                return {
+                    "allowed": True,
+                    "mode": mode,
+                    "principal": principal,
+                    "limit_type": "",
+                    "limit": 0,
+                    "used": 0,
+                    "retry_after_seconds": 0,
+                }
+
+            if mode == "soft":
+                minute.append(now)
+                day.append(now)
+                _session_requests[principal] = {"minute": minute, "day": day}
+                return {
+                    "allowed": True,
+                    "mode": mode,
+                    "principal": principal,
+                    "limit_type": "per_minute" if minute_over else "per_day",
+                    "limit": minute_limit if minute_over else day_limit,
+                    "used": len(minute) if minute_over else len(day),
+                    "retry_after_seconds": 0,
+                }
+
+            retry_after = 1
+            if minute_over and minute:
+                retry_after = max(1, int(minute_window - (now - minute[0])))
+            elif day_over and day:
+                retry_after = max(1, int(day_window - (now - day[0])))
+            _session_requests[principal] = {"minute": minute, "day": day}
+            return {
+                "allowed": False,
+                "mode": mode,
+                "principal": principal,
+                "limit_type": "per_minute" if minute_over else "per_day",
+                "limit": minute_limit if minute_over else day_limit,
+                "used": len(minute) if minute_over else len(day),
+                "retry_after_seconds": retry_after,
+            }
 
 
 def _quota_error_response(limit_result: dict) -> JSONResponse:
@@ -445,8 +493,159 @@ def _quota_error_response(limit_result: dict) -> JSONResponse:
 
 
 JWT_REFRESH_EXPIRE_D = int(os.getenv("JWT_REFRESH_EXPIRE_D", "14"))
+
+# ── Token revocation / session state backed by Redis with in-process fallback ─
+# These in-memory structures are the fallback for when Redis is unavailable.
+# Redis-backed equivalents are used when Redis is reachable, enabling correctness
+# across Gunicorn workers and cold-start survival (zero-downtime rolling deploys).
 _revoked_access_tokens: set[str] = set()
 _refresh_tokens: dict[str, dict] = {}
+_active_user_sessions: dict[str, list[dict]] = {}
+_active_user_sessions_lock = threading.Lock()
+
+
+def _redis_revoke_token(token: str, ttl_seconds: int = 0) -> None:
+    """Mark a token as revoked in Redis (with expiry = token TTL)."""
+    try:
+        from ..redis_state import get_redis
+        r = get_redis()
+        key = f"nexus:revoked:{hashlib.sha256(token.encode()).hexdigest()[:32]}"
+        if ttl_seconds > 0:
+            r.set(key, "1", ex=ttl_seconds)
+        else:
+            r.set(key, "1", ex=86400 * 14)  # default 14 days
+    except Exception:
+        _revoked_access_tokens.add(token)
+
+
+def _redis_is_revoked(token: str) -> bool:
+    """Check if a token is revoked, consulting Redis first then in-process set."""
+    try:
+        from ..redis_state import get_redis
+        r = get_redis()
+        key = f"nexus:revoked:{hashlib.sha256(token.encode()).hexdigest()[:32]}"
+        if r.get(key):
+            return True
+    except Exception:
+        pass
+    return token in _revoked_access_tokens
+
+
+def _redis_save_refresh(token: str, data: dict, ttl_days: int = 14) -> None:
+    try:
+        from ..redis_state import get_redis
+        r = get_redis()
+        r.set(f"nexus:refresh:{token}", json.dumps(data), ex=ttl_days * 86400)
+    except Exception:
+        _refresh_tokens[token] = data
+
+
+def _redis_get_refresh(token: str) -> dict | None:
+    try:
+        from ..redis_state import get_redis
+        r = get_redis()
+        raw = r.get(f"nexus:refresh:{token}")
+        if raw:
+            return json.loads(raw)
+    except Exception:
+        pass
+    return _refresh_tokens.get(token)
+
+
+def _redis_delete_refresh(token: str) -> None:
+    try:
+        from ..redis_state import get_redis
+        r = get_redis()
+        r.set(f"nexus:refresh:{token}", "", ex=1)
+    except Exception:
+        pass
+    _refresh_tokens.pop(token, None)
+
+
+def _redis_track_session(username: str, record: dict, max_sessions: int) -> list[str]:
+    """
+    Track an active session in Redis sorted set nexus:sessions:{username}.
+    Returns list of revoked access tokens (oldest sessions trimmed to max_sessions).
+    """
+    revoked_tokens: list[str] = []
+    try:
+        from ..redis_state import get_redis
+        import json as _json
+        r = get_redis()
+        key = f"nexus:sessions:{username}"
+        score = float(record.get("issued_at", time.time()))
+        r.set(f"{key}:v:{score}", _json.dumps(record), ex=JWT_REFRESH_EXPIRE_D * 86400)
+        # We use a simple list stored in Redis for session tracking
+        members_key = f"nexus:session_list:{username}"
+        members_raw = r.get(members_key)
+        sessions: list[dict] = _json.loads(members_raw) if members_raw else []
+        sessions.append(record)
+        sessions.sort(key=lambda x: float(x.get("issued_at", 0)))
+        while len(sessions) > max_sessions:
+            oldest = sessions.pop(0)
+            old_access = str(oldest.get("access") or "")
+            old_refresh = str(oldest.get("refresh") or "")
+            if old_access:
+                revoked_tokens.append(old_access)
+                _redis_revoke_token(old_access)
+            if old_refresh:
+                _redis_delete_refresh(old_refresh)
+        r.set(members_key, _json.dumps(sessions), ex=JWT_REFRESH_EXPIRE_D * 86400)
+        return revoked_tokens
+    except Exception:
+        pass
+    # Fallback to in-process
+    with _active_user_sessions_lock:
+        sessions = _active_user_sessions.get(username, [])
+        sessions.append(record)
+        sessions.sort(key=lambda x: float(x.get("issued_at", 0.0)))
+        while len(sessions) > max_sessions:
+            oldest = sessions.pop(0)
+            old_access = str(oldest.get("access") or "")
+            old_refresh = str(oldest.get("refresh") or "")
+            if old_access:
+                revoked_tokens.append(old_access)
+                _revoked_access_tokens.add(old_access)
+            if old_refresh:
+                _refresh_tokens.pop(old_refresh, None)
+        _active_user_sessions[username] = sessions
+    return revoked_tokens
+
+
+def _detect_suspicious_login(username: str, device_hash: str, ip: str) -> bool:
+    """
+    Detect suspicious logins by comparing current device/IP against known values.
+    Returns True if the login looks suspicious (new device + new IP subnet).
+    Records the current device/IP as known after the check.
+    """
+    try:
+        from ..redis_state import get_redis
+        r = get_redis()
+        known_key = f"nexus:known_devices:{username}"
+        last_ip_key = f"nexus:last_ip:{username}"
+
+        known_devices_raw = r.get(known_key)
+        known_devices: set[str] = set(json.loads(known_devices_raw)) if known_devices_raw else set()
+        last_ip = (r.get(last_ip_key) or "").strip()
+
+        is_new_device = device_hash not in known_devices
+        # IP subnet change: compare first two octets for IPv4
+        def _subnet(addr: str) -> str:
+            parts = addr.split(".")
+            return ".".join(parts[:2]) if len(parts) == 4 else addr
+        is_new_subnet = bool(last_ip) and _subnet(last_ip) != _subnet(ip)
+
+        suspicious = is_new_device and is_new_subnet
+
+        # Update known devices (keep last 20)
+        known_devices.add(device_hash)
+        if len(known_devices) > 20:
+            known_devices = set(list(known_devices)[-20:])
+        r.set(known_key, json.dumps(list(known_devices)), ex=86400 * 90)
+        r.set(last_ip_key, ip, ex=86400 * 90)
+        return suspicious
+    except Exception:
+        return False  # graceful fallback: don't flag if Redis unavailable
 
 
 def _v1_quota_error_response(limit_result: dict) -> JSONResponse:
@@ -526,7 +725,7 @@ def _make_refresh_token(username: str) -> str:
         "jti": secrets.token_hex(8),
     }
     token = _jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGO)
-    _refresh_tokens[token] = {"username": username, "exp": payload["exp"]}
+    _redis_save_refresh(token, {"username": username, "exp": payload["exp"]}, ttl_days=JWT_REFRESH_EXPIRE_D)
     return token
 
 def _orchestrator_llm(prompt: str, task: str = "") -> str:
@@ -547,6 +746,39 @@ def _save_autonomy_checkpoint(trace_id: str, step_idx: int, goal: str, events: l
 
 def _hash_api_key(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    if forwarded:
+        return forwarded
+    if request.client and request.client.host:
+        return str(request.client.host)
+    return "unknown"
+
+
+def _device_hash(request: Request) -> str:
+    ua = request.headers.get("User-Agent", "")
+    ip = _client_ip(request)
+    raw = f"{ua}|{ip}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def _register_user_session(username: str, access_token: str, refresh_token: str, request: Request) -> None:
+    """Track active sessions per user; revoke oldest when over configured cap.
+    Sessions tracked in Redis for cross-worker correctness; in-process dict as fallback.
+    """
+    max_sessions = int(os.getenv("MAX_SESSIONS_PER_USER", "5"))
+    if max_sessions < 1:
+        return
+    record = {
+        "access": access_token,
+        "refresh": refresh_token,
+        "issued_at": time.time(),
+        "ip": _client_ip(request),
+        "device_hash": _device_hash(request),
+    }
+    _redis_track_session(username, record, max_sessions)
 
 
 def _read_token(request: Request) -> str | None:
@@ -570,7 +802,7 @@ def _read_token(request: Request) -> str | None:
     if not header.startswith("Bearer "):
         return None
     token = header[7:]
-    if token in _revoked_access_tokens:
+    if _redis_is_revoked(token):
         return None
     try:
         payload = _jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
@@ -645,15 +877,97 @@ def auth_register(username: str = "", password: str = ""):
     return JSONResponse({"error": "registration failed"}, status_code=500)
 
 @router.post("/auth/login")
-def auth_login(username: str = "", password: str = ""):
-    from ..db import get_user
+def auth_login(
+    request: Request,
+    username: str = "",
+    password: str = "",
+    mfa_code: str = "",
+    recovery_code: str = "",
+    remember_device: bool = False,
+):
+    from ..db import (
+        get_user,
+        record_login_attempt,
+        count_recent_failures,
+        clear_login_attempts,
+        get_mfa_secret,
+        use_mfa_recovery_code,
+        is_trusted_device,
+        save_trusted_device,
+    )
+    from ..observability import write_audit_log
     if not username or not password:
         return JSONResponse({"error": "username and password required"}, status_code=400)
+
+    # Brute-force lockout with exponential backoff.
+    threshold = int(os.getenv("LOGIN_LOCKOUT_THRESHOLD", "5"))
+    base_backoff = int(os.getenv("LOGIN_LOCKOUT_BASE_SECONDS", "30"))
+    failures = count_recent_failures(username, window_seconds=86400)
+    if failures >= threshold:
+        penalty_exp = max(0, failures - threshold)
+        retry_after = min(3600, base_backoff * (2 ** penalty_exp))
+        return JSONResponse(
+            {
+                "error": "too many failed login attempts",
+                "type": "login_lockout",
+                "retry_after_seconds": retry_after,
+            },
+            status_code=429,
+            headers={"Retry-After": str(retry_after)},
+        )
+
     user = get_user(username)
     if not user or not _verify_pw(password, user["password"]):
+        record_login_attempt(username, _client_ip(request), success=False)
         return JSONResponse({"error": "invalid credentials"}, status_code=401)
+
+    # If account has MFA enabled and current device is not trusted, enforce code.
+    mfa_record = get_mfa_secret(username)
+    device_hash = _device_hash(request)
+    trusted_device = is_trusted_device(username, device_hash)
+    if mfa_record and int(mfa_record.get("enabled") or 0) == 1 and not trusted_device:
+        mfa_ok = False
+        if mfa_code:
+            try:
+                import pyotp  # type: ignore
+
+                mfa_ok = bool(pyotp.TOTP(mfa_record["secret"]).verify(str(mfa_code).strip(), valid_window=1))
+            except Exception:
+                mfa_ok = False
+        elif recovery_code:
+            code_hash = hashlib.sha256(str(recovery_code).strip().encode()).hexdigest()
+            mfa_ok = bool(use_mfa_recovery_code(username, code_hash))
+
+        if not mfa_ok:
+            record_login_attempt(username, _client_ip(request), success=False)
+            return JSONResponse(
+                {
+                    "error": "mfa required",
+                    "type": "mfa_required",
+                    "trusted_device": False,
+                },
+                status_code=401,
+            )
+
+        if remember_device:
+            save_trusted_device(username, device_hash, label=request.headers.get("User-Agent", "")[:120])
+
+    # Successful auth clears failed attempts window.
+    record_login_attempt(username, _client_ip(request), success=True)
+    clear_login_attempts(username)
+
+    if mfa_record and int(mfa_record.get("enabled") or 0) == 1 and not trusted_device:
+        if _detect_suspicious_login(username, device_hash, _client_ip(request)):
+            write_audit_log(
+                actor=username,
+                action="suspicious_login",
+                resource="auth/login",
+                metadata={"ip": _client_ip(request), "device_hash": device_hash[:16]},
+            )
+
     token = _make_token(username)
     refresh_token = _make_refresh_token(username)
+    _register_user_session(username, token, refresh_token, request)
     return {"token": token, "refresh_token": refresh_token, "username": username}
 
 @router.get("/auth/me")
@@ -677,11 +991,11 @@ async def auth_logout(request: Request):
     if has_access:
         token = header[7:]
         if token:
-            _revoked_access_tokens.add(token)
+            _redis_revoke_token(token)
 
     refresh_token = str(body.get("refresh_token") or "").strip()
     if refresh_token:
-        _refresh_tokens.pop(refresh_token, None)
+        _redis_delete_refresh(refresh_token)
 
     return {
         "ok": True,
@@ -701,14 +1015,14 @@ async def auth_refresh(request: Request):
     if not refresh_token:
         return _api_error("refresh_token is required", "validation_error", 422)
 
-    record = _refresh_tokens.get(refresh_token)
+    record = _redis_get_refresh(refresh_token)
     if not record:
         return _api_error("invalid refresh token", "unauthorized", 401)
 
     try:
         payload = _jwt.decode(refresh_token, JWT_SECRET, algorithms=[JWT_ALGO])
     except Exception:
-        _refresh_tokens.pop(refresh_token, None)
+        _redis_delete_refresh(refresh_token)
         return _api_error("invalid refresh token", "unauthorized", 401)
 
     if payload.get("type") != "refresh":
@@ -718,7 +1032,7 @@ async def auth_refresh(request: Request):
     if not username or record.get("username") != username:
         return _api_error("invalid refresh token", "unauthorized", 401)
 
-    _refresh_tokens.pop(refresh_token, None)
+    _redis_delete_refresh(refresh_token)
     new_access = _make_token(username)
     new_refresh = _make_refresh_token(username)
     return {"token": new_access, "refresh_token": new_refresh, "username": username}
@@ -791,7 +1105,26 @@ def providers_status():
 @router.get("/v1/models/capabilities")
 def v1_models_capabilities():
     """Return capability matrix for all providers (vision, json_mode, tools, reasoning, streaming)."""
-    return get_provider_capabilities()
+    from ..agent import PROVIDER_CAPABILITIES
+
+    data = []
+    for provider in get_providers_list():
+        pid = str(provider.get("id") or "")
+        caps = dict(PROVIDER_CAPABILITIES.get(pid, {}))
+        item = {
+            "id": str(provider.get("model") or pid),
+            "provider": pid,
+            "label": provider.get("label", pid),
+            "capabilities": caps,
+            "tools": bool(caps.get("tools", False)),
+            "json_mode": bool(caps.get("json_mode", False)),
+            "reasoning": bool(caps.get("reasoning", False)),
+            "vision": bool(caps.get("vision", False)),
+            "embeddings": bool(caps.get("embeddings", provider.get("openai_compat", False))),
+            "streaming": bool(caps.get("streaming", False)),
+        }
+        data.append(item)
+    return {"object": "list", "data": data}
 
 
 @router.get("/v1/models/{model_id}")
@@ -816,7 +1149,12 @@ def v1_get_model(model_id: str):
                     "cost_tier": benchmarks.get("cost_tier", "unknown"),
                 }
             }
-    return _api_error(f"Model not found: {model_id}", "model_not_found", 404)
+    return _v1_error(
+        f"Model not found: {model_id}",
+        err_type="not_found_error",
+        status_code=404,
+        code="model_not_found",
+    )
 
 
 # ── Swarm View ────────────────────────────────────────────────────────────────
@@ -976,6 +1314,115 @@ def scheduler_cancel_job(job_id: str):
     if cancel_job(job_id):
         return {"ok": True, "job_id": job_id}
     return _api_error("job not found", "not_found", 404)
+
+
+@router.get("/scheduler/jobs/{job_id}/history")
+def scheduler_job_history(job_id: str, limit: int = 50):
+    """Return past execution records for a scheduled job."""
+    job = next((j for j in list_jobs() if j.job_id == job_id), None)
+    if job is None:
+        return _api_error("job not found", "not_found", 404)
+    history = getattr(job, "history", [])
+    return {
+        "job_id": job_id,
+        "job_name": getattr(job, "name", job_id),
+        "history": list(history[-max(1, min(int(limit), 500)):]),
+        "total": len(history),
+    }
+
+
+@router.post("/scheduler/webhook/{job_id}")
+async def scheduler_webhook_trigger(job_id: str, request: Request):
+    """Immediately trigger a scheduled job via webhook."""
+    try:
+        body = await _read_json_body(request)
+    except HTTPException:
+        body = {}
+    job = next((j for j in list_jobs() if j.job_id == job_id), None)
+    if job is None:
+        return _api_error("job not found", "not_found", 404)
+    try:
+        from ..scheduler import run_job_now
+        result = run_job_now(job_id)
+        return {"ok": True, "job_id": job_id, "result": str(result)[:200]}
+    except Exception as exc:
+        return _api_error(str(exc), "server_error", 500)
+
+
+@router.post("/safety/action-check")
+async def safety_action_check(request: Request):
+    """
+    Check whether a proposed tool/agent action is permitted by the safety policy.
+    Body: { "kind": "run_command", "parameters": {...}, "policy_profile": "standard" }
+    """
+    try:
+        data = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+    action_kind = str(data.get("kind") or "").strip()
+    parameters = data.get("parameters") or {}
+    profile = str(data.get("policy_profile") or _config.get("safety_profile", "standard"))
+    if not action_kind:
+        return _api_error("kind is required", "validation_error", 422)
+    try:
+        action_payload = {"kind": action_kind, **parameters}
+        verdict = screen_tool_action(action_payload, policy_profile=profile)
+        return {
+            "action": action_kind,
+            "allowed": verdict.allowed,
+            "policy_profile": profile,
+            "issues": [i.to_dict() for i in verdict.issues],
+            "threat": (verdict.issues[0].threat if verdict.issues else "none"),
+        }
+    except Exception as exc:
+        return _api_error(str(exc), "server_error", 500)
+
+
+@router.get("/safety/domain-guards")
+def safety_domain_guards_get():
+    """Return the current domain-guard rules (allowed/blocked domains, categories)."""
+    rules = _config.get("domain_guards") or {
+        "blocked_domains": [],
+        "allowed_categories": ["informational", "productivity"],
+        "block_adult": True,
+        "block_malware": True,
+    }
+    return {"domain_guards": rules}
+
+
+@router.post("/settings/domain-guards")
+async def safety_domain_guards_update(request: Request):
+    """Update domain-guard policy rules."""
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+    if not isinstance(body, dict):
+        return _api_error("body must be a JSON object", "validation_error", 422)
+    # Validate allowed keys only
+    valid_keys = {"blocked_domains", "allowed_categories", "block_adult", "block_malware"}
+    unknown = set(body.keys()) - valid_keys
+    if unknown:
+        return _api_error(f"Unknown fields: {sorted(unknown)}", "validation_error", 422)
+    existing = _config.get("domain_guards") or {}
+    existing.update(body)
+    _config["domain_guards"] = existing
+    return {"ok": True, "domain_guards": existing}
+
+
+@router.get("/admin/tool-audit")
+def tool_audit_log(limit: int = 100, kind: str = "", session_id: str = ""):
+    """Return the tool-call audit log. Supports filtering by kind and session_id."""
+    from ..tools_builtin import get_tool_audit_log
+    try:
+        records = get_tool_audit_log(
+            limit=max(1, min(int(limit), 1000)),
+            kind=kind.strip() or None,
+            session_id=session_id.strip() or None,
+        )
+        return {"records": records, "total": len(records)}
+    except Exception as exc:
+        return _api_error(str(exc), "server_error", 500)
 
 
 @router.post("/v1/images/generations")
@@ -5224,16 +5671,102 @@ def my_quota(request: Request):
 def db_backup(request: Request):
     require_admin(request)
     import io, sqlite3 as _sqlite3
+    import hashlib
     from ..db import SQLiteBackend, _backend as _b
+
+    def _verify_sql_dump(sql_dump: str) -> bool:
+        try:
+            conn = _sqlite3.connect(":memory:")
+            for stmt in sql_dump.split(";\n"):
+                stmt = stmt.strip()
+                if stmt:
+                    conn.execute(stmt)
+            conn.commit()
+            conn.close()
+            return True
+        except Exception:
+            return False
+
+    def _replicate_offsite(sql_bytes: bytes, sha256_hex: str) -> str:
+        target = os.getenv("OFFSITE_BACKUP_URL", "").strip()
+        if not target:
+            return "disabled"
+        try:
+            import urllib.request as _urlreq
+            from datetime import datetime as _dt, timezone as _tz
+
+            ts_label = _dt.now(_tz.utc).strftime("%Y%m%d_%H%M%S")
+            # Append timestamp segment so each backup has a unique URL.
+            # Supports both trailing-slash base URLs and pre-signed PUT URLs.
+            # If target already contains a query string (pre-signed), skip append.
+            if "?" not in target and not target.endswith(".sql"):
+                upload_url = target.rstrip("/") + f"/nexus_backup_{ts_label}.sql"
+            else:
+                upload_url = target
+
+            req = _urlreq.Request(
+                upload_url,
+                data=sql_bytes,
+                method="PUT",
+                headers={
+                    "Content-Type": "application/sql",
+                    "X-Backup-SHA256": sha256_hex,
+                    "X-Backup-Timestamp": ts_label,
+                },
+            )
+            with _urlreq.urlopen(req, timeout=15):
+                pass
+
+            # ── Retention sweep ───────────────────────────────────────────
+            # If OFFSITE_BACKUP_RETENTION_DAYS is set AND the target is an
+            # HTTP directory listing endpoint (supports DELETE), send DELETE
+            # requests for backups older than the retention window.
+            # This works with simple object-storage backends that support
+            # listing/deleting by timestamp suffix.
+            retention_days = int(os.getenv("OFFSITE_BACKUP_RETENTION_DAYS", "0"))
+            if retention_days > 0 and "?" not in target:
+                try:
+                    import json as _json
+                    cutoff_ts = _dt.now(_tz.utc).timestamp() - retention_days * 86400
+                    # Fetch directory listing (expects JSON array of {name, created_at})
+                    list_req = _urlreq.Request(
+                        target.rstrip("/") + "/",
+                        method="GET",
+                        headers={"Accept": "application/json"},
+                    )
+                    with _urlreq.urlopen(list_req, timeout=10) as resp:
+                        listing = _json.loads(resp.read())
+                    for entry in listing if isinstance(listing, list) else []:
+                        name = str(entry.get("name", ""))
+                        created = float(entry.get("created_at", 0))
+                        if name.endswith(".sql") and created < cutoff_ts:
+                            del_url = target.rstrip("/") + f"/{name}"
+                            del_req = _urlreq.Request(del_url, method="DELETE")
+                            try:
+                                with _urlreq.urlopen(del_req, timeout=10):
+                                    pass
+                            except Exception:
+                                pass
+                except Exception:
+                    pass  # retention sweep is best-effort; never fail the backup itself
+
+            return "replicated"
+        except Exception:
+            return "failed"
+
     if not isinstance(_b, SQLiteBackend):
         return _api_error("Backup only supported for SQLite backend", "not_supported", 400)
-    buf = io.BytesIO()
     src = _sqlite3.connect(_b.db_path)
     dst = _sqlite3.connect(":memory:")
     src.backup(dst)
     dst_buf = io.BytesIO()
     for line in dst.iterdump():
         dst_buf.write((line + "\n").encode())
+    sql_bytes = dst_buf.getvalue()
+    sql_text = sql_bytes.decode("utf-8", errors="ignore")
+    backup_sha256 = hashlib.sha256(sql_bytes).hexdigest()
+    verify_ok = _verify_sql_dump(sql_text)
+    replication_status = _replicate_offsite(sql_bytes, backup_sha256)
     dst_buf.seek(0)
     src.close()
     dst.close()
@@ -5242,7 +5775,12 @@ def db_backup(request: Request):
     return StreamingResponse(
         dst_buf,
         media_type="application/sql",
-        headers={"Content-Disposition": f'attachment; filename="nexus_backup_{ts}.sql"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="nexus_backup_{ts}.sql"',
+            "X-Backup-SHA256": backup_sha256,
+            "X-Backup-Verified": "true" if verify_ok else "false",
+            "X-Offsite-Replication": replication_status,
+        },
     )
 
 
@@ -5551,26 +6089,13 @@ def list_oauth_providers():
 
 def _quota_cleanup_task() -> str:
     """Purge stale daily quota pref keys older than 8 days."""
-    from ..db import _backend as _b, SQLiteBackend
-    from datetime import timedelta
-    cutoff_day = (datetime.now(timezone.utc) - timedelta(days=8)).strftime("%Y-%m-%d")
-    deleted = 0
-    if isinstance(_b, SQLiteBackend):
-        try:
-            rows = _b._conn().execute(
-                "SELECT key FROM user_prefs WHERE key LIKE 'quota.%' AND key < ?",
-                (f"quota.tokens_used.zzz.{cutoff_day}",)
-            ).fetchall()
-            for r in rows:
-                key = r["key"]
-                parts = key.split(".")
-                if len(parts) >= 4 and parts[-1] < cutoff_day:
-                    _b._conn().execute("DELETE FROM user_prefs WHERE key=?", (key,))
-                    deleted += 1
-            _b._conn().commit()
-        except Exception as e:
-            return f"quota cleanup error: {e}"
-    return f"quota cleanup: removed {deleted} stale daily keys"
+    try:
+        from ..profiles import cleanup_stale_quota_days
+
+        deleted = cleanup_stale_quota_days(days_to_keep=8)
+        return f"quota cleanup: removed {deleted} stale daily keys"
+    except Exception as e:
+        return f"quota cleanup error: {e}"
 
 
 def _register_quota_reset_scheduler():
@@ -5591,28 +6116,30 @@ async def admin_reset_quota(username: str, request: Request):
     user = db_get_user(username)
     if not user:
         return _api_error("user not found", "not_found", 404)
-    from ..db import _backend as _b, SQLiteBackend, _sql_execute
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    if isinstance(_b, SQLiteBackend):
-        _sql_execute(
-            "DELETE FROM user_prefs WHERE key LIKE ?", (f"quota.tokens_used.{username}.%",)
-        )
-        _sql_execute(
-            "DELETE FROM user_prefs WHERE key LIKE ?", (f"quota.requests_used.{username}.%",)
-        )
-    else:
-        _sql_execute(
-            "DELETE FROM user_prefs WHERE key LIKE %s", (f"quota.tokens_used.{username}.%",)
-        )
-        _sql_execute(
-            "DELETE FROM user_prefs WHERE key LIKE %s", (f"quota.requests_used.{username}.%",)
-        )
+    from ..profiles import reset_quota_usage
+
+    reset_quota_usage(username)
     return {"ok": True, "username": username, "reset_at": datetime.now(timezone.utc).isoformat()}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # POST /v1/completions  — legacy OpenAI text completions endpoint
 # ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/v1/")
+def v1_root():
+    """Version root metadata for lifecycle-aware clients."""
+    return {
+        "version": "v1",
+        "status": "active",
+        "deprecated_paths": [
+            {
+                "path": "/v1/completions",
+                "sunset": "2026-12-31T00:00:00+00:00",
+                "replacement": "/v1/chat/completions",
+            }
+        ],
+    }
 
 @router.post("/v1/completions")
 async def v1_completions(request: Request):
@@ -6602,6 +7129,7 @@ async def task_queue_submit(request: Request):
     deps          = body.get("deps", [])
     metadata      = body.get("metadata", {})
     schedule_cron = str(body.get("schedule_cron", ""))
+    dedupe        = bool(body.get("dedupe", True))
 
     if not description:
         return _api_error("'description' is required", "invalid_request_error", 400)
@@ -6613,8 +7141,9 @@ async def task_queue_submit(request: Request):
         deps=list(deps) if isinstance(deps, list) else [],
         metadata=dict(metadata) if isinstance(metadata, dict) else {},
         schedule_cron=schedule_cron,
+        dedupe=dedupe,
     )
-    return {"task_id": task_id, "status": "pending"}
+    return {"task_id": task_id, "status": "pending", "dedupe": dedupe}
 
 
 @router.delete("/tasks/queue/{task_id}")
@@ -6754,4 +7283,1164 @@ async def simulation_export_training(request: Request):
         return _api_error("'results' must be a non-empty array", "invalid_request_error", 400)
     dataset = export_training_dataset(results)
     return {"count": len(dataset), "dataset": dataset}
+
+
+
+# =============================================================================
+# Section 1 additions — Health probes, metrics, feature flags,
+# MFA, org management, audit log, circuit breaker admin, cache admin
+# =============================================================================
+
+import time as _time
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Enhanced health endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/health/live")
+def health_live():
+    """Kubernetes liveness probe — always 200 while the process is alive."""
+    return {"status": "alive", "ts": _time.time()}
+
+
+@router.get("/health/ready")
+def health_ready():
+    """Kubernetes readiness probe — 200 when DB is reachable."""
+    try:
+        from ..db import _sql_fetchall
+        _sql_fetchall("SELECT 1")
+        return {"status": "ready", "ts": _time.time()}
+    except Exception as exc:
+        return JSONResponse({"status": "not_ready", "error": str(exc)}, status_code=503)
+
+
+@router.get("/health/deep")
+def health_deep():
+    """Deep health check — database, Redis, and provider connectivity."""
+    import asyncio
+    results: dict = {"ts": _time.time()}
+
+    # DB check
+    try:
+        from ..db import _sql_fetchall
+        _sql_fetchall("SELECT 1")
+        results["db"] = "ok"
+    except Exception as exc:
+        results["db"] = f"error: {exc}"
+
+    # Redis check
+    try:
+        from ..redis_state import redis_health
+        results["redis"] = redis_health()
+    except Exception as exc:
+        results["redis"] = f"error: {exc}"
+
+    # Provider check
+    try:
+        cfg = get_config()
+        results["provider"] = cfg.get("provider", "unknown")
+    except Exception:
+        results["provider"] = "unknown"
+
+    overall = "healthy" if results.get("db") == "ok" else "degraded"
+    results["status"] = overall
+    status_code = 200 if overall == "healthy" else 503
+    return JSONResponse(results, status_code=status_code)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Prometheus metrics
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/metrics")
+def prometheus_metrics(request: Request):
+    """Expose Prometheus metrics text."""
+    try:
+        from ..observability import get_prometheus_metrics_text
+        from fastapi.responses import PlainTextResponse
+        return PlainTextResponse(
+            get_prometheus_metrics_text(),
+            media_type="text/plain; version=0.0.4; charset=utf-8",
+        )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# API changelog
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/api/changelog")
+def api_changelog():
+    """Return API version changelog."""
+    return {
+        "versions": [
+            {
+                "version": "1.0.0",
+                "date": "2025-01",
+                "changes": ["Initial OpenAI-compatible API layer"],
+            },
+            {
+                "version": "1.1.0",
+                "date": "2025-06",
+                "changes": [
+                    "Added /health/live, /health/ready, /health/deep probes",
+                    "Added /metrics Prometheus endpoint",
+                    "Added MFA routes",
+                    "Added org management routes",
+                    "Added feature flag admin routes",
+                    "Added circuit breaker admin routes",
+                    "Added audit log routes",
+                ],
+            },
+        ]
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MFA routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/auth/mfa/setup")
+async def mfa_setup(request: Request):
+    """Generate a TOTP secret and return the provisioning URI."""
+    username = require_auth(request)
+    try:
+        import pyotp  # type: ignore
+        import qrcode  # type: ignore
+        import base64, io
+    except ImportError:
+        return JSONResponse({"error": "MFA dependencies not installed"}, status_code=501)
+
+    from ..db import save_mfa_secret, get_mfa_secret
+    secret = pyotp.random_base32()
+    save_mfa_secret(username, secret)
+    totp = pyotp.TOTP(secret)
+    uri = totp.provisioning_uri(name=username, issuer_name="Nexus AI")
+
+    # Generate QR code as base64 PNG
+    try:
+        qr = qrcode.make(uri)
+        buf = io.BytesIO()
+        qr.save(buf, format="PNG")
+        qr_b64 = base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        qr_b64 = ""
+
+    return {"secret": secret, "uri": uri, "qr_png_base64": qr_b64}
+
+
+@router.post("/auth/mfa/enroll")
+async def mfa_enroll_alias(request: Request):
+    """Alias for MFA enrollment endpoint (compat with feature contract)."""
+    return await mfa_setup(request)
+
+
+@router.post("/auth/mfa/verify")
+async def mfa_verify(request: Request):
+    """Verify TOTP code and enable MFA if correct."""
+    username = require_auth(request)
+    try:
+        import pyotp  # type: ignore
+    except ImportError:
+        return JSONResponse({"error": "MFA dependencies not installed"}, status_code=501)
+
+    body = await request.json()
+    code = str(body.get("code", "")).strip()
+    if not code:
+        return _api_error("'code' is required", "invalid_request_error", 400)
+
+    from ..db import get_mfa_secret, enable_mfa, save_mfa_recovery_codes
+    import hashlib, secrets as _sec
+    record = get_mfa_secret(username)
+    if not record:
+        return _api_error("MFA not set up", "invalid_request_error", 400)
+
+    totp = pyotp.TOTP(record["secret"])
+    if not totp.verify(code, valid_window=1):
+        return _api_error("Invalid code", "invalid_mfa_code", 400)
+
+    enable_mfa(username)
+
+    # Generate recovery codes
+    codes = [_sec.token_hex(8).upper() for _ in range(8)]
+    hashes = [hashlib.sha256(c.encode()).hexdigest() for c in codes]
+    save_mfa_recovery_codes(username, hashes)
+
+    return {"mfa_enabled": True, "recovery_codes": codes}
+
+
+@router.delete("/auth/mfa")
+async def mfa_disable(request: Request):
+    """Disable MFA for the authenticated user."""
+    username = require_auth(request)
+    from ..db import disable_mfa
+    disable_mfa(username)
+    return {"mfa_enabled": False}
+
+
+@router.post("/auth/mfa/disable")
+async def mfa_disable_alias(request: Request):
+    """Alias for MFA disable endpoint (compat with feature contract)."""
+    return await mfa_disable(request)
+
+
+@router.get("/auth/mfa/status")
+async def mfa_status(request: Request):
+    """Return MFA status for the authenticated user."""
+    username = require_auth(request)
+    from ..db import get_mfa_secret
+    record = get_mfa_secret(username)
+    return {
+        "username": username,
+        "mfa_enabled": bool(record and record.get("enabled")),
+    }
+
+
+@router.get("/auth/trusted-devices")
+async def trusted_devices_list(request: Request):
+    """List trusted devices for the authenticated user."""
+    username = require_auth(request)
+    from ..db import list_trusted_devices
+
+    return {"devices": list_trusted_devices(username)}
+
+
+@router.post("/auth/trusted-devices")
+async def trusted_devices_add(request: Request):
+    """Add current request device as trusted for authenticated user."""
+    username = require_auth(request)
+    from ..db import save_trusted_device
+
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    label = str((body or {}).get("label") or request.headers.get("User-Agent", ""))[:120]
+    save_trusted_device(username, _device_hash(request), label=label)
+    return {"trusted": True, "device_hash": _device_hash(request)}
+
+
+@router.delete("/auth/trusted-devices/{device_hash}")
+async def trusted_devices_remove(device_hash: str, request: Request):
+    """Remove a trusted device hash for authenticated user."""
+    username = require_auth(request)
+    from ..db import remove_trusted_device
+
+    remove_trusted_device(username, device_hash)
+    return {"removed": True, "device_hash": device_hash}
+
+
+@router.post("/admin/users/{username}/unlock-login")
+async def admin_unlock_login(username: str, request: Request):
+    """Admin endpoint to clear login lockout state for a user."""
+    require_admin(request)
+    from ..db import clear_login_attempts
+
+    clear_login_attempts(username)
+    return {"username": username, "unlocked": True}
+
+
+@router.post("/auth/mfa/recovery-codes")
+async def mfa_recovery_codes(request: Request):
+    """Regenerate one-time MFA recovery codes for an authenticated user."""
+    username = require_auth(request)
+    from ..db import get_mfa_secret, save_mfa_recovery_codes
+    import hashlib
+    import secrets as _sec
+
+    record = get_mfa_secret(username)
+    if not record or not record.get("enabled"):
+        return _api_error("MFA must be enabled first", "invalid_request_error", 400)
+
+    codes = [_sec.token_hex(8).upper() for _ in range(8)]
+    hashes = [hashlib.sha256(c.encode()).hexdigest() for c in codes]
+    save_mfa_recovery_codes(username, hashes)
+    return {"recovery_codes": codes}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Organisation routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/orgs")
+async def create_org(request: Request):
+    """Create a new organisation."""
+    username = require_auth(request)
+    body = await request.json()
+    name = str(body.get("name", "")).strip()
+    if not name:
+        return _api_error("'name' is required", "invalid_request_error", 400)
+    from ..orgs import create_org as _create_org
+    try:
+        org = _create_org(name, username, plan=body.get("plan", "free"))
+        return org
+    except ValueError as exc:
+        return _api_error(str(exc), "invalid_request_error", 400)
+
+
+@router.get("/orgs")
+async def list_orgs(request: Request):
+    """List organisations the current user belongs to."""
+    username = require_auth(request)
+    from ..orgs import get_user_orgs
+    return {"orgs": get_user_orgs(username)}
+
+
+@router.get("/orgs/{org_id}")
+async def get_org(org_id: str, request: Request):
+    """Get a single organisation."""
+    username = require_auth(request)
+    from ..orgs import get_org as _get_org, require_org_membership
+    try:
+        require_org_membership(org_id, username, min_role="viewer")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    org = _get_org(org_id)
+    if not org:
+        return JSONResponse({"error": "org not found"}, status_code=404)
+    return org
+
+
+@router.patch("/orgs/{org_id}")
+async def update_org(org_id: str, request: Request):
+    """Update an organisation."""
+    username = require_auth(request)
+    from ..orgs import update_org as _update_org, require_org_membership
+    try:
+        require_org_membership(org_id, username, min_role="admin")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    body = await request.json()
+    org = _update_org(org_id, **body)
+    return org or JSONResponse({"error": "org not found"}, status_code=404)
+
+
+@router.delete("/orgs/{org_id}")
+async def delete_org(org_id: str, request: Request):
+    """Delete an organisation (admin only)."""
+    username = require_auth(request)
+    from ..orgs import delete_org as _delete_org, require_org_membership, get_org
+    org = get_org(org_id)
+    if not org:
+        return JSONResponse({"error": "org not found"}, status_code=404)
+    if org.get("owner") != username and _get_token_role(request) != "admin":
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    _delete_org(org_id)
+    return {"deleted": True}
+
+
+@router.get("/orgs/{org_id}/members")
+async def list_org_members(org_id: str, request: Request):
+    username = require_auth(request)
+    from ..orgs import require_org_membership, list_members
+    try:
+        require_org_membership(org_id, username)
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    return {"members": list_members(org_id)}
+
+
+@router.post("/orgs/{org_id}/members")
+async def add_org_member(org_id: str, request: Request):
+    username = require_auth(request)
+    from ..orgs import require_org_membership, add_member
+    try:
+        require_org_membership(org_id, username, min_role="admin")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    body = await request.json()
+    username = str(body.get("username", "")).strip()
+    role = str(body.get("role", "member"))
+    if not username:
+        return _api_error("'username' is required", "invalid_request_error", 400)
+    try:
+        member = add_member(org_id, username, role=role)
+        return member
+    except ValueError as exc:
+        return _api_error(str(exc), "invalid_request_error", 400)
+
+
+@router.delete("/orgs/{org_id}/members/{username}")
+async def remove_org_member(org_id: str, username: str, request: Request):
+    requester = require_auth(request)
+    from ..orgs import require_org_membership, remove_member
+    try:
+        require_org_membership(org_id, requester, min_role="admin")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    remove_member(org_id, username)
+    return {"removed": True}
+
+
+@router.get("/orgs/{org_id}/usage")
+async def org_usage_dashboard(org_id: str, request: Request):
+    """Org-level usage with member quota breakdown and aggregate rollups."""
+    username = require_auth(request)
+    from ..orgs import require_org_membership, list_members, get_org_quota
+    from ..profiles import get_quota_state
+
+    try:
+        require_org_membership(org_id, username, min_role="viewer")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+
+    members = list_members(org_id)
+    member_usage = []
+    total_tokens_used = 0
+    total_requests_used = 0
+    total_token_limit = 0
+    total_request_limit = 0
+    for m in members:
+        member_username = str(m.get("username", ""))
+        quota = get_quota_state(member_username)
+        total_tokens_used += int(quota.get("tokens_used_today", 0) or 0)
+        total_requests_used += int(quota.get("requests_used_today", 0) or 0)
+        total_token_limit += int(quota.get("tokens_limit_day", 0) or 0)
+        total_request_limit += int(quota.get("requests_limit_day", 0) or 0)
+        member_usage.append(
+            {
+                "username": member_username,
+                "role": m.get("role", "member"),
+                "tokens_used_today": int(quota.get("tokens_used_today", 0) or 0),
+                "tokens_limit_day": int(quota.get("tokens_limit_day", 0) or 0),
+                "requests_used_today": int(quota.get("requests_used_today", 0) or 0),
+                "requests_limit_day": int(quota.get("requests_limit_day", 0) or 0),
+                "reset_at": quota.get("reset_at"),
+            }
+        )
+
+    return {
+        "org_id": org_id,
+        "org_quota": get_org_quota(org_id),
+        "usage": {
+            "tokens_used_today": total_tokens_used,
+            "tokens_limit_day": total_token_limit,
+            "requests_used_today": total_requests_used,
+            "requests_limit_day": total_request_limit,
+        },
+        "members": member_usage,
+        "member_count": len(member_usage),
+    }
+
+
+@router.post("/orgs/{org_id}/invites")
+async def create_org_invite(org_id: str, request: Request):
+    username = require_auth(request)
+    from ..orgs import require_org_membership, create_invite
+    try:
+        require_org_membership(org_id, username, min_role="admin")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    body = await request.json()
+    invite = create_invite(
+        org_id,
+        invited_by=username,
+        email=body.get("email", ""),
+        role=body.get("role", "member"),
+    )
+    return invite
+
+
+@router.post("/orgs/invites/accept")
+async def accept_org_invite(request: Request):
+    username = require_auth(request)
+    from ..orgs import accept_invite
+    body = await request.json()
+    token = str(body.get("token", "")).strip()
+    if not token:
+        return _api_error("'token' is required", "invalid_request_error", 400)
+    try:
+        result = accept_invite(token, username)
+        return result
+    except ValueError as exc:
+        return _api_error(str(exc), "invalid_request_error", 400)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature flag admin routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/admin/flags")
+async def list_feature_flags(request: Request):
+    require_admin(request)
+    from ..feature_flags import list_flags
+    return {"flags": list_flags()}
+
+
+@router.get("/admin/flags/{flag_name}")
+async def get_feature_flag(flag_name: str, request: Request):
+    require_admin(request)
+    from ..feature_flags import list_flags
+    from ..db import load_feature_flag
+    flag = load_feature_flag(flag_name)
+    if not flag:
+        return JSONResponse({"error": "flag not found"}, status_code=404)
+    return flag
+
+
+@router.post("/admin/flags/{flag_name}")
+async def set_feature_flag(flag_name: str, request: Request):
+    require_admin(request)
+    from ..feature_flags import set_flag
+    body = await request.json()
+    flag = set_flag(
+        flag_name,
+        enabled=bool(body.get("enabled", False)),
+        description=body.get("description", ""),
+        rollout_percentage=int(body.get("rollout_percentage", 0)),
+        user_overrides=body.get("user_overrides"),
+        org_overrides=body.get("org_overrides"),
+        value=body.get("value"),
+    )
+    return flag
+
+
+@router.delete("/admin/flags/{flag_name}")
+async def delete_feature_flag(flag_name: str, request: Request):
+    require_admin(request)
+    from ..feature_flags import delete_flag
+    deleted = delete_flag(flag_name)
+    return {"deleted": deleted}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Audit log (admin)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/admin/audit-log")
+async def admin_audit_log(request: Request):
+    require_admin(request)
+    from ..db import list_audit_log
+    params = dict(request.query_params)
+    limit = int(params.get("limit", 100))
+    actor = params.get("actor", "")
+    action = params.get("action", "")
+    return {"entries": list_audit_log(limit=limit, actor=actor, action=action)}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Circuit breaker admin routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/admin/circuit-breakers")
+async def list_circuit_breakers(request: Request):
+    require_admin(request)
+    try:
+        from ..circuit_breaker import all_circuit_status
+        return {"circuit_breakers": all_circuit_status()}
+    except ImportError:
+        return {"circuit_breakers": []}
+
+
+@router.post("/admin/circuit-breakers/{name}/reset")
+async def reset_circuit_breaker(name: str, request: Request):
+    require_admin(request)
+    try:
+        from ..circuit_breaker import reset_circuit
+        reset = reset_circuit(name)
+        return {"name": name, "reset": reset}
+    except ImportError:
+        return JSONResponse({"error": "circuit_breaker module not available"}, status_code=503)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cache admin routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.delete("/admin/cache/{cache_key}")
+async def invalidate_cache_key(cache_key: str, request: Request):
+    require_admin(request)
+    try:
+        from ..redis_state import cache_invalidate
+        cache_invalidate(cache_key)
+        return {"invalidated": cache_key}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+
+
+@router.post("/admin/cache/flush")
+async def flush_cache(request: Request):
+    require_admin(request)
+    body = await request.json()
+    prefix = body.get("prefix", "")
+    try:
+        from ..redis_state import flush_prefix, flush_all
+        if prefix:
+            n = flush_prefix(prefix)
+            return {"flushed": n, "prefix": prefix}
+        else:
+            flush_all()
+            return {"flushed": "all"}
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GDPR / data deletion
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.delete("/admin/users/{username}/data")
+async def delete_user_data(username: str, request: Request):
+    """
+    GDPR right-to-erasure endpoint (admin only).
+    Cascades across: DB tables, ChromaDB memory, memory JSON store, RAG corpus,
+    and all Redis session / token / refresh keys for the user.
+    """
+    require_admin(request)
+    from ..db import delete_user_data as _delete_user_data
+    result = _delete_user_data(username)
+
+    # ── Purge Redis session keys for this user ─────────────────────────────
+    try:
+        _r = _get_redis()
+        if _r is not None:
+            # Keys created by _redis_track_session / _redis_save_refresh
+            pattern_sessions = f"nexus:sessions:{username}"
+            pattern_refresh = f"nexus:refresh:{username}:*"
+            # Remove session set
+            _r.delete(pattern_sessions)
+            # Remove all refresh tokens for the user
+            refresh_keys = _r.keys(pattern_refresh)
+            if refresh_keys:
+                _r.delete(*refresh_keys)
+            result["redis_sessions"] = 1
+    except Exception:
+        pass
+
+    try:
+        actor = require_auth(request)
+        write_audit_log(
+            actor=actor if isinstance(actor, str) else str(actor.get("username", "admin")),
+            action="gdpr_delete",
+            resource=f"user:{username}",
+            metadata=result,
+        )
+    except Exception:
+        pass
+    return {"username": username, "deleted": result}
+
+
+def _get_current_user(request: Request) -> str:
+    """Extract username from request auth, returns '' on failure."""
+    try:
+        user = require_auth(request)
+        return user.get("username", "")
+    except Exception:
+        return ""
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Org GDPR export + cascading delete
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/orgs/{org_id}/export")
+async def export_org_data(org_id: str, request: Request):
+    """
+    Export all org data as a portable JSON bundle (GDPR data portability).
+    Only org owners or admins may call this.
+    """
+    username = require_auth(request)
+    from ..db import get_org, export_org_data as _export_org_data
+    org = get_org(org_id)
+    if not org:
+        return JSONResponse({"error": "org not found"}, status_code=404)
+    if org.get("owner") != username:
+        require_admin(request)  # raises if not admin
+    bundle = _export_org_data(org_id)
+    write_audit_log(
+        actor=username,
+        action="org_data_export",
+        resource=f"org:{org_id}",
+        metadata={"record_count": sum(len(v) if isinstance(v, list) else 1 for v in bundle.values())},
+    )
+    return JSONResponse(bundle)
+
+
+@router.delete("/orgs/{org_id}/data")
+async def delete_org_data(org_id: str, request: Request):
+    """
+    Cascading GDPR erasure of all org data.
+    Only org owners or admins may call this.
+    """
+    username = require_auth(request)
+    from ..db import get_org, delete_org_data as _delete_org_data
+    org = get_org(org_id)
+    if not org:
+        return JSONResponse({"error": "org not found"}, status_code=404)
+    if org.get("owner") != username:
+        require_admin(request)
+    result = _delete_org_data(org_id)
+    write_audit_log(
+        actor=username,
+        action="org_data_delete",
+        resource=f"org:{org_id}",
+        metadata=result,
+    )
+    return {"org_id": org_id, "deleted": result}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Org-scoped API keys
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/orgs/{org_id}/api-keys")
+async def create_org_api_key_route(org_id: str, request: Request):
+    """Create a new org-scoped API key. Caller must be org owner or admin."""
+    username = require_auth(request)
+    from ..db import get_org, create_org_api_key, list_org_api_keys
+    org = get_org(org_id)
+    if not org:
+        return JSONResponse({"error": "org not found"}, status_code=404)
+    if org.get("owner") != username:
+        require_admin(request)
+
+    body = await _read_json_body(request)
+    name = str(body.get("name") or "").strip()
+    scopes = body.get("scopes") or []
+    if not name:
+        return _api_error("'name' is required", "invalid_request_error", 400)
+    if not isinstance(scopes, list):
+        return _api_error("'scopes' must be an array", "invalid_request_error", 400)
+
+    raw_key = "nxk_org_" + secrets.token_urlsafe(32)
+    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+    key_prefix = raw_key[:12]
+    key_id = secrets.token_hex(16)
+    now = time.time()
+
+    create_org_api_key(
+        key_id=key_id,
+        org_id=org_id,
+        created_by=username,
+        key_hash=key_hash,
+        key_prefix=key_prefix,
+        name=name,
+        scopes=json.dumps(scopes),
+        created_at=now,
+    )
+    write_audit_log(actor=username, action="org_api_key_create", resource=f"org:{org_id}/key:{key_id}", metadata={"name": name})
+    return {"id": key_id, "key": raw_key, "prefix": key_prefix, "name": name, "scopes": scopes, "created_at": now}
+
+
+@router.get("/orgs/{org_id}/api-keys")
+async def list_org_api_keys_route(org_id: str, request: Request):
+    """List org API keys (never returns hashes)."""
+    username = require_auth(request)
+    from ..db import get_org, list_org_api_keys
+    org = get_org(org_id)
+    if not org:
+        return JSONResponse({"error": "org not found"}, status_code=404)
+    if org.get("owner") != username:
+        require_admin(request)
+    keys = list_org_api_keys(org_id)
+    return {"keys": keys}
+
+
+@router.delete("/orgs/{org_id}/api-keys/{key_id}")
+async def revoke_org_api_key_route(org_id: str, key_id: str, request: Request):
+    """Revoke an org API key."""
+    username = require_auth(request)
+    from ..db import get_org, revoke_org_api_key
+    org = get_org(org_id)
+    if not org:
+        return JSONResponse({"error": "org not found"}, status_code=404)
+    if org.get("owner") != username:
+        require_admin(request)
+    revoke_org_api_key(key_id=key_id, org_id=org_id)
+    write_audit_log(actor=username, action="org_api_key_revoke", resource=f"org:{org_id}/key:{key_id}", metadata={})
+    return {"id": key_id, "revoked": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WebAuthn / Passkey routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/auth/webauthn/register")
+async def webauthn_register_begin(request: Request):
+    """Begin WebAuthn registration ceremony — returns PublicKeyCredentialCreationOptions."""
+    username = require_auth(request)
+    try:
+        from webauthn import generate_registration_options
+        from webauthn.helpers.structs import AuthenticatorSelectionCriteria, UserVerificationRequirement
+        import json as _json
+
+        rp_id = os.getenv("WEBAUTHN_RP_ID", "localhost")
+        rp_name = os.getenv("WEBAUTHN_RP_NAME", "Nexus AI")
+        options = generate_registration_options(
+            rp_id=rp_id,
+            rp_name=rp_name,
+            user_name=username,
+            user_display_name=username,
+            authenticator_selection=AuthenticatorSelectionCriteria(
+                user_verification=UserVerificationRequirement.PREFERRED,
+            ),
+        )
+        import base64 as _b64
+        challenge_b64 = _b64.urlsafe_b64encode(options.challenge).rstrip(b"=").decode()
+        # Persist challenge in Redis with 5-minute TTL
+        try:
+            from ..redis_state import get_redis
+            get_redis().set(f"nexus:webauthn_challenge:{username}", challenge_b64, ex=300)
+        except Exception:
+            pass
+
+        from webauthn.helpers.cose import COSEAlgorithmIdentifier
+        return JSONResponse({
+            "rp": {"id": rp_id, "name": rp_name},
+            "user": {"name": username, "displayName": username, "id": username},
+            "challenge": challenge_b64,
+            "timeout": 60000,
+            "attestation": "none",
+        })
+    except ImportError:
+        return JSONResponse({"error": "WebAuthn support not installed (py_webauthn)"}, status_code=503)
+
+
+@router.post("/auth/webauthn/register/complete")
+async def webauthn_register_complete(request: Request):
+    """Complete WebAuthn registration — stores credential."""
+    username = require_auth(request)
+    try:
+        from webauthn import verify_registration_response
+        from webauthn.helpers.structs import RegistrationCredential
+        import base64 as _b64
+
+        body = await _read_json_body(request)
+        rp_id = os.getenv("WEBAUTHN_RP_ID", "localhost")
+        expected_origin = os.getenv("WEBAUTHN_ORIGIN", "https://localhost")
+
+        # Fetch challenge from Redis
+        expected_challenge = b""
+        try:
+            from ..redis_state import get_redis
+            raw = get_redis().get(f"nexus:webauthn_challenge:{username}")
+            if raw:
+                expected_challenge = _b64.urlsafe_b64decode(raw + "==")
+        except Exception:
+            pass
+
+        if not expected_challenge:
+            return _api_error("registration challenge expired or not found", "invalid_request_error", 400)
+
+        credential = RegistrationCredential.parse_raw(json.dumps(body))
+        verification = verify_registration_response(
+            credential=credential,
+            expected_challenge=expected_challenge,
+            expected_rp_id=rp_id,
+            expected_origin=expected_origin,
+            require_user_verification=False,
+        )
+        device_name = str(body.get("deviceName") or request.headers.get("User-Agent", "")[:80])
+        from ..db import save_webauthn_credential
+        save_webauthn_credential(
+            credential_id=verification.credential_id.hex(),
+            username=username,
+            public_key=_b64.b64encode(verification.credential_public_key).decode(),
+            sign_count=int(verification.sign_count),
+            device_name=device_name,
+        )
+        write_audit_log(actor=username, action="webauthn_credential_registered", resource="auth/webauthn", metadata={"device": device_name[:40]})
+        return {"registered": True}
+    except ImportError:
+        return JSONResponse({"error": "WebAuthn support not installed (py_webauthn)"}, status_code=503)
+    except Exception as exc:
+        return _api_error(f"WebAuthn verification failed: {exc}", "invalid_request_error", 400)
+
+
+@router.post("/auth/webauthn/authenticate")
+async def webauthn_authenticate_begin(request: Request):
+    """Begin WebAuthn authentication — returns PublicKeyCredentialRequestOptions."""
+    try:
+        from webauthn import generate_authentication_options
+        from webauthn.helpers.structs import UserVerificationRequirement
+        import base64 as _b64
+
+        body = await _read_json_body(request)
+        username = str(body.get("username") or "").strip()
+        if not username:
+            return _api_error("'username' is required", "invalid_request_error", 400)
+
+        rp_id = os.getenv("WEBAUTHN_RP_ID", "localhost")
+        from ..db import list_webauthn_credentials
+        stored_creds = list_webauthn_credentials(username)
+        if not stored_creds:
+            return _api_error("no passkeys registered for this user", "invalid_request_error", 404)
+
+        options = generate_authentication_options(
+            rp_id=rp_id,
+            user_verification=UserVerificationRequirement.PREFERRED,
+        )
+        challenge_b64 = _b64.urlsafe_b64encode(options.challenge).rstrip(b"=").decode()
+        try:
+            from ..redis_state import get_redis
+            get_redis().set(f"nexus:webauthn_auth_challenge:{username}", challenge_b64, ex=300)
+        except Exception:
+            pass
+        return JSONResponse({
+            "challenge": challenge_b64,
+            "timeout": 60000,
+            "rpId": rp_id,
+            "allowCredentials": [{"id": c["credential_id"], "type": "public-key"} for c in stored_creds],
+            "userVerification": "preferred",
+        })
+    except ImportError:
+        return JSONResponse({"error": "WebAuthn support not installed (py_webauthn)"}, status_code=503)
+
+
+@router.post("/auth/webauthn/authenticate/complete")
+async def webauthn_authenticate_complete(request: Request):
+    """Complete WebAuthn authentication — issues JWT on success."""
+    try:
+        from webauthn import verify_authentication_response
+        from webauthn.helpers.structs import AuthenticationCredential
+        import base64 as _b64
+
+        body = await _read_json_body(request)
+        username = str(body.get("username") or "").strip()
+        if not username:
+            return _api_error("'username' is required", "invalid_request_error", 400)
+
+        rp_id = os.getenv("WEBAUTHN_RP_ID", "localhost")
+        expected_origin = os.getenv("WEBAUTHN_ORIGIN", "https://localhost")
+
+        expected_challenge = b""
+        try:
+            from ..redis_state import get_redis
+            raw = get_redis().get(f"nexus:webauthn_auth_challenge:{username}")
+            if raw:
+                expected_challenge = _b64.urlsafe_b64decode(raw + "==")
+        except Exception:
+            pass
+
+        if not expected_challenge:
+            return _api_error("authentication challenge expired or not found", "invalid_request_error", 400)
+
+        from ..db import get_webauthn_credential, update_webauthn_sign_count
+        credential_id = str(body.get("id") or "").replace("-", "").lower()
+        stored_cred = get_webauthn_credential(credential_id)
+        if not stored_cred or stored_cred.get("username") != username:
+            return _api_error("credential not found", "unauthorized", 401)
+
+        credential = AuthenticationCredential.parse_raw(json.dumps(body))
+        verification = verify_authentication_response(
+            credential=credential,
+            expected_challenge=expected_challenge,
+            expected_rp_id=rp_id,
+            expected_origin=expected_origin,
+            credential_public_key=_b64.b64decode(stored_cred["public_key"]),
+            credential_current_sign_count=int(stored_cred.get("sign_count", 0)),
+            require_user_verification=False,
+        )
+        update_webauthn_sign_count(credential_id, int(verification.new_sign_count))
+        token = _make_token(username)
+        refresh_token = _make_refresh_token(username)
+        _register_user_session(username, token, refresh_token, request)
+        write_audit_log(actor=username, action="webauthn_login", resource="auth/webauthn", metadata={"credential_id": credential_id[:16]})
+        return {"token": token, "refresh_token": refresh_token, "username": username}
+    except ImportError:
+        return JSONResponse({"error": "WebAuthn support not installed (py_webauthn)"}, status_code=503)
+    except Exception as exc:
+        return _api_error(f"WebAuthn authentication failed: {exc}", "unauthorized", 401)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAML 2.0 enterprise SSO routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _get_saml_client(provider: str):
+    """Build a pysaml2 Saml2Client for the given provider slug."""
+    from saml2 import BINDING_HTTP_POST, BINDING_HTTP_REDIRECT
+    from saml2.client import Saml2Client
+    from saml2.config import Config as Saml2Config
+
+    idp_metadata_url = os.getenv(f"SAML_{provider.upper()}_IDP_METADATA_URL", "")
+    sp_entity_id = os.getenv(f"SAML_{provider.upper()}_SP_ENTITY_ID", f"nexus-ai-{provider}")
+    acs_url = os.getenv(f"SAML_{provider.upper()}_ACS_URL", f"https://localhost/auth/saml/{provider}/acs")
+
+    if not idp_metadata_url:
+        raise ValueError(f"SAML provider '{provider}' not configured (missing IDP_METADATA_URL)")
+
+    settings = {
+        "entityid": sp_entity_id,
+        "service": {
+            "sp": {
+                "endpoints": {
+                    "assertion_consumer_service": [
+                        (acs_url, BINDING_HTTP_POST),
+                    ],
+                },
+                "allow_unsolicited": True,
+                "authn_requests_signed": False,
+                "want_assertions_signed": True,
+            }
+        },
+        "metadata": {"remote": [{"url": idp_metadata_url}]},
+    }
+    cfg = Saml2Config()
+    cfg.load(settings)
+    return Saml2Client(config=cfg)
+
+
+@router.get("/auth/saml/{provider}/login")
+async def saml_login(provider: str, request: Request):
+    """Initiate SAML 2.0 authentication — redirects to IdP."""
+    try:
+        from saml2 import BINDING_HTTP_REDIRECT
+        client = _get_saml_client(provider)
+        relay_state = secrets.token_hex(16)
+        session_id, info = client.prepare_for_authenticate(relay_state=relay_state)
+        from ..db import save_saml_session_v2
+        save_saml_session_v2(
+            session_id=session_id,
+            provider=provider,
+            relay_state=relay_state,
+            expires_at=time.time() + 600,
+        )
+        redirect_url = dict(info["headers"]).get("Location", "")
+        if not redirect_url:
+            return JSONResponse({"error": "failed to generate SAML redirect"}, status_code=500)
+        from fastapi.responses import RedirectResponse
+        return RedirectResponse(url=redirect_url, status_code=302)
+    except ImportError:
+        return JSONResponse({"error": "SAML support not installed (pysaml2)"}, status_code=503)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    except Exception as exc:
+        return JSONResponse({"error": f"SAML init failed: {exc}"}, status_code=500)
+
+
+@router.post("/auth/saml/{provider}/acs")
+async def saml_acs(provider: str, request: Request):
+    """SAML Assertion Consumer Service — processes SAMLResponse, issues JWT."""
+    try:
+        from saml2 import BINDING_HTTP_POST
+        client = _get_saml_client(provider)
+        form = await request.form()
+        saml_response_raw = str(form.get("SAMLResponse", ""))
+        relay_state = str(form.get("RelayState", ""))
+        if not saml_response_raw:
+            return JSONResponse({"error": "missing SAMLResponse"}, status_code=400)
+
+        authn_response = client.parse_authn_request_response(
+            saml_response_raw,
+            BINDING_HTTP_POST,
+        )
+        if not authn_response:
+            return JSONResponse({"error": "invalid SAML response"}, status_code=401)
+
+        nameid = str(authn_response.get_subject() or "")
+        ava = authn_response.ava or {}
+        # Map NameID / attribute to username
+        email = str(ava.get("email", [nameid])[0] if ava.get("email") else nameid)
+        username = email.split("@")[0] if "@" in email else email
+        if not username:
+            return JSONResponse({"error": "could not determine username from SAML response"}, status_code=401)
+
+        # Ensure user exists locally (auto-provision SAML users)
+        from ..db import get_user, save_user
+        if not get_user(username):
+            auto_pw_hash = hashlib.sha256(secrets.token_bytes(32)).hexdigest()
+            save_user(username, auto_pw_hash, role="user", source="saml")
+
+        # Link SAML session
+        session_id = str(authn_response.in_response_to or relay_state)
+        from ..db import complete_saml_session
+        complete_saml_session(session_id=session_id, username=username, nameid=nameid)
+
+        token = _make_token(username)
+        refresh_token = _make_refresh_token(username)
+        # Return tokens as JSON; the frontend should handle the redirect
+        write_audit_log(actor=username, action="saml_login", resource=f"auth/saml/{provider}", metadata={"nameid": nameid[:40]})
+        return {"token": token, "refresh_token": refresh_token, "username": username}
+    except ImportError:
+        return JSONResponse({"error": "SAML support not installed (pysaml2)"}, status_code=503)
+    except Exception as exc:
+        return JSONResponse({"error": f"SAML ACS failed: {exc}"}, status_code=500)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-org data isolation endpoints
+# Provide org-scoped views over chats, usage, memory, and RAG corpus.
+# Callers must be an org member with at least viewer role.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.get("/orgs/{org_id}/chats")
+async def org_chats(org_id: str, limit: int = 200, request: Request = None):
+    """Return all chats belonging to members of this org (scoped to org_id)."""
+    username = require_auth(request)
+    from ..db import get_org_chats as _get_org_chats
+    from ..orgs import require_org_membership
+    try:
+        require_org_membership(org_id, username, min_role="viewer")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    chats = _get_org_chats(org_id, limit=max(1, min(int(limit), 1000)))
+    return {"org_id": org_id, "chats": chats, "count": len(chats)}
+
+
+@router.get("/orgs/{org_id}/chats/history")
+async def org_chats_history(org_id: str, days: int = 30, request: Request = None):
+    """Return org-scoped usage timeline (alias for usage, chat-focused view)."""
+    username = require_auth(request)
+    from ..db import get_org_usage as _get_org_usage
+    from ..orgs import require_org_membership
+    try:
+        require_org_membership(org_id, username, min_role="viewer")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    rows = _get_org_usage(org_id, days=max(1, min(int(days), 90)))
+    return {"org_id": org_id, "days": days, "rows": rows, "count": len(rows)}
+
+
+@router.get("/orgs/{org_id}/memory")
+async def org_memory(org_id: str, limit: int = 100, request: Request = None):
+    """Return memory entries tagged to this org (per-org isolation)."""
+    username = require_auth(request)
+    from ..db import get_org_memory_entries as _get_org_memory
+    from ..orgs import require_org_membership
+    try:
+        require_org_membership(org_id, username, min_role="viewer")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    entries = _get_org_memory(org_id, limit=max(1, min(int(limit), 500)))
+    return {"org_id": org_id, "entries": entries, "count": len(entries)}
+
+
+@router.get("/orgs/{org_id}/rag/documents")
+async def org_rag_documents(org_id: str, request: Request = None):
+    """Return all RAG corpus documents tagged with this org_id."""
+    username = require_auth(request)
+    from ..db import get_org_rag_documents as _get_org_rag
+    from ..orgs import require_org_membership
+    try:
+        require_org_membership(org_id, username, min_role="viewer")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    docs = _get_org_rag(org_id)
+    return {"org_id": org_id, "documents": docs, "count": len(docs)}
+
+
+@router.post("/orgs/{org_id}/rag/ingest")
+async def org_rag_ingest(org_id: str, request: Request):
+    """Ingest a document into the RAG corpus tagged with this org_id."""
+    username = require_auth(request)
+    from ..db import ingest_rag_for_org as _ingest_org_rag
+    from ..orgs import require_org_membership
+    try:
+        require_org_membership(org_id, username, min_role="editor")
+    except PermissionError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=403)
+    body = await _read_json_body(request)
+    text = str(body.get("text") or "").strip()
+    source = str(body.get("source") or "")
+    metadata = body.get("metadata") or {}
+    if not text:
+        return _api_error("'text' is required", "invalid_request_error", 400)
+    if not isinstance(metadata, dict):
+        return _api_error("'metadata' must be an object", "invalid_request_error", 400)
+    ok = _ingest_org_rag(text, org_id=org_id, source=source, metadata=metadata)
+    if not ok:
+        return JSONResponse({"error": "RAG ingest failed or RAG not configured"}, status_code=503)
+    write_audit_log(actor=username, action="org_rag_ingest", resource=f"org:{org_id}")
+    return {"status": "ingested", "org_id": org_id, "source": source}
+
 

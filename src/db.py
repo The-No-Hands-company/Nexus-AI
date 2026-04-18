@@ -282,12 +282,136 @@ class SQLiteBackend(DatabaseBackend):
                 source      TEXT NOT NULL DEFAULT 'reflection'
             );
         """)
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS orgs (
+                id             TEXT PRIMARY KEY,
+                name           TEXT NOT NULL,
+                owner          TEXT NOT NULL,
+                plan           TEXT NOT NULL DEFAULT 'free',
+                metadata       TEXT NOT NULL DEFAULT '{}',
+                tokens_per_day INTEGER NOT NULL DEFAULT 0,
+                spend_cap_usd  REAL NOT NULL DEFAULT 0,
+                created_at     REAL NOT NULL,
+                updated_at     REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS org_members (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id     TEXT NOT NULL,
+                username   TEXT NOT NULL,
+                role       TEXT NOT NULL DEFAULT 'member',
+                joined_at  REAL NOT NULL,
+                UNIQUE(org_id, username)
+            );
+            CREATE TABLE IF NOT EXISTS org_invites (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                org_id      TEXT NOT NULL,
+                token       TEXT NOT NULL UNIQUE,
+                invited_by  TEXT NOT NULL,
+                email       TEXT NOT NULL DEFAULT '',
+                role        TEXT NOT NULL DEFAULT 'member',
+                expires_at  REAL NOT NULL,
+                used        INTEGER NOT NULL DEFAULT 0,
+                used_by     TEXT NOT NULL DEFAULT '',
+                created_at  REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS mfa_secrets (
+                username    TEXT PRIMARY KEY,
+                secret      TEXT NOT NULL,
+                enabled     INTEGER NOT NULL DEFAULT 0,
+                created_at  REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS mfa_recovery_codes (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                username    TEXT NOT NULL,
+                code_hash   TEXT NOT NULL,
+                used        INTEGER NOT NULL DEFAULT 0,
+                created_at  REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                username    TEXT NOT NULL,
+                ip_address  TEXT NOT NULL DEFAULT '',
+                success     INTEGER NOT NULL DEFAULT 0,
+                ts          REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS trusted_devices (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                username    TEXT NOT NULL,
+                device_hash TEXT NOT NULL,
+                label       TEXT NOT NULL DEFAULT '',
+                created_at  REAL NOT NULL,
+                last_seen   REAL NOT NULL,
+                UNIQUE(username, device_hash)
+            );
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts          REAL NOT NULL,
+                actor       TEXT NOT NULL,
+                action      TEXT NOT NULL,
+                resource    TEXT NOT NULL DEFAULT '',
+                result      TEXT NOT NULL DEFAULT 'ok',
+                metadata    TEXT NOT NULL DEFAULT '{}',
+                request_id  TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS feature_flags (
+                name                TEXT PRIMARY KEY,
+                enabled             INTEGER NOT NULL DEFAULT 0,
+                description         TEXT NOT NULL DEFAULT '',
+                rollout_percentage  INTEGER NOT NULL DEFAULT 0,
+                user_overrides      TEXT NOT NULL DEFAULT '{}',
+                org_overrides       TEXT NOT NULL DEFAULT '{}',
+                value               TEXT NOT NULL DEFAULT '',
+                updated_at          REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS backup_log (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts         REAL NOT NULL,
+                type       TEXT NOT NULL DEFAULT 'local',
+                status     TEXT NOT NULL DEFAULT 'ok',
+                size_bytes INTEGER NOT NULL DEFAULT 0,
+                location   TEXT NOT NULL DEFAULT '',
+                checksum   TEXT NOT NULL DEFAULT '',
+                error      TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS org_api_keys (
+                id           TEXT PRIMARY KEY,
+                org_id       TEXT NOT NULL,
+                created_by   TEXT NOT NULL,
+                key_hash     TEXT NOT NULL UNIQUE,
+                key_prefix   TEXT NOT NULL,
+                name         TEXT NOT NULL,
+                scopes       TEXT NOT NULL DEFAULT '[]',
+                created_at   REAL NOT NULL,
+                last_used_at REAL,
+                revoked_at   REAL
+            );
+            CREATE TABLE IF NOT EXISTS webauthn_credentials (
+                id              TEXT PRIMARY KEY,
+                username        TEXT NOT NULL,
+                credential_id   TEXT NOT NULL UNIQUE,
+                public_key      TEXT NOT NULL,
+                sign_count      INTEGER NOT NULL DEFAULT 0,
+                device_name     TEXT NOT NULL DEFAULT '',
+                created_at      REAL NOT NULL,
+                last_used_at    REAL
+            );
+            CREATE TABLE IF NOT EXISTS saml_sessions (
+                id          TEXT PRIMARY KEY,
+                username    TEXT NOT NULL DEFAULT '',
+                provider    TEXT NOT NULL DEFAULT '',
+                relay_state TEXT NOT NULL DEFAULT '',
+                nameid      TEXT NOT NULL DEFAULT '',
+                created_at  REAL NOT NULL,
+                expires_at  REAL NOT NULL
+            );
+        """)
         c.commit()
         # Migrate existing databases
         for col_sql in [
             "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
             "ALTER TABLE users ADD COLUMN email TEXT",
             "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE chats ADD COLUMN username TEXT NOT NULL DEFAULT ''",
         ]:
             try:
                 c.execute(col_sql)
@@ -592,7 +716,12 @@ class SQLiteBackend(DatabaseBackend):
 
 class PostgresBackend(DatabaseBackend):
     def __init__(self, url: str):
-        self.url = url
+        # Support PgBouncer DSN override: PGBOUNCER_DSN takes priority over DATABASE_URL.
+        # When PGBOUNCER_DSN is set, prepared statements are disabled if
+        # DB_POOL_MODE=statement (statement-level PgBouncer doesn't support them).
+        pgbouncer_dsn = os.getenv("PGBOUNCER_DSN", "").strip()
+        self.url = pgbouncer_dsn if pgbouncer_dsn else url
+        self._pool_mode = os.getenv("DB_POOL_MODE", "session").lower()  # session|transaction|statement
         self._pool = None
         self._pool_lock = threading.Lock()
 
@@ -601,8 +730,10 @@ class PostgresBackend(DatabaseBackend):
             with self._pool_lock:
                 if self._pool is None:
                     import psycopg2.pool
+                    min_conn = int(os.getenv("PG_POOL_MIN", "2"))
+                    max_conn = int(os.getenv("PG_POOL_SIZE", "10"))
                     self._pool = psycopg2.pool.ThreadedConnectionPool(
-                        minconn=2, maxconn=int(os.getenv("PG_POOL_SIZE", "10")),
+                        minconn=min_conn, maxconn=max_conn,
                         dsn=self.url
                     )
         return self._pool
@@ -614,6 +745,9 @@ class PostgresBackend(DatabaseBackend):
             pool = self._get_pool()
             conn = pool.getconn()
             conn.cursor_factory = RealDictCursor
+            # For statement-level PgBouncer: disable autocommit prepared statements
+            if self._pool_mode == "statement":
+                conn.autocommit = False
             return conn
         except Exception:
             return psycopg2.connect(self.url, cursor_factory=RealDictCursor)
@@ -787,6 +921,101 @@ class PostgresBackend(DatabaseBackend):
                     cur.execute(col_sql)
                 except Exception:
                     pass
+        conn.commit()
+        # New tables: orgs, feature_flags, audit_log, MFA, login_attempts
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS orgs (
+                    id             TEXT PRIMARY KEY,
+                    name           TEXT NOT NULL,
+                    owner          TEXT NOT NULL,
+                    plan           TEXT NOT NULL DEFAULT 'free',
+                    metadata       TEXT NOT NULL DEFAULT '{}',
+                    tokens_per_day INTEGER NOT NULL DEFAULT 0,
+                    spend_cap_usd  DOUBLE PRECISION NOT NULL DEFAULT 0,
+                    created_at     DOUBLE PRECISION NOT NULL,
+                    updated_at     DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS org_members (
+                    id         SERIAL PRIMARY KEY,
+                    org_id     TEXT NOT NULL,
+                    username   TEXT NOT NULL,
+                    role       TEXT NOT NULL DEFAULT 'member',
+                    joined_at  DOUBLE PRECISION NOT NULL,
+                    UNIQUE(org_id, username)
+                );
+                CREATE TABLE IF NOT EXISTS org_invites (
+                    id          SERIAL PRIMARY KEY,
+                    org_id      TEXT NOT NULL,
+                    token       TEXT NOT NULL UNIQUE,
+                    invited_by  TEXT NOT NULL,
+                    email       TEXT NOT NULL DEFAULT '',
+                    role        TEXT NOT NULL DEFAULT 'member',
+                    expires_at  DOUBLE PRECISION NOT NULL,
+                    used        INTEGER NOT NULL DEFAULT 0,
+                    used_by     TEXT NOT NULL DEFAULT '',
+                    created_at  DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS mfa_secrets (
+                    username    TEXT PRIMARY KEY,
+                    secret      TEXT NOT NULL,
+                    enabled     INTEGER NOT NULL DEFAULT 0,
+                    created_at  DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS mfa_recovery_codes (
+                    id          SERIAL PRIMARY KEY,
+                    username    TEXT NOT NULL,
+                    code_hash   TEXT NOT NULL,
+                    used        INTEGER NOT NULL DEFAULT 0,
+                    created_at  DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS login_attempts (
+                    id          SERIAL PRIMARY KEY,
+                    username    TEXT NOT NULL,
+                    ip_address  TEXT NOT NULL DEFAULT '',
+                    success     INTEGER NOT NULL DEFAULT 0,
+                    ts          DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS trusted_devices (
+                    id          SERIAL PRIMARY KEY,
+                    username    TEXT NOT NULL,
+                    device_hash TEXT NOT NULL,
+                    label       TEXT NOT NULL DEFAULT '',
+                    created_at  DOUBLE PRECISION NOT NULL,
+                    last_seen   DOUBLE PRECISION NOT NULL,
+                    UNIQUE(username, device_hash)
+                );
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id          SERIAL PRIMARY KEY,
+                    ts          DOUBLE PRECISION NOT NULL,
+                    actor       TEXT NOT NULL,
+                    action      TEXT NOT NULL,
+                    resource    TEXT NOT NULL DEFAULT '',
+                    result      TEXT NOT NULL DEFAULT 'ok',
+                    metadata    TEXT NOT NULL DEFAULT '{}',
+                    request_id  TEXT NOT NULL DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS feature_flags (
+                    name                TEXT PRIMARY KEY,
+                    enabled             INTEGER NOT NULL DEFAULT 0,
+                    description         TEXT NOT NULL DEFAULT '',
+                    rollout_percentage  INTEGER NOT NULL DEFAULT 0,
+                    user_overrides      TEXT NOT NULL DEFAULT '{}',
+                    org_overrides       TEXT NOT NULL DEFAULT '{}',
+                    value               TEXT NOT NULL DEFAULT '',
+                    updated_at          DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS backup_log (
+                    id         SERIAL PRIMARY KEY,
+                    ts         DOUBLE PRECISION NOT NULL,
+                    type       TEXT NOT NULL DEFAULT 'local',
+                    status     TEXT NOT NULL DEFAULT 'ok',
+                    size_bytes INTEGER NOT NULL DEFAULT 0,
+                    location   TEXT NOT NULL DEFAULT '',
+                    checksum   TEXT NOT NULL DEFAULT '',
+                    error      TEXT NOT NULL DEFAULT ''
+                );
+            """)
         conn.commit()
         self._put_conn(conn)
 
@@ -1902,3 +2131,1120 @@ def list_ft_training_samples(limit: int = 100, min_quality: float = 0.0) -> list
         d["lessons"] = json.loads(d.get("lessons") or "[]")
         result.append(d)
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Audit log
+# ─────────────────────────────────────────────────────────────────────────────
+
+import time as _time_module
+
+
+def write_audit_entry(
+    actor: str,
+    action: str,
+    resource: str = "",
+    result: str = "ok",
+    metadata: dict | None = None,
+    request_id: str = "",
+) -> None:
+    import json as _json
+    import time as _t
+    params = (
+        _t.time(),
+        actor,
+        action,
+        resource,
+        result,
+        _json.dumps(metadata or {}),
+        request_id,
+    )
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO audit_log(ts,actor,action,resource,result,metadata,request_id)"
+            " VALUES(?,?,?,?,?,?,?)",
+            params,
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO audit_log(ts,actor,action,resource,result,metadata,request_id)"
+            " VALUES(%s,%s,%s,%s,%s,%s,%s)",
+            params,
+        )
+
+
+def list_audit_log(limit: int = 100, actor: str = "", action: str = "") -> list[dict]:
+    import json as _json
+    conditions: list[str] = []
+    params: list = []
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    if actor:
+        conditions.append(f"actor={ph}")
+        params.append(actor)
+    if action:
+        conditions.append(f"action={ph}")
+        params.append(action)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    rows = _sql_fetchall(
+        f"SELECT * FROM audit_log {where} ORDER BY ts DESC LIMIT {int(limit)}",
+        tuple(params),
+    )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["metadata"] = _json.loads(d.get("metadata") or "{}")
+        result.append(d)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature flags
+# ─────────────────────────────────────────────────────────────────────────────
+
+def upsert_feature_flag(
+    name: str,
+    enabled: bool,
+    description: str = "",
+    rollout_percentage: int = 0,
+    user_overrides: str = "{}",
+    org_overrides: str = "{}",
+    value: str = "",
+) -> dict:
+    import time as _t
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    now = _t.time()
+    params = (
+        name, int(enabled), description, int(rollout_percentage),
+        user_overrides, org_overrides, value, now,
+    )
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO feature_flags(name,enabled,description,rollout_percentage,"
+            "user_overrides,org_overrides,value,updated_at)"
+            " VALUES(?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(name) DO UPDATE SET"
+            " enabled=excluded.enabled, description=excluded.description,"
+            " rollout_percentage=excluded.rollout_percentage,"
+            " user_overrides=excluded.user_overrides, org_overrides=excluded.org_overrides,"
+            " value=excluded.value, updated_at=excluded.updated_at",
+            params,
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO feature_flags(name,enabled,description,rollout_percentage,"
+            "user_overrides,org_overrides,value,updated_at)"
+            " VALUES(%s,%s,%s,%s,%s,%s,%s,%s)"
+            " ON CONFLICT(name) DO UPDATE SET"
+            " enabled=EXCLUDED.enabled, description=EXCLUDED.description,"
+            " rollout_percentage=EXCLUDED.rollout_percentage,"
+            " user_overrides=EXCLUDED.user_overrides, org_overrides=EXCLUDED.org_overrides,"
+            " value=EXCLUDED.value, updated_at=EXCLUDED.updated_at",
+            params,
+        )
+    return load_feature_flag(name) or {"name": name}
+
+
+def load_feature_flag(name: str) -> dict | None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(f"SELECT * FROM feature_flags WHERE name={ph}", (name,))
+    return dict(rows[0]) if rows else None
+
+
+def list_feature_flags() -> list[dict]:
+    return [dict(r) for r in _sql_fetchall("SELECT * FROM feature_flags ORDER BY name")]
+
+
+def delete_feature_flag(name: str) -> bool:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    n = _sql_execute(f"DELETE FROM feature_flags WHERE name={ph}", (name,))
+    return n > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Login attempts (brute-force detection)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def record_login_attempt(username: str, ip_address: str = "", success: bool = False) -> None:
+    import time as _t
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(
+        f"INSERT INTO login_attempts(username,ip_address,success,ts) VALUES({ph},{ph},{ph},{ph})",
+        (username, ip_address, int(success), _t.time()),
+    )
+
+
+def count_recent_failures(username: str, window_seconds: int = 900) -> int:
+    import time as _t
+    cutoff = _t.time() - window_seconds
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(
+        f"SELECT COUNT(*) as n FROM login_attempts"
+        f" WHERE username={ph} AND success=0 AND ts>{ph}",
+        (username, cutoff),
+    )
+    return int(rows[0]["n"]) if rows else 0
+
+
+def clear_login_attempts(username: str) -> None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(f"DELETE FROM login_attempts WHERE username={ph}", (username,))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MFA
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_mfa_secret(username: str, secret: str) -> None:
+    import time as _t
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO mfa_secrets(username,secret,enabled,created_at) VALUES(?,?,0,?)"
+            " ON CONFLICT(username) DO UPDATE SET secret=excluded.secret,"
+            " enabled=0, created_at=excluded.created_at",
+            (username, secret, _t.time()),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO mfa_secrets(username,secret,enabled,created_at) VALUES(%s,%s,0,%s)"
+            " ON CONFLICT(username) DO UPDATE SET secret=EXCLUDED.secret,"
+            " enabled=0, created_at=EXCLUDED.created_at",
+            (username, secret, _t.time()),
+        )
+
+
+def get_mfa_secret(username: str) -> dict | None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(f"SELECT * FROM mfa_secrets WHERE username={ph}", (username,))
+    return dict(rows[0]) if rows else None
+
+
+def enable_mfa(username: str) -> None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(f"UPDATE mfa_secrets SET enabled=1 WHERE username={ph}", (username,))
+
+
+def disable_mfa(username: str) -> None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(f"UPDATE mfa_secrets SET enabled=0 WHERE username={ph}", (username,))
+    _sql_execute(f"DELETE FROM mfa_recovery_codes WHERE username={ph}", (username,))
+
+
+def save_mfa_recovery_codes(username: str, code_hashes: list[str]) -> None:
+    import time as _t
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(f"DELETE FROM mfa_recovery_codes WHERE username={ph}", (username,))
+    for code_hash in code_hashes:
+        _sql_execute(
+            f"INSERT INTO mfa_recovery_codes(username,code_hash,used,created_at)"
+            f" VALUES({ph},{ph},0,{ph})",
+            (username, code_hash, _t.time()),
+        )
+
+
+def use_mfa_recovery_code(username: str, code_hash: str) -> bool:
+    """Mark a recovery code as used. Returns True if it existed and was unused."""
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(
+        f"SELECT id FROM mfa_recovery_codes WHERE username={ph} AND code_hash={ph} AND used=0",
+        (username, code_hash),
+    )
+    if not rows:
+        return False
+    _sql_execute(
+        f"UPDATE mfa_recovery_codes SET used=1 WHERE id={ph}",
+        (rows[0]["id"],),
+    )
+    return True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trusted devices
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_trusted_device(username: str, device_hash: str, label: str = "") -> None:
+    import time as _t
+    now = _t.time()
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO trusted_devices(username,device_hash,label,created_at,last_seen)"
+            " VALUES(?,?,?,?,?)"
+            " ON CONFLICT(username,device_hash) DO UPDATE SET last_seen=excluded.last_seen",
+            (username, device_hash, label, now, now),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO trusted_devices(username,device_hash,label,created_at,last_seen)"
+            " VALUES(%s,%s,%s,%s,%s)"
+            " ON CONFLICT(username,device_hash) DO UPDATE SET last_seen=EXCLUDED.last_seen",
+            (username, device_hash, label, now, now),
+        )
+
+
+def is_trusted_device(username: str, device_hash: str) -> bool:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(
+        f"SELECT id FROM trusted_devices WHERE username={ph} AND device_hash={ph}",
+        (username, device_hash),
+    )
+    return bool(rows)
+
+
+def remove_trusted_device(username: str, device_hash: str) -> None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(
+        f"DELETE FROM trusted_devices WHERE username={ph} AND device_hash={ph}",
+        (username, device_hash),
+    )
+
+
+def list_trusted_devices(username: str) -> list[dict]:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    return [dict(r) for r in _sql_fetchall(
+        f"SELECT * FROM trusted_devices WHERE username={ph} ORDER BY last_seen DESC",
+        (username,),
+    )]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Org CRUD (called from src/orgs.py)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def db_create_org(
+    name: str,
+    owner: str,
+    plan: str = "free",
+    metadata: str = "{}",
+) -> dict:
+    import uuid as _uuid, time as _t
+    org_id = "org-" + _uuid.uuid4().hex[:12]
+    now = _t.time()
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO orgs(id,name,owner,plan,metadata,tokens_per_day,spend_cap_usd,created_at,updated_at)"
+            " VALUES(?,?,?,?,?,0,0,?,?)",
+            (org_id, name, owner, plan, metadata, now, now),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO orgs(id,name,owner,plan,metadata,tokens_per_day,spend_cap_usd,created_at,updated_at)"
+            " VALUES(%s,%s,%s,%s,%s,0,0,%s,%s)",
+            (org_id, name, owner, plan, metadata, now, now),
+        )
+    return db_get_org(org_id) or {"id": org_id}
+
+
+def db_get_org(org_id: str) -> dict | None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(f"SELECT * FROM orgs WHERE id={ph}", (org_id,))
+    return dict(rows[0]) if rows else None
+
+
+def db_get_org_by_name(name: str) -> dict | None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(f"SELECT * FROM orgs WHERE name={ph} LIMIT 1", (name,))
+    return dict(rows[0]) if rows else None
+
+
+def db_list_orgs(owner: str = "", limit: int = 100) -> list[dict]:
+    if owner:
+        ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+        return [dict(r) for r in _sql_fetchall(
+            f"SELECT * FROM orgs WHERE owner={ph} ORDER BY created_at DESC LIMIT {int(limit)}",
+            (owner,),
+        )]
+    return [dict(r) for r in _sql_fetchall(
+        f"SELECT * FROM orgs ORDER BY created_at DESC LIMIT {int(limit)}"
+    )]
+
+
+def db_update_org(org_id: str, **fields) -> dict | None:
+    import time as _t
+    if not fields:
+        return db_get_org(org_id)
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    fields["updated_at"] = _t.time()
+    set_clause = ", ".join(f"{k}={ph}" for k in fields)
+    values = list(fields.values()) + [org_id]
+    _sql_execute(f"UPDATE orgs SET {set_clause} WHERE id={ph}", tuple(values))
+    return db_get_org(org_id)
+
+
+def db_delete_org(org_id: str) -> bool:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    n = _sql_execute(f"DELETE FROM orgs WHERE id={ph}", (org_id,))
+    return n > 0
+
+
+def db_add_org_member(org_id: str, username: str, role: str = "member") -> dict:
+    import time as _t
+    now = _t.time()
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO org_members(org_id,username,role,joined_at) VALUES(?,?,?,?)"
+            " ON CONFLICT(org_id,username) DO UPDATE SET role=excluded.role",
+            (org_id, username, role, now),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO org_members(org_id,username,role,joined_at) VALUES(%s,%s,%s,%s)"
+            " ON CONFLICT(org_id,username) DO UPDATE SET role=EXCLUDED.role",
+            (org_id, username, role, now),
+        )
+    return {"org_id": org_id, "username": username, "role": role, "joined_at": now}
+
+
+def db_remove_org_member(org_id: str, username: str) -> bool:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    n = _sql_execute(
+        f"DELETE FROM org_members WHERE org_id={ph} AND username={ph}",
+        (org_id, username),
+    )
+    return n > 0
+
+
+def db_update_org_member_role(org_id: str, username: str, role: str) -> bool:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    n = _sql_execute(
+        f"UPDATE org_members SET role={ph} WHERE org_id={ph} AND username={ph}",
+        (role, org_id, username),
+    )
+    return n > 0
+
+
+def db_get_org_member(org_id: str, username: str) -> dict | None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(
+        f"SELECT * FROM org_members WHERE org_id={ph} AND username={ph}",
+        (org_id, username),
+    )
+    return dict(rows[0]) if rows else None
+
+
+def db_list_org_members(org_id: str) -> list[dict]:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    return [dict(r) for r in _sql_fetchall(
+        f"SELECT * FROM org_members WHERE org_id={ph} ORDER BY joined_at DESC",
+        (org_id,),
+    )]
+
+
+def db_delete_org_members(org_id: str) -> None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(f"DELETE FROM org_members WHERE org_id={ph}", (org_id,))
+
+
+def db_get_user_orgs(username: str) -> list[dict]:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    return [dict(r) for r in _sql_fetchall(
+        f"SELECT m.org_id, m.role, m.joined_at, o.name, o.plan, o.owner"
+        f" FROM org_members m JOIN orgs o ON m.org_id=o.id"
+        f" WHERE m.username={ph} ORDER BY m.joined_at DESC",
+        (username,),
+    )]
+
+
+def db_create_org_invite(
+    org_id: str,
+    token: str,
+    invited_by: str,
+    email: str = "",
+    role: str = "member",
+    expires_at: float = 0.0,
+) -> dict:
+    import time as _t
+    now = _t.time()
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO org_invites(org_id,token,invited_by,email,role,expires_at,used,used_by,created_at)"
+            " VALUES(?,?,?,?,?,?,0,'',?)",
+            (org_id, token, invited_by, email, role, expires_at, now),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO org_invites(org_id,token,invited_by,email,role,expires_at,used,used_by,created_at)"
+            " VALUES(%s,%s,%s,%s,%s,%s,0,'',%s)",
+            (org_id, token, invited_by, email, role, expires_at, now),
+        )
+    return db_get_org_invite(token) or {"token": token, "org_id": org_id}
+
+
+def db_get_org_invite(token: str) -> dict | None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(f"SELECT * FROM org_invites WHERE token={ph}", (token,))
+    return dict(rows[0]) if rows else None
+
+
+def db_list_org_invites(org_id: str, include_used: bool = False) -> list[dict]:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    if include_used:
+        return [dict(r) for r in _sql_fetchall(
+            f"SELECT * FROM org_invites WHERE org_id={ph} ORDER BY created_at DESC",
+            (org_id,),
+        )]
+    return [dict(r) for r in _sql_fetchall(
+        f"SELECT * FROM org_invites WHERE org_id={ph} AND used=0 ORDER BY created_at DESC",
+        (org_id,),
+    )]
+
+
+def db_mark_invite_used(token: str, used_by: str) -> None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(
+        f"UPDATE org_invites SET used=1, used_by={ph} WHERE token={ph}",
+        (used_by, token),
+    )
+
+
+def db_revoke_org_invite(token: str) -> bool:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    n = _sql_execute(f"DELETE FROM org_invites WHERE token={ph}", (token,))
+    return n > 0
+
+
+def db_delete_org_invites(org_id: str) -> None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(f"DELETE FROM org_invites WHERE org_id={ph}", (org_id,))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GDPR / data deletion cascade
+# ─────────────────────────────────────────────────────────────────────────────
+
+def delete_user_data(username: str) -> dict[str, int]:
+    """
+    GDPR right-to-erasure: hard-delete all data for *username* across:
+      DB tables → vector store (ChromaDB memory) → memory JSON store → RAG corpus
+    Returns counts of deleted rows per store.
+    """
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    results: dict[str, int] = {}
+
+    # ── 1. Relational DB tables ────────────────────────────────────────────
+    for table in ["auth_api_keys", "oauth_accounts", "mfa_secrets", "mfa_recovery_codes",
+                  "login_attempts", "trusted_devices", "org_members", "webauthn_credentials",
+                  "saml_sessions"]:
+        try:
+            n = _sql_execute(f"DELETE FROM {table} WHERE username={ph}", (username,))
+            results[table] = n
+        except Exception:
+            pass
+    # Chats have username column (added via online_ddl migration)
+    try:
+        n = _sql_execute(f"DELETE FROM chats WHERE username={ph}", (username,))
+        results["chats"] = n
+    except Exception:
+        pass
+    # API key audit rows
+    try:
+        n = _sql_execute(f"DELETE FROM api_key_audit WHERE username={ph}", (username,))
+        results["api_key_audit"] = n
+    except Exception:
+        pass
+    # Usage log rows
+    try:
+        n = _sql_execute(f"DELETE FROM usage_log WHERE username={ph}", (username,))
+        results["usage_log"] = n
+    except Exception:
+        pass
+    # Memory table (SQLite memory store)
+    try:
+        n = _sql_execute(f"DELETE FROM memory WHERE username={ph}", (username,))
+        results["memory_table"] = n
+    except Exception:
+        pass
+    # Delete the user account itself
+    try:
+        n = _sql_execute(f"DELETE FROM users WHERE username={ph}", (username,))
+        results["users"] = n
+    except Exception:
+        pass
+
+    # ── 2. Vector store (ChromaDB semantic memory) ─────────────────────────
+    try:
+        from .memory import _get_collection
+        coll = _get_collection()
+        if coll:
+            # Delete all entries where metadata.username matches
+            existing = coll.get(where={"username": {"$eq": username}})
+            if existing and existing.get("ids"):
+                coll.delete(ids=existing["ids"])
+                results["chroma_memory"] = len(existing["ids"])
+    except Exception:
+        pass
+
+    # ── 3. Memory JSON meta store (flat file per-entry metadata) ──────────
+    try:
+        from .memory import _load_meta, _save_meta
+        meta = _load_meta()
+        entries = meta.get("entries", {})
+        before = len(entries)
+        entries = {k: v for k, v in entries.items()
+                   if str(v.get("username", "")) != username}
+        meta["entries"] = entries
+        _save_meta(meta)
+        results["memory_meta"] = before - len(entries)
+    except Exception:
+        pass
+
+    # ── 4. RAG corpus: delete documents ingested by this user ─────────────
+    try:
+        from .rag.vector_store import VectorStoreManager
+        from .rag.rag_system import get_rag_system
+        rag = get_rag_system()
+        vs = rag.vector_store if hasattr(rag, "vector_store") else None
+        if vs is not None:
+            all_docs = vs.get_all_documents()
+            user_doc_ids = [
+                d["id"] for d in all_docs
+                if str(d.get("metadata", {}).get("uploaded_by", "")) == username
+            ]
+            if user_doc_ids:
+                vs.delete(user_doc_ids)
+                results["rag_corpus"] = len(user_doc_ids)
+    except Exception:
+        pass
+
+    return results
+
+
+def export_org_data(org_id: str) -> dict:
+    """Export all data associated with an org as a portable bundle."""
+    org = db_get_org(org_id)
+    if not org:
+        return {}
+    members = db_list_org_members(org_id)
+    member_usernames = [str(m.get("username") or "") for m in members]
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    # Collect usage stats for all members
+    usage_rows: list[dict] = []
+    for uname in member_usernames:
+        rows = _sql_fetchall(
+            f"SELECT * FROM usage_log WHERE task_type LIKE {ph} LIMIT 1000",
+            (f"%",),
+        )
+        usage_rows.extend(rows)
+    # Collect chats belonging to members
+    chats: list[dict] = []
+    for uname in member_usernames:
+        chat_rows = _sql_fetchall(
+            f"SELECT id, title, created_at, updated_at FROM chats WHERE username={ph}",
+            (uname,),
+        )
+        chats.extend(chat_rows)
+    invites = db_list_org_invites(org_id, include_used=True)
+    return {
+        "org": org,
+        "members": members,
+        "invites": invites,
+        "chats": chats,
+        "export_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def delete_org_data(org_id: str) -> dict[str, int]:
+    """
+    Cascading GDPR deletion for an entire org.
+    Deletes: org members' chats + usage + memory, org-scoped API keys, invites, org record.
+    Also purges vector store entries and RAG corpus documents tagged to this org.
+    """
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    results: dict[str, int] = {}
+    # Get member list before deletion
+    members = db_list_org_members(org_id)
+    member_usernames = [str(m.get("username") or "") for m in members]
+
+    # Delete per-member chats + usage + memory tagged to org
+    for uname in member_usernames:
+        try:
+            n = _sql_execute(f"DELETE FROM chats WHERE username={ph}", (uname,))
+            results[f"chats:{uname}"] = n
+        except Exception:
+            pass
+        try:
+            n = _sql_execute(f"DELETE FROM usage_log WHERE username={ph}", (uname,))
+            results[f"usage_log:{uname}"] = n
+        except Exception:
+            pass
+        try:
+            n = _sql_execute(f"DELETE FROM memory WHERE username={ph}", (uname,))
+            results[f"memory:{uname}"] = n
+        except Exception:
+            pass
+
+    # Delete org-level records
+    for table, col in [
+        ("org_api_keys", "org_id"),
+        ("org_members", "org_id"),
+        ("org_invites", "org_id"),
+        ("orgs", "id"),
+    ]:
+        try:
+            n = _sql_execute(f"DELETE FROM {table} WHERE {col}={ph}", (org_id,))
+            results[table] = n
+        except Exception:
+            pass
+
+    # Purge vector store entries tagged to this org
+    try:
+        from .memory import _get_collection
+        coll = _get_collection()
+        if coll:
+            existing = coll.get(where={"org_id": {"$eq": org_id}})
+            if existing and existing.get("ids"):
+                coll.delete(ids=existing["ids"])
+                results["chroma_memory"] = len(existing["ids"])
+    except Exception:
+        pass
+
+    # Purge RAG corpus documents tagged to this org
+    try:
+        from .rag.rag_system import get_rag_system
+        rag = get_rag_system()
+        vs = getattr(rag, "vector_store", None)
+        if vs is not None:
+            all_docs = vs.get_all_documents()
+            org_doc_ids = [
+                d["id"] for d in all_docs
+                if str(d.get("metadata", {}).get("org_id", "")) == org_id
+            ]
+            if org_doc_ids:
+                vs.delete(org_doc_ids)
+                results["rag_corpus"] = len(org_doc_ids)
+    except Exception:
+        pass
+
+    return results
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Backup log
+# ─────────────────────────────────────────────────────────────────────────────
+
+def record_backup(
+    backup_type: str = "local",
+    status: str = "ok",
+    size_bytes: int = 0,
+    location: str = "",
+    checksum: str = "",
+    error: str = "",
+) -> None:
+    import time as _t
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO backup_log(ts,type,status,size_bytes,location,checksum,error)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (_t.time(), backup_type, status, size_bytes, location, checksum, error),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO backup_log(ts,type,status,size_bytes,location,checksum,error)"
+            " VALUES(%s,%s,%s,%s,%s,%s,%s)",
+            (_t.time(), backup_type, status, size_bytes, location, checksum, error),
+        )
+
+
+def list_backup_log(limit: int = 50) -> list[dict]:
+    return [dict(r) for r in _sql_fetchall(
+        f"SELECT * FROM backup_log ORDER BY ts DESC LIMIT {int(limit)}"
+    )]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Org-scoped API keys
+# ─────────────────────────────────────────────────────────────────────────────
+
+def create_org_api_key(
+    key_id: str,
+    org_id: str,
+    created_by: str,
+    key_hash: str,
+    key_prefix: str,
+    name: str,
+    scopes: list,
+    created_at: float,
+) -> bool:
+    scopes_json = json.dumps(scopes)
+    if isinstance(_backend, SQLiteBackend):
+        changed = _sql_execute(
+            "INSERT INTO org_api_keys(id,org_id,created_by,key_hash,key_prefix,name,scopes,created_at)"
+            " VALUES(?,?,?,?,?,?,?,?)",
+            (key_id, org_id, created_by, key_hash, key_prefix, name, scopes_json, created_at),
+        )
+    else:
+        changed = _sql_execute(
+            "INSERT INTO org_api_keys(id,org_id,created_by,key_hash,key_prefix,name,scopes,created_at)"
+            " VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+            (key_id, org_id, created_by, key_hash, key_prefix, name, scopes_json, created_at),
+        )
+    return changed > 0
+
+
+def list_org_api_keys(org_id: str) -> list[dict]:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(
+        f"SELECT * FROM org_api_keys WHERE org_id={ph} AND revoked_at IS NULL ORDER BY created_at DESC",
+        (org_id,),
+    )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["scopes"] = json.loads(d.get("scopes") or "[]")
+        d.pop("key_hash", None)  # never expose hash
+        result.append(d)
+    return result
+
+
+def get_org_api_key_by_hash(key_hash: str) -> dict | None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(
+        f"SELECT * FROM org_api_keys WHERE key_hash={ph} AND revoked_at IS NULL",
+        (key_hash,),
+    )
+    if not rows:
+        return None
+    d = dict(rows[0])
+    d["scopes"] = json.loads(d.get("scopes") or "[]")
+    return d
+
+
+def revoke_org_api_key(key_id: str, org_id: str) -> bool:
+    import time as _t
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    n = _sql_execute(
+        f"UPDATE org_api_keys SET revoked_at={ph} WHERE id={ph} AND org_id={ph}",
+        (_t.time(), key_id, org_id),
+    )
+    return n > 0
+
+
+def touch_org_api_key(key_id: str, ts: float) -> None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(
+        f"UPDATE org_api_keys SET last_used_at={ph} WHERE id={ph}",
+        (ts, key_id),
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WebAuthn credential storage
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_webauthn_credential(
+    credential_id: str,
+    username: str,
+    public_key: str,
+    sign_count: int,
+    device_name: str = "",
+) -> str:
+    import uuid as _uuid, time as _t
+    rec_id = "wau-" + _uuid.uuid4().hex[:12]
+    now = _t.time()
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO webauthn_credentials(id,username,credential_id,public_key,sign_count,device_name,created_at)"
+            " VALUES(?,?,?,?,?,?,?)"
+            " ON CONFLICT(credential_id) DO UPDATE SET sign_count=excluded.sign_count, last_used_at=excluded.created_at",
+            (rec_id, username, credential_id, public_key, sign_count, device_name, now),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO webauthn_credentials(id,username,credential_id,public_key,sign_count,device_name,created_at)"
+            " VALUES(%s,%s,%s,%s,%s,%s,%s)"
+            " ON CONFLICT(credential_id) DO UPDATE SET sign_count=EXCLUDED.sign_count, last_used_at=EXCLUDED.created_at",
+            (rec_id, username, credential_id, public_key, sign_count, device_name, now),
+        )
+    return rec_id
+
+
+def get_webauthn_credential(credential_id: str) -> dict | None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(
+        f"SELECT * FROM webauthn_credentials WHERE credential_id={ph}",
+        (credential_id,),
+    )
+    return dict(rows[0]) if rows else None
+
+
+def list_webauthn_credentials(username: str) -> list[dict]:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    return [dict(r) for r in _sql_fetchall(
+        f"SELECT * FROM webauthn_credentials WHERE username={ph} ORDER BY created_at DESC",
+        (username,),
+    )]
+
+
+def update_webauthn_sign_count(credential_id: str, sign_count: int) -> None:
+    import time as _t
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(
+        f"UPDATE webauthn_credentials SET sign_count={ph}, last_used_at={ph} WHERE credential_id={ph}",
+        (sign_count, _t.time(), credential_id),
+    )
+
+
+def delete_webauthn_credential(credential_id: str, username: str) -> bool:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    n = _sql_execute(
+        f"DELETE FROM webauthn_credentials WHERE credential_id={ph} AND username={ph}",
+        (credential_id, username),
+    )
+    return n > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SAML session storage
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_saml_session(session_id: str, provider: str, relay_state: str, expires_at: float) -> None:
+    import time as _t
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO saml_sessions(id,username,provider,relay_state,nameid,created_at,expires_at)"
+            " VALUES(?,'',%s,?,?,?,?) ",
+            (session_id, provider, relay_state, "", _t.time(), expires_at),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO saml_sessions(id,username,provider,relay_state,nameid,created_at,expires_at)"
+            " VALUES(%s,'',%s,%s,'',%s,%s)",
+            (session_id, provider, relay_state, _t.time(), expires_at),
+        )
+
+
+def save_saml_session_v2(session_id: str, provider: str, relay_state: str, expires_at: float) -> None:
+    import time as _t
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(
+        f"INSERT INTO saml_sessions(id,username,provider,relay_state,nameid,created_at,expires_at)"
+        f" VALUES({ph},'',%s,{ph},'',%s,{ph})".replace("%s", ph),
+        (session_id, provider, relay_state, _t.time(), expires_at),
+    )
+
+
+def complete_saml_session(session_id: str, username: str, nameid: str) -> None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    _sql_execute(
+        f"UPDATE saml_sessions SET username={ph}, nameid={ph} WHERE id={ph}",
+        (username, nameid, session_id),
+    )
+
+
+def get_saml_session(session_id: str) -> dict | None:
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    rows = _sql_fetchall(f"SELECT * FROM saml_sessions WHERE id={ph}", (session_id,))
+    return dict(rows[0]) if rows else None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Async PostgreSQL pool (asyncpg) — optional, used by async-path routes
+# ─────────────────────────────────────────────────────────────────────────────
+
+class AsyncPgPool:
+    """
+    Async-safe PostgreSQL connection pool backed by asyncpg.
+    Instantiated once in app lifespan via init_async_pool().
+    Routes that need async DB access call async_pg_query() / async_pg_execute().
+    Existing synchronous psycopg2 routes are unaffected.
+    """
+
+    def __init__(self) -> None:
+        self._pool = None
+
+    async def init(self, dsn: str, min_size: int = 2, max_size: int = 10) -> None:
+        try:
+            import asyncpg  # type: ignore
+            self._pool = await asyncpg.create_pool(
+                dsn=dsn,
+                min_size=min_size,
+                max_size=max_size,
+                command_timeout=30,
+            )
+        except ImportError:
+            pass  # asyncpg not installed — fall back to sync pool
+        except Exception:
+            pass  # connection failed — fall back gracefully
+
+    async def query(self, sql: str, *args) -> list[dict]:
+        if self._pool is None:
+            return []
+        try:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(sql, *args)
+                return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+    async def execute(self, sql: str, *args) -> int:
+        if self._pool is None:
+            return 0
+        try:
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(sql, *args)
+                # asyncpg returns "UPDATE N" / "INSERT N" / etc.
+                parts = result.split()
+                return int(parts[-1]) if parts and parts[-1].isdigit() else 0
+        except Exception:
+            return 0
+
+    async def close(self) -> None:
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
+
+    @property
+    def available(self) -> bool:
+        return self._pool is not None
+
+
+_async_pg_pool = AsyncPgPool()
+
+
+async def init_async_pool() -> None:
+    """Initialize the asyncpg pool from the same DATABASE_URL used by the sync backend.
+    Called from app lifespan if DATABASE_URL points at PostgreSQL."""
+    if not (DATABASE_URL.startswith("postgresql://") or DATABASE_URL.startswith("postgres://")):
+        return
+    pgbouncer_dsn = os.getenv("PGBOUNCER_DSN", "").strip()
+    dsn = pgbouncer_dsn if pgbouncer_dsn else DATABASE_URL
+    min_size = int(os.getenv("PG_ASYNC_POOL_MIN", "2"))
+    max_size = int(os.getenv("PG_ASYNC_POOL_SIZE", "10"))
+    await _async_pg_pool.init(dsn, min_size=min_size, max_size=max_size)
+
+
+async def close_async_pool() -> None:
+    await _async_pg_pool.close()
+
+
+async def async_pg_query(sql: str, *args) -> list[dict]:
+    """Async SQL query helper — uses asyncpg pool when available."""
+    return await _async_pg_pool.query(sql, *args)
+
+
+async def async_pg_execute(sql: str, *args) -> int:
+    """Async SQL execute helper — uses asyncpg pool when available."""
+    return await _async_pg_pool.execute(sql, *args)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-org data isolation helpers
+# These functions provide org-scoped views over shared tables, enabling
+# multi-tenant query isolation without schema changes.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _get_org_member_usernames(org_id: str) -> list[str]:
+    """Return the list of usernames that belong to org_id."""
+    members = db_list_org_members(org_id)
+    return [str(m.get("username") or "") for m in members if m.get("username")]
+
+
+def get_org_chats(org_id: str, limit: int = 500) -> list[dict]:
+    """Return all chats belonging to members of org_id."""
+    usernames = _get_org_member_usernames(org_id)
+    if not usernames:
+        return []
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    placeholders = ",".join([ph] * len(usernames))
+    rows = _sql_fetchall(
+        f"SELECT * FROM chats WHERE username IN ({placeholders}) ORDER BY updated_at DESC LIMIT {int(limit)}",
+        tuple(usernames),
+    )
+    return [dict(r) for r in rows]
+
+
+def get_org_usage(org_id: str, days: int = 30) -> list[dict]:
+    """Return usage log rows for all members of org_id within the last N days."""
+    usernames = _get_org_member_usernames(org_id)
+    if not usernames:
+        return []
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    placeholders = ",".join([ph] * len(usernames))
+    import time as _t
+    since = _t.time() - days * 86400
+    rows = _sql_fetchall(
+        f"SELECT * FROM usage_log WHERE username IN ({placeholders}) AND ts >= {ph} ORDER BY ts DESC LIMIT 5000",
+        tuple(usernames) + (since,),
+    )
+    return [dict(r) for r in rows]
+
+
+def get_org_memory_entries(org_id: str, limit: int = 200) -> list[dict]:
+    """Return memory entries tagged to org_id (if the memory table has an org_id column)."""
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    try:
+        rows = _sql_fetchall(
+            f"SELECT * FROM memory WHERE org_id={ph} ORDER BY created_at DESC LIMIT {int(limit)}",
+            (org_id,),
+        )
+        return [dict(r) for r in rows]
+    except Exception:
+        # If the memory table doesn't have an org_id column yet, fall back to member query
+        usernames = _get_org_member_usernames(org_id)
+        if not usernames:
+            return []
+        placeholders = ",".join([ph] * len(usernames))
+        try:
+            rows = _sql_fetchall(
+                f"SELECT * FROM memory WHERE username IN ({placeholders}) ORDER BY created_at DESC LIMIT {int(limit)}",
+                tuple(usernames),
+            )
+            return [dict(r) for r in rows]
+        except Exception:
+            return []
+
+
+def tag_memory_with_org(entry_id: str, org_id: str) -> bool:
+    """Tag a memory entry with an org_id (best-effort; silently skips if column absent)."""
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    try:
+        _sql_execute(
+            f"ALTER TABLE memory ADD COLUMN org_id TEXT NOT NULL DEFAULT ''"
+        )
+    except Exception:
+        pass  # column already exists or not supported
+    try:
+        _sql_execute(
+            f"UPDATE memory SET org_id={ph} WHERE id={ph}",
+            (org_id, entry_id),
+        )
+        return True
+    except Exception:
+        return False
+
+
+def get_org_rag_documents(org_id: str) -> list[dict]:
+    """
+    Return all RAG corpus documents tagged with org_id.
+    Uses the vector store's metadata filter — no DB scan required.
+    Returns [] gracefully if RAG is not configured.
+    """
+    try:
+        from .rag.rag_system import get_rag_system
+        rag = get_rag_system()
+        vs = getattr(rag, "vector_store", None)
+        if vs is None:
+            return []
+        all_docs = vs.get_all_documents()
+        return [d for d in all_docs if str(d.get("metadata", {}).get("org_id", "")) == org_id]
+    except Exception:
+        return []
+
+
+def ingest_rag_for_org(text: str, org_id: str, source: str = "", metadata: dict | None = None) -> bool:
+    """
+    Ingest a text document into the RAG corpus tagged with org_id.
+    Wraps the RAG pipeline's ingest call and ensures org_id is always present in metadata.
+    """
+    try:
+        from .rag.rag_system import get_rag_system
+        rag = get_rag_system()
+        combined_meta = dict(metadata or {})
+        combined_meta["org_id"] = org_id
+        if source:
+            combined_meta["source"] = source
+        rag.ingest(text, metadata=combined_meta)
+        return True
+    except Exception:
+        return False
+

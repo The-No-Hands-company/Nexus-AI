@@ -11,6 +11,8 @@ Environment variables:
 """
 import os
 import multiprocessing
+import resource
+import logging
 
 _cpu = multiprocessing.cpu_count()
 
@@ -21,8 +23,9 @@ worker_connections = 1000
 timeout = int(os.getenv("WORKER_TIMEOUT", "120"))
 keepalive = 5
 graceful_timeout = 30
-max_requests = 1000
-max_requests_jitter = 50
+max_requests = int(os.getenv("WORKER_MAX_REQUESTS", "1000"))
+max_requests_jitter = int(os.getenv("WORKER_MAX_REQUESTS_JITTER", "100"))
+worker_tmp_dir = os.getenv("WORKER_TMP_DIR", "/dev/shm")
 
 # Logging
 accesslog = "-"
@@ -37,3 +40,25 @@ proc_name = "nexus-ai"
 limit_request_line = 8190
 limit_request_fields = 100
 limit_request_field_size = 8190
+
+
+def _rss_mb() -> float:
+    # ru_maxrss is KiB on Linux.
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+
+
+def worker_exit(server, worker):
+    server.log.info(
+        "worker_exit pid=%s requests=%s rss_mb=%.1f",
+        worker.pid,
+        worker.nr,
+        _rss_mb(),
+    )
+
+
+def worker_abort(worker):
+    logging.getLogger("gunicorn.error").error(
+        "worker_abort pid=%s rss_mb=%.1f",
+        worker.pid,
+        _rss_mb(),
+    )

@@ -150,6 +150,30 @@ def cancel_job(job_id: str) -> bool:
     return True
 
 
+def run_job_now(job_id: str) -> str:
+    """Immediately execute a scheduled job outside its normal interval."""
+    with _lock:
+        job = _jobs.get(job_id)
+    if not job:
+        raise ValueError(f"Job not found: {job_id}")
+    if job.status == "cancelled":
+        raise ValueError("Cannot run a cancelled job")
+    if not _run_fn:
+        raise RuntimeError("No run function registered")
+    result = _run_fn(job.task)
+    with _lock:
+        job.run_count += 1
+        job.last_run = datetime.utcnow().isoformat() + "Z"
+        log_entry = JobLog(run_at=job.last_run, status="ok",
+                           summary=str(result)[:300])
+        job.logs.append(log_entry)
+        job.history = getattr(job, "history", [])
+        job.history.append({"run_at": log_entry.run_at, "status": "ok",
+                             "summary": log_entry.summary, "trigger": "webhook"})
+    _persist_job(job)
+    return result or "ok"
+
+
 def pause_job(job_id: str) -> bool:
     with _lock:
         job = _jobs.get(job_id)
