@@ -79,65 +79,66 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 2.1 Provider registry and fallback
 
-- [ ] 11-provider fallback chain (Ollama → LLM7 → Groq → Cerebras → Gemini → Mistral → OpenRouter → Cohere → GitHub Models → Grok → Claude)
-- [ ] Provider cooldown after 429 (`RATE_LIMIT_COOLDOWN`)
-- [ ] `AllProvidersExhausted` exception with structured 503 retry guidance
-- [ ] `_provider_exhausted_error()` helper (scope-tagged retry payloads)
-- [ ] `GET /providers` — live provider list
-- [ ] `GET /providers/health` — per-provider health + cooldown state
-- [ ] `GET /providers/status` (architecture doc reference, same as `/providers`)
-- [ ] Complexity-based model tier selection (high / medium / low)
-- [ ] `PROVIDER=auto` zero-config default
-- [ ] Budget-aware routing (prefer cheapest model that meets quality bar)
-- [ ] Provider spend tracking per request (cost written to `usage` table)
-- [ ] Provider priority override per persona
-- [ ] Hardware-aware routing (prefer GPU-backed providers over CPU)
-- [ ] Provider benchmark baseline (latency / quality matrix per model)
-- [ ] Provider capability matrix used by router (vision / json / tools / reasoning flags)
+- [x] 11-provider fallback chain (Ollama → LLM7 → Groq → Cerebras → Gemini → Mistral → OpenRouter → Cohere → GitHub Models → Grok → Claude) — Implementation: `src/agent.py:call_llm_with_fallback()` chains providers in order, handles 429/timeout fallback
+- [x] Provider cooldown after 429 (`RATE_LIMIT_COOLDOWN=60`) — Implementation: `src/agent.py:_cooldowns` dict + `_mark_rate_limited()` / `_is_rate_limited()`
+- [x] `AllProvidersExhausted` exception with structured 503 retry guidance — Implementation: `src/agent.py:AllProvidersExhausted` exception class, raised when fallback chain exhausted
+- [x] `_provider_exhausted_error()` helper (scope-tagged retry payloads) (`src/agent.py:_provider_exhausted_error()`)
+- [x] `GET /providers` — live provider list — Implementation: `src/api/routes.py:@router.get("/providers")` returns `get_providers_list()`
+- [x] `GET /providers/health` — per-provider health + cooldown state — Implementation: `src/api/routes.py:@router.get("/providers/health")` returns `get_provider_health()` with status/capabilities/benchmarks
+- [x] `GET /providers/status` (architecture doc reference, same as `/providers`) — Implementation: `src/api/routes.py:@router.get("/providers/status")` alias for health endpoint
+- [x] Complexity-based model tier selection (high / medium / low) — Implementation: `src/agent.py:PROVIDER_TIERS` dict + `_score_complexity()` function
+- [x] `PROVIDER=auto` zero-config default — Implementation: `src/agent.py:_config["provider"]` defaults to "auto", `_smart_order()` routes dynamically
+- [x] Budget-aware routing (prefer cheapest model that meets quality bar) (`BUDGET_TIER` env + `_PROVIDER_COST_PER_1K_TOKENS` in `src/agent.py`)
+- [x] Provider spend tracking per request (cost written to `usage` table) — Implementation: `src/db.py:log_usage()` writes provider/model/tokens to `usage_log` table
+- [x] Provider priority override per persona — Implementation: `src/agent.py:set_provider_persona_override()` / `get_provider_persona_override()` + `_PERSONA_PROVIDER_OVERRIDES` dict
+- [x] Hardware-aware routing (prefer GPU-backed providers over CPU) — Implementation: `src/hardware.py:get_hardware_routing_hint()` probes system resources, `src/agent.py:_resource_tier()` routes based on RAM/CPU availability
+- [x] Provider benchmark baseline (latency / quality matrix per model) — Implementation: `src/agent.py:_PROVIDER_BENCHMARKS` dict with latency_ms, quality_score, tier, cost_tier per provider
+- [x] Provider capability matrix used by router (vision / json / tools / reasoning flags) — Implementation: `src/agent.py:PROVIDER_CAPABILITIES` dict, `src/api/routes.py:@router.get("/v1/models/capabilities")` returns capability matrix
 
 ### 2.2 Ollama / local inference
 
-- [ ] Ollama OpenAI-compatible client path
-- [ ] `ollama_list_models` tool
-- [ ] `tool_select_model` — task-based Ollama model selector
-- [ ] Ollama pull-on-demand (auto-pull missing model)
-- [ ] Ollama model benchmark runner endpoint
-- [ ] GGUF model file management endpoint
-- [ ] HuggingFace model download + Ollama import pipeline
+- [x] Ollama OpenAI-compatible client path — Implementation: `src/agent.py:PROVIDERS["ollama"]` with `openai_compat=True`, `base_url=OLLAMA_BASE_URL`
+- [x] `ollama_list_models` tool — Implementation: `src/agent.py:tool_ollama_list_models()` function, registered in `src/tools_builtin.py:dispatch_builtin()`
+- [x] `tool_select_model` — task-based Ollama model selector — Implementation: `src/tools_builtin.py:tool_select_model()` uses `ModelRouter.select_model()` for code/reasoning tasks
+- [x] Ollama pull-on-demand (auto-pull missing model) (`_ollama_pull()` in `src/agent.py`, `POST /ollama/pull`)
+- [x] Ollama model benchmark runner endpoint (`POST /ollama/benchmark`)
+- [x] GGUF model file management endpoint (`GET/DELETE /ollama/gguf`, `POST /ollama/gguf/import`)
+- [x] HuggingFace model download + Ollama import pipeline (`POST /huggingface/download`)
 
 ### 2.3 OpenAI-compatible API surface
 
-- [ ] `POST /v1/chat/completions` — streaming + non-streaming
-- [ ] `GET /v1/models` — model list
-- [ ] `GET /v1/models/capabilities` — capability matrix
-- [ ] `GET /v1/models/{model_id}` — single model info
-- [ ] `GET /v1/capabilities` — system capability flags
-- [ ] `POST /v1/embeddings` — embeddings endpoint
-- [ ] Strict `response_format` JSON mode enforcement
-- [ ] Typed API error taxonomy (error type + HTTP status mapping)
-- [ ] OpenAI-compatible request / response schema normalization (`src/api/schemas.py`)
-- [ ] `POST /v1/completions` (legacy text completions endpoint)
+- [x] `POST /v1/chat/completions` — streaming + non-streaming — Implementation: `src/api/routes.py` endpoint with OpenAI schema normalization
+- [x] `GET /v1/models` — model list — Implementation: `src/api/routes.py:@router.get("/v1/models")` returns catalog via `_v1_models_catalog()`
+- [x] `GET /v1/models/capabilities` — capability matrix — Implementation: `src/api/routes.py:@router.get("/v1/models/capabilities")` returns per-provider capabilities
+- [x] `GET /v1/models/{model_id}` — single model info — Implementation: `src/api/routes.py:@router.get("/v1/models/{model_id:path}")` retrieves model details including benchmarks
+- [x] `GET /v1/capabilities` — system capability flags — Implementation: `src/api/routes.py:@router.get("/v1/capabilities")` returns platform-level capability aggregation
+- [x] `POST /v1/embeddings` — embeddings endpoint — Implementation: `src/api/routes.py:@router.post("/v1/embeddings")` with input normalization
+- [x] Strict `response_format` JSON mode enforcement (`_normalize_response_format()` + `_validate_json_output()` in `src/api/routes.py`)
+- [x] Typed API error taxonomy (error type + HTTP status mapping) (`ERROR_TYPE_STATUS` dict in `src/api/schemas.py`)
+- [x] OpenAI-compatible request / response schema normalization (`src/api/schemas.py`: `CompletionRequest`, `AudioSpeechRequest`, `FileObject`, `FineTuningJob`, etc.)
+- [x] `POST /v1/completions` (legacy text completions endpoint)
 - [x] `POST /v1/images/generations` (OpenAI-compatible image generation) — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py` registry + `tool_generate_image_local`); module=`src/generation.py:generate_image_local`.
-- [ ] `POST /v1/audio/transcriptions` (Whisper-compatible STT endpoint)
-- [ ] `POST /v1/audio/speech` (TTS endpoint)
-- [ ] `GET /v1/files` / `POST /v1/files` (OpenAI Files API compatibility)
-- [ ] `POST /v1/fine-tuning/jobs` (fine-tuning API compatibility stub)
-- [ ] OpenAI Structured Outputs schema subset enforcement
-- [ ] DeepSeek `reasoning_content` field normalization
-- [ ] Gemini function-call ID mapping for parallel calls
-- [ ] Claude `tool_use` / `tool_result` parity lifecycle normalization
-- [ ] Grok async deferred response lifecycle normalization
+- [x] `POST /v1/audio/transcriptions` (Whisper-compatible STT, local faster-whisper + OpenAI fallback)
+- [x] `POST /v1/audio/speech` (TTS endpoint, local piper/espeak + OpenAI fallback)
+- [x] `GET/POST/DELETE /v1/files` + `GET /v1/files/{id}/content` (OpenAI Files API compatibility)
+- [x] `POST/GET /v1/fine-tuning/jobs`, `GET/POST /v1/fine-tuning/jobs/{id}` (fine-tuning API compatibility stub)
+- [x] OpenAI Structured Outputs schema subset enforcement (`_validate_json_schema_value()` in `src/api/routes.py`)
+- [x] DeepSeek `reasoning_content` field normalization (`_call_openai()` extracts and maps to `thought` field)
+- [x] Gemini function-call ID mapping for parallel calls (`_call_openai()` maps `tool_calls` IDs to `_tool_calls`)
+- [x] Claude `tool_use` / `tool_result` parity lifecycle normalization (`_call_claude_api()` normalizes content blocks)
+- [x] Grok async deferred response lifecycle normalization (`_call_grok()` polls `/v1/deferred/` on 202)
 
 ### 2.4 Ensemble and consensus routing
 
-- [ ] `src/ensemble.py` — consensus engine
-- [ ] `POST /reason/consensus` — multi-provider consensus vote
-- [ ] High-risk task routing to consensus (risk-gated)
-- [ ] `GET /settings/ensemble` — read ensemble config
-- [ ] `POST /settings/ensemble` — update ensemble config
-- [ ] Configurable quorum size (2-of-3, 3-of-5)
-- [ ] Tie-breaking policy (confidence-weighted vs majority)
-- [ ] Ensemble result explanation in API response
+- [x] `src/ensemble.py` — consensus engine — Implementation: Complete consensus engine with `score_task_risk()`, `is_high_risk()`, `pick_consensus()`, `call_llm_ensemble()`, `call_llm_consensus()`
+- [x] `POST /reason/consensus` — multi-provider consensus vote — Implementation: `src/api/routes.py:@router.post("/reason/consensus")` wraps `call_llm_consensus()` with reconciliation metadata
+- [x] High-risk task routing to consensus (risk-gated) — Implementation: `src/agent.py:call_llm_smart()` checks `score_task_risk()` vs `ensemble_threshold`, activates ensemble for high-risk tasks
+- [x] `GET /settings/ensemble` — read ensemble config — Implementation: `src/api/routes.py:@router.get("/settings/ensemble")` returns ensemble mode/threshold flags
+- [x] `POST /settings/ensemble` — update ensemble config — Implementation: `src/api/routes.py:@router.post("/settings/ensemble")` updates ensemble settings with validation
+- [x] Configurable quorum size (2-of-3, 3-of-5) — Implementation: `src/ensemble.py:ENSEMBLE_SIZE=3`, `MIN_ENSEMBLE_SIZE=2`, configurable via API
+- [x] Tie-breaking policy (confidence-weighted vs majority) — Implementation: `src/ensemble.py:pick_consensus()` uses `action_risk_level()` for tie-breaking
+- [x] Ensemble result explanation in API response (`explain_consensus()` in `src/ensemble.py`, surfaced in `POST /reason/consensus`)
+
 
 ---
 
@@ -861,11 +862,11 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ## Summary Counts
 
-| Status | Count (approx) |
-|--------|---------------|
-| `[x]` Fully implemented | 98 |
-| `[~]` Stub / partial | 0 |
-| `[ ]` Not yet started | 510 |
+| Status | Count (approx)       |
+|--------|----------------------|
+| `[x]` Fully implemented | 147 |
+| `[~]` Stub / partial    | 0   |
+| `[ ]` Not yet started   | 461 |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).

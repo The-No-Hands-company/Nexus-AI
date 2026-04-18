@@ -6,7 +6,7 @@ from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSO
 from pydantic import ValidationError
 
 router = APIRouter()
-from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_config, update_config, call_llm_with_fallback, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event, AllProvidersExhausted)
+from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_provider_health, get_provider_capabilities, set_provider_persona_override, get_provider_persona_override, get_config, update_config, call_llm_with_fallback, call_llm_smart, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event, AllProvidersExhausted)
 from ..approvals import list_tool_approvals, decide_tool_approval
 from ..auth import JWT_SECRET, JWT_ALGO, JWT_EXPIRE_H, AuthManager, MULTI_USER
 from ..scheduler import (
@@ -749,6 +749,49 @@ def system_resources(): return get_system_resources()
 
 @router.get("/providers")
 def providers(): return {"providers":get_providers_list()}
+
+
+@router.get("/providers/health")
+def providers_health():
+    """Return per-provider health status including rate limits, capabilities, and benchmarks."""
+    return get_provider_health()
+
+
+@router.get("/providers/status")
+def providers_status():
+    """Alias for /providers/health - same as /providers but with detailed health info."""
+    return get_provider_health()
+
+
+@router.get("/v1/models/capabilities")
+def v1_models_capabilities():
+    """Return capability matrix for all providers (vision, json_mode, tools, reasoning, streaming)."""
+    return get_provider_capabilities()
+
+
+@router.get("/v1/models/{model_id}")
+def v1_get_model(model_id: str):
+    """Get detailed info for a specific model."""
+    from ..agent import PROVIDERS, PROVIDER_CAPABILITIES, _PROVIDER_BENCHMARKS
+    # Try to find the model in providers
+    for pid, cfg in PROVIDERS.items():
+        if cfg["default_model"] == model_id or pid == model_id:
+            benchmarks = _PROVIDER_BENCHMARKS.get(pid, {})
+            return {
+                "id": model_id,
+                "provider": pid,
+                "label": cfg["label"],
+                "default_model": cfg["default_model"],
+                "openai_compat": cfg.get("openai_compat", False),
+                "capabilities": PROVIDER_CAPABILITIES.get(pid, {}),
+                "benchmarks": {
+                    "estimated_latency_ms": benchmarks.get("latency_ms", 0),
+                    "quality_score": benchmarks.get("quality", 0),
+                    "tier": benchmarks.get("tier", "unknown"),
+                    "cost_tier": benchmarks.get("cost_tier", "unknown"),
+                }
+            }
+    return _api_error(f"Model not found: {model_id}", "model_not_found", 404)
 
 
 # ── Swarm View ────────────────────────────────────────────────────────────────
@@ -1955,12 +1998,20 @@ async def reason_consensus(request: Request):
             is_rate_limited_fn=_is_rate_limited,
             mark_rate_limited_fn=_mark_rate_limited,
         )
+        from ..ensemble import explain_consensus
+        explanation = explain_consensus(
+            chosen={"action": "respond", "content": consensus_text},
+            winning_pid=winning_pid,
+            unanimous=meta.get("unanimous", True),
+            meta=meta,
+        )
         return {
             "consensus": consensus_text,
             "provider":  winning_pid,
             "ensemble":  meta.get("ensemble", False),
             "unanimous": meta.get("unanimous"),
             "polled":    meta.get("polled", []),
+            "explanation": explanation,
         }
     except Exception as exc:
         return _api_error(str(exc), "consensus_error", 500)
@@ -5070,4 +5121,721 @@ async def admin_reset_quota(username: str, request: Request):
             "DELETE FROM user_prefs WHERE key LIKE %s", (f"quota.requests_used.{username}.%",)
         )
     return {"ok": True, "username": username, "reset_at": datetime.now(timezone.utc).isoformat()}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /v1/completions  — legacy OpenAI text completions endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/v1/completions")
+async def v1_completions(request: Request):
+    """Legacy OpenAI-compatible text completions (non-chat) endpoint."""
+    from .schemas import CompletionRequest, CompletionChoice, CompletionResponse
+    try:
+        body = await request.json()
+    except Exception:
+        return _v1_error("invalid JSON body", "invalid_request_error", 400)
+
+    try:
+        payload = CompletionRequest(**body)
+    except Exception as exc:
+        return _v1_error(str(exc), "validation_error", 422)
+
+    principal = _principal_from_request(request, payload_user=payload.user or "")
+    rate_result = _evaluate_rate_limit(principal)
+    if not rate_result.get("allowed", True):
+        return _v1_quota_error_response(rate_result)
+
+    prompt = payload.prompt_text()
+    if not prompt:
+        return _v1_error("prompt is required", "invalid_request_error", 422)
+
+    cid = f"cmpl-{uuid.uuid4().hex[:12]}"
+    created = int(time.time())
+
+    if payload.stream:
+        stop_evt = threading.Event()
+        loop = asyncio.get_event_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def _run():
+            try:
+                for evt in stream_agent_task(prompt, [], [], stop_evt):
+                    loop.call_soon_threadsafe(queue.put_nowait, evt)
+            except Exception as e:
+                loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": str(e)})
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+        async def _gen():
+            while True:
+                evt = await queue.get()
+                if evt is None:
+                    break
+                etype = evt.get("type", "")
+                text = None
+                finish = None
+                if etype == "done":
+                    text = evt.get("content", "")
+                    finish = "stop"
+                elif etype == "think":
+                    text = ""
+                elif etype == "error":
+                    text = evt.get("message", "")
+                    finish = "stop"
+                if text is not None:
+                    chunk = {
+                        "id": cid, "object": "text_completion",
+                        "created": created, "model": payload.model,
+                        "choices": [{"text": text, "index": 0, "finish_reason": finish, "logprobs": None}],
+                    }
+                    yield f"data: {json.dumps(chunk)}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(_gen(), media_type="text/event-stream",
+                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    result = run_agent_task(prompt, [], [], sid=f"cmpl-{uuid.uuid4().hex[:8]}")
+    output = result.get("result", "")
+    prompt_tokens = _estimate_text_tokens(prompt)
+    completion_tokens = _estimate_text_tokens(output)
+    return {
+        "id": cid,
+        "object": "text_completion",
+        "created": created,
+        "model": payload.model,
+        "choices": [{"text": output, "index": 0, "finish_reason": "stop", "logprobs": None}],
+        "usage": {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": prompt_tokens + completion_tokens,
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /v1/audio/transcriptions  — Whisper-compatible STT
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/v1/audio/transcriptions")
+async def v1_audio_transcriptions(request: Request):
+    """Whisper-compatible STT. Tries local faster-whisper/whisper, falls back to
+    provider (OpenAI Whisper API if OPENAI_API_KEY is set)."""
+    from fastapi import UploadFile
+    import tempfile, os as _os
+
+    form = await request.form()
+    file_field = form.get("file")
+    model = str(form.get("model", "whisper-1"))
+    language = str(form.get("language", "")) or None
+    response_format = str(form.get("response_format", "json"))
+
+    if file_field is None:
+        return _v1_error("file is required", "invalid_request_error", 422)
+
+    audio_bytes = await file_field.read()  # type: ignore[union-attr]
+    filename = getattr(file_field, "filename", "audio.wav")
+
+    # Try local faster-whisper first
+    try:
+        from faster_whisper import WhisperModel  # type: ignore
+        with tempfile.NamedTemporaryFile(suffix=_os.path.splitext(filename)[1] or ".wav", delete=False) as tmp:
+            tmp.write(audio_bytes)
+            tmp_path = tmp.name
+        try:
+            wm = WhisperModel("base", device="auto", compute_type="auto")
+            kwargs = {}
+            if language:
+                kwargs["language"] = language
+            segments, info = wm.transcribe(tmp_path, **kwargs)
+            transcript = " ".join(seg.text for seg in segments)
+            if response_format == "text":
+                return transcript
+            return {"text": transcript, "language": info.language, "duration": info.duration}
+        finally:
+            _os.unlink(tmp_path)
+    except ImportError:
+        pass
+    except Exception as exc:
+        print(f"⚠️ local whisper failed: {exc}")
+
+    # Fallback: OpenAI Whisper API
+    openai_key = _os.getenv("OPENAI_API_KEY", "")
+    if openai_key:
+        import requests as _req
+        resp = _req.post(
+            "https://api.openai.com/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {openai_key}"},
+            files={"file": (filename, audio_bytes)},
+            data={"model": "whisper-1", **({"language": language} if language else {})},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        if response_format == "text":
+            return data.get("text", "")
+        return {"text": data.get("text", ""), "language": language}
+
+    return _v1_error(
+        "No local Whisper installation found and OPENAI_API_KEY is not set. "
+        "Install faster-whisper (`pip install faster-whisper`) or set OPENAI_API_KEY.",
+        "model_error", 503,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# POST /v1/audio/speech  — TTS endpoint
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/v1/audio/speech")
+async def v1_audio_speech(request: Request):
+    """OpenAI-compatible TTS. Tries local piper/espeak, falls back to
+    provider (OpenAI TTS API if OPENAI_API_KEY is set)."""
+    import os as _os, subprocess as _sp, tempfile
+    try:
+        body = await request.json()
+    except Exception:
+        return _v1_error("invalid JSON body", "invalid_request_error", 400)
+
+    text = str(body.get("input", "")).strip()
+    voice = str(body.get("voice", "alloy"))
+    fmt = str(body.get("response_format", "mp3")).lower()
+    speed = float(body.get("speed", 1.0))
+
+    if not text:
+        return _v1_error("input is required", "invalid_request_error", 422)
+
+    # Try local piper-tts
+    piper_bin = _os.getenv("PIPER_BIN", "piper")
+    piper_model = _os.getenv("PIPER_MODEL", "")
+    try:
+        if piper_model:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp_path = tmp.name
+            try:
+                _sp.run(
+                    [piper_bin, "--model", piper_model, "--output_file", tmp_path],
+                    input=text.encode(), check=True, timeout=60,
+                    capture_output=True,
+                )
+                with open(tmp_path, "rb") as f:
+                    audio_bytes = f.read()
+                return StreamingResponse(
+                    iter([audio_bytes]),
+                    media_type="audio/wav",
+                    headers={"Content-Disposition": f'attachment; filename="speech.wav"'},
+                )
+            finally:
+                _os.unlink(tmp_path)
+    except (FileNotFoundError, _sp.CalledProcessError, _sp.TimeoutExpired):
+        pass
+
+    # Try espeak fallback (returns PCM, convert to wav header)
+    try:
+        result = _sp.run(
+            ["espeak", "-v", "en", "--stdout", text],
+            capture_output=True, timeout=30, check=True,
+        )
+        return StreamingResponse(
+            iter([result.stdout]),
+            media_type="audio/wav",
+            headers={"Content-Disposition": 'attachment; filename="speech.wav"'},
+        )
+    except (FileNotFoundError, _sp.CalledProcessError, _sp.TimeoutExpired):
+        pass
+
+    # Fallback: OpenAI TTS API
+    openai_key = _os.getenv("OPENAI_API_KEY", "")
+    if openai_key:
+        import requests as _req
+        resp = _req.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={"Authorization": f"Bearer {openai_key}", "Content-Type": "application/json"},
+            json={"model": "tts-1", "input": text, "voice": voice,
+                  "response_format": fmt, "speed": speed},
+            timeout=120,
+        )
+        resp.raise_for_status()
+        media_map = {"mp3": "audio/mpeg", "opus": "audio/opus", "aac": "audio/aac",
+                     "flac": "audio/flac", "wav": "audio/wav", "pcm": "audio/pcm"}
+        return StreamingResponse(
+            iter([resp.content]),
+            media_type=media_map.get(fmt, "audio/mpeg"),
+            headers={"Content-Disposition": f'attachment; filename="speech.{fmt}"'},
+        )
+
+    return _v1_error(
+        "No local TTS engine found and OPENAI_API_KEY is not set. "
+        "Install piper-tts or set OPENAI_API_KEY.",
+        "model_error", 503,
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Files API  — OpenAI-compatible file storage (/v1/files)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FILES_DIR = os.path.join(os.getenv("DATA_DIR", "/data"), "files")
+
+
+def _ensure_files_dir():
+    os.makedirs(_FILES_DIR, exist_ok=True)
+
+
+def _file_meta_path(file_id: str) -> str:
+    return os.path.join(_FILES_DIR, f"{file_id}.meta.json")
+
+
+def _load_file_meta(file_id: str) -> dict | None:
+    p = _file_meta_path(file_id)
+    if not os.path.exists(p):
+        return None
+    with open(p) as f:
+        return json.load(f)
+
+
+def _list_file_metas() -> list:
+    _ensure_files_dir()
+    metas = []
+    for name in os.listdir(_FILES_DIR):
+        if name.endswith(".meta.json"):
+            try:
+                with open(os.path.join(_FILES_DIR, name)) as f:
+                    metas.append(json.load(f))
+            except Exception:
+                pass
+    return sorted(metas, key=lambda m: m.get("created_at", 0), reverse=True)
+
+
+@router.get("/v1/files")
+def v1_list_files(request: Request, purpose: str = ""):
+    _ensure_files_dir()
+    metas = _list_file_metas()
+    if purpose:
+        metas = [m for m in metas if m.get("purpose") == purpose]
+    return {"object": "list", "data": metas}
+
+
+@router.post("/v1/files")
+async def v1_upload_file(request: Request):
+    _ensure_files_dir()
+    form = await request.form()
+    file_field = form.get("file")
+    purpose = str(form.get("purpose", "assistants"))
+
+    if file_field is None:
+        return _v1_error("file is required", "invalid_request_error", 422)
+
+    raw = await file_field.read()  # type: ignore[union-attr]
+    filename = getattr(file_field, "filename", "upload.bin")
+    file_id = f"file-{uuid.uuid4().hex[:16]}"
+    created_at = int(time.time())
+
+    data_path = os.path.join(_FILES_DIR, file_id)
+    with open(data_path, "wb") as fh:
+        fh.write(raw)
+
+    meta = {
+        "id": file_id,
+        "object": "file",
+        "bytes": len(raw),
+        "created_at": created_at,
+        "filename": filename,
+        "purpose": purpose,
+        "status": "processed",
+    }
+    with open(_file_meta_path(file_id), "w") as fh:
+        json.dump(meta, fh)
+
+    return meta
+
+
+@router.get("/v1/files/{file_id}")
+def v1_get_file(file_id: str):
+    meta = _load_file_meta(file_id)
+    if meta is None:
+        return _v1_error("file not found", "not_found_error", 404)
+    return meta
+
+
+@router.delete("/v1/files/{file_id}")
+def v1_delete_file(file_id: str):
+    meta = _load_file_meta(file_id)
+    if meta is None:
+        return _v1_error("file not found", "not_found_error", 404)
+    for path in (_file_meta_path(file_id), os.path.join(_FILES_DIR, file_id)):
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+    return {"id": file_id, "object": "file", "deleted": True}
+
+
+@router.get("/v1/files/{file_id}/content")
+def v1_get_file_content(file_id: str):
+    meta = _load_file_meta(file_id)
+    if meta is None:
+        return _v1_error("file not found", "not_found_error", 404)
+    data_path = os.path.join(_FILES_DIR, file_id)
+    if not os.path.exists(data_path):
+        return _v1_error("file content not found", "not_found_error", 404)
+    return FileResponse(data_path, filename=meta.get("filename", file_id))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fine-tuning API  — compatibility stub (/v1/fine-tuning/jobs)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_FINETUNE_JOBS: dict = {}  # in-memory store (non-persistent stub)
+
+
+@router.post("/v1/fine-tuning/jobs")
+async def v1_create_fine_tuning_job(request: Request):
+    """OpenAI fine-tuning API compatibility stub.
+    Validates the request and returns a queued job object. Actual fine-tuning
+    is not executed; this endpoint exists for API surface parity."""
+    from .schemas import FineTuningRequest, FineTuningJob
+    try:
+        body = await request.json()
+        payload = FineTuningRequest(**body)
+    except Exception as exc:
+        return _v1_error(str(exc), "validation_error", 422)
+
+    if not _load_file_meta(payload.training_file):
+        return _v1_error(
+            f"training_file '{payload.training_file}' not found. Upload it via POST /v1/files first.",
+            "invalid_request_error", 400,
+        )
+
+    job = FineTuningJob(
+        model=payload.model,
+        training_file=payload.training_file,
+        validation_file=payload.validation_file,
+        hyperparameters=payload.hyperparameters or {},
+        status="queued",
+    )
+    _FINETUNE_JOBS[job.id] = job.model_dump()
+    return job.model_dump()
+
+
+@router.get("/v1/fine-tuning/jobs")
+def v1_list_fine_tuning_jobs(limit: int = 20, after: str = ""):
+    jobs = list(_FINETUNE_JOBS.values())
+    if after:
+        idx = next((i for i, j in enumerate(jobs) if j["id"] == after), -1)
+        if idx >= 0:
+            jobs = jobs[idx + 1:]
+    return {"object": "list", "data": jobs[:limit], "has_more": len(jobs) > limit}
+
+
+@router.get("/v1/fine-tuning/jobs/{job_id}")
+def v1_get_fine_tuning_job(job_id: str):
+    job = _FINETUNE_JOBS.get(job_id)
+    if job is None:
+        return _v1_error("fine-tuning job not found", "not_found_error", 404)
+    return job
+
+
+@router.post("/v1/fine-tuning/jobs/{job_id}/cancel")
+def v1_cancel_fine_tuning_job(job_id: str):
+    job = _FINETUNE_JOBS.get(job_id)
+    if job is None:
+        return _v1_error("fine-tuning job not found", "not_found_error", 404)
+    job["status"] = "cancelled"
+    return job
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Ollama management endpoints
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ollama_base() -> str:
+    return os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1").rstrip("/").removesuffix("/v1")
+
+
+@router.post("/ollama/pull")
+async def ollama_pull_model(request: Request):
+    """Pull (download) an Ollama model on demand.
+    POST body: {"model": "llama3.2:3b", "stream": false}
+    """
+    import requests as _req
+    try:
+        body = await request.json()
+    except Exception:
+        return _api_error("invalid JSON body", "validation_error", 400)
+
+    model = str(body.get("model", "")).strip()
+    if not model:
+        return _api_error("model is required", "validation_error", 422)
+
+    stream = bool(body.get("stream", False))
+    base = _ollama_base()
+
+    if stream:
+        def _pull_stream():
+            try:
+                r = _req.post(f"{base}/api/pull",
+                              json={"name": model, "stream": True},
+                              stream=True, timeout=600)
+                r.raise_for_status()
+                for line in r.iter_lines():
+                    if line:
+                        yield line.decode() + "\n"
+            except Exception as exc:
+                yield json.dumps({"error": str(exc)}) + "\n"
+
+        return StreamingResponse(_pull_stream(), media_type="application/x-ndjson")
+
+    try:
+        r = _req.post(f"{base}/api/pull", json={"name": model, "stream": False}, timeout=600)
+        r.raise_for_status()
+        return {"ok": True, "model": model, "status": r.json().get("status", "success")}
+    except Exception as exc:
+        return _api_error(f"Ollama pull failed: {exc}", "model_error", 502)
+
+
+@router.post("/ollama/benchmark")
+async def ollama_benchmark(request: Request):
+    """Run a latency benchmark against one or more local Ollama models.
+    POST body: {"models": ["llama3.2:3b"], "prompt": "Say hello.", "runs": 3}
+    """
+    import requests as _req, time as _t
+    try:
+        body = await request.json()
+    except Exception:
+        return _api_error("invalid JSON body", "validation_error", 400)
+
+    models = body.get("models") or []
+    if not models:
+        # Default: benchmark all locally available models
+        try:
+            r = _req.get(f"{_ollama_base()}/v1/models", timeout=5)
+            if r.status_code == 200:
+                models = [m["id"] for m in r.json().get("data", [])]
+        except Exception:
+            pass
+    if not models:
+        return _api_error("no models specified and no local models found", "validation_error", 422)
+
+    prompt = str(body.get("prompt", "Say hello in one sentence."))
+    runs = max(1, min(int(body.get("runs", 3)), 10))
+    base = _ollama_base()
+
+    results = []
+    for model_name in models[:10]:  # cap at 10 models
+        latencies = []
+        error = None
+        for _ in range(runs):
+            t0 = _t.time()
+            try:
+                r = _req.post(
+                    f"{base}/v1/chat/completions",
+                    json={"model": model_name,
+                          "messages": [{"role": "user", "content": prompt}],
+                          "max_tokens": 64, "stream": False},
+                    timeout=60,
+                )
+                r.raise_for_status()
+                latencies.append(round((_t.time() - t0) * 1000))
+            except Exception as exc:
+                error = str(exc)
+                break
+        results.append({
+            "model": model_name,
+            "runs": len(latencies),
+            "avg_ms": round(sum(latencies) / len(latencies)) if latencies else None,
+            "min_ms": min(latencies, default=None),
+            "max_ms": max(latencies, default=None),
+            "error": error,
+        })
+
+    return {"object": "benchmark_results", "models": results, "prompt": prompt}
+
+
+# ── GGUF model file management ────────────────────────────────────────────────
+
+_GGUF_DIR = os.path.join(os.getenv("DATA_DIR", "/data"), "models")
+
+
+def _ensure_gguf_dir():
+    os.makedirs(_GGUF_DIR, exist_ok=True)
+
+
+@router.get("/ollama/gguf")
+def ollama_list_gguf():
+    """List GGUF model files stored in the data/models directory."""
+    _ensure_gguf_dir()
+    files = []
+    for name in os.listdir(_GGUF_DIR):
+        if name.lower().endswith(".gguf"):
+            path = os.path.join(_GGUF_DIR, name)
+            stat = os.stat(path)
+            files.append({
+                "filename": name,
+                "size_bytes": stat.st_size,
+                "modified_at": int(stat.st_mtime),
+                "path": path,
+            })
+    return {"object": "list", "data": sorted(files, key=lambda f: f["filename"])}
+
+
+@router.post("/ollama/gguf/import")
+async def ollama_import_gguf(request: Request):
+    """Import a GGUF file into Ollama via `ollama create`.
+    POST body: {"filename": "model.gguf", "name": "my-model:latest"}
+    The file must already be in the data/models directory.
+    """
+    import subprocess as _sp
+    try:
+        body = await request.json()
+    except Exception:
+        return _api_error("invalid JSON body", "validation_error", 400)
+
+    filename = str(body.get("filename", "")).strip()
+    model_name = str(body.get("name", "")).strip()
+    if not filename or not model_name:
+        return _api_error("filename and name are required", "validation_error", 422)
+
+    gguf_path = os.path.join(_GGUF_DIR, filename)
+    if not os.path.exists(gguf_path) or not filename.lower().endswith(".gguf"):
+        return _api_error(f"GGUF file '{filename}' not found in data/models/", "not_found_error", 404)
+
+    # Write a minimal Modelfile
+    modelfile_content = f"FROM {gguf_path}\n"
+    modelfile_path = gguf_path + ".Modelfile"
+    try:
+        with open(modelfile_path, "w") as mf:
+            mf.write(modelfile_content)
+        result = _sp.run(
+            ["ollama", "create", model_name, "-f", modelfile_path],
+            capture_output=True, text=True, timeout=300,
+        )
+        if result.returncode != 0:
+            return _api_error(f"ollama create failed: {result.stderr}", "model_error", 502)
+        return {"ok": True, "model": model_name, "gguf": filename, "output": result.stdout.strip()}
+    except FileNotFoundError:
+        return _api_error("ollama CLI not found in PATH", "model_error", 503)
+    except Exception as exc:
+        return _api_error(str(exc), "model_error", 500)
+    finally:
+        try:
+            os.unlink(modelfile_path)
+        except Exception:
+            pass
+
+
+@router.delete("/ollama/gguf/{filename}")
+def ollama_delete_gguf(filename: str):
+    """Delete a GGUF file from the data/models directory."""
+    if ".." in filename or "/" in filename:
+        return _api_error("invalid filename", "invalid_request_error", 400)
+    path = os.path.join(_GGUF_DIR, filename)
+    if not os.path.exists(path):
+        return _api_error(f"GGUF file '{filename}' not found", "not_found_error", 404)
+    os.unlink(path)
+    return {"ok": True, "deleted": filename}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HuggingFace download + Ollama import pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+@router.post("/huggingface/download")
+async def huggingface_download(request: Request):
+    """Download a GGUF model from HuggingFace Hub and optionally import it into Ollama.
+
+    POST body:
+      {
+        "repo_id":   "bartowski/Llama-3.2-3B-Instruct-GGUF",
+        "filename":  "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        "ollama_name": "llama3.2-3b:q4"   // optional — if set, auto-imports after download
+      }
+
+    Requires huggingface_hub (`pip install huggingface_hub`) or wget fallback.
+    """
+    import subprocess as _sp
+    try:
+        body = await request.json()
+    except Exception:
+        return _api_error("invalid JSON body", "validation_error", 400)
+
+    repo_id = str(body.get("repo_id", "")).strip()
+    filename = str(body.get("filename", "")).strip()
+    ollama_name = str(body.get("ollama_name", "")).strip()
+
+    if not repo_id or not filename:
+        return _api_error("repo_id and filename are required", "validation_error", 422)
+    if not filename.lower().endswith(".gguf"):
+        return _api_error("filename must be a .gguf file", "validation_error", 422)
+    if ".." in filename or "/" in filename:
+        return _api_error("invalid filename", "invalid_request_error", 400)
+
+    _ensure_gguf_dir()
+    dest_path = os.path.join(_GGUF_DIR, filename)
+
+    # Try huggingface_hub first
+    try:
+        from huggingface_hub import hf_hub_download  # type: ignore
+        hf_token = os.getenv("HF_TOKEN", "") or None
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            local_dir=_GGUF_DIR,
+            token=hf_token,
+        )
+    except ImportError:
+        # Fallback: direct HTTPS download via requests
+        import requests as _req
+        hf_token = os.getenv("HF_TOKEN", "")
+        url = f"https://huggingface.co/{repo_id}/resolve/main/{filename}"
+        headers = {"Authorization": f"Bearer {hf_token}"} if hf_token else {}
+        try:
+            with _req.get(url, headers=headers, stream=True, timeout=30) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("content-length", 0))
+                downloaded = 0
+                with open(dest_path, "wb") as fh:
+                    for chunk in r.iter_content(chunk_size=8192):
+                        fh.write(chunk)
+                        downloaded += len(chunk)
+        except Exception as exc:
+            return _api_error(f"Download failed: {exc}", "model_error", 502)
+    except Exception as exc:
+        return _api_error(f"HuggingFace download failed: {exc}", "model_error", 502)
+
+    result: dict = {
+        "ok": True,
+        "repo_id": repo_id,
+        "filename": filename,
+        "path": dest_path,
+        "size_bytes": os.path.getsize(dest_path),
+    }
+
+    # Auto-import into Ollama if ollama_name is provided
+    if ollama_name:
+        modelfile_path = dest_path + ".Modelfile"
+        try:
+            with open(modelfile_path, "w") as mf:
+                mf.write(f"FROM {dest_path}\n")
+            proc = _sp.run(
+                ["ollama", "create", ollama_name, "-f", modelfile_path],
+                capture_output=True, text=True, timeout=300,
+            )
+            if proc.returncode == 0:
+                result["ollama_import"] = {"ok": True, "model": ollama_name}
+            else:
+                result["ollama_import"] = {"ok": False, "error": proc.stderr.strip()}
+        except FileNotFoundError:
+            result["ollama_import"] = {"ok": False, "error": "ollama CLI not found in PATH"}
+        except Exception as exc:
+            result["ollama_import"] = {"ok": False, "error": str(exc)}
+        finally:
+            try:
+                os.unlink(modelfile_path)
+            except Exception:
+                pass
+
+    return result
 

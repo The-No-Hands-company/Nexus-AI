@@ -197,6 +197,30 @@ PROVIDER_TIERS = {
     "low":    ["llm7","groq","cerebras"],
 }
 
+# ── budget-aware routing ───────────────────────────────────────────────────────
+# Approximate cost in USD per 1K output tokens (used for budget-tier filtering)
+_PROVIDER_COST_PER_1K_TOKENS: Dict[str, float] = {
+    "ollama":        0.000,
+    "llm7":          0.000,
+    "github_models": 0.000,
+    "groq":          0.001,
+    "cerebras":      0.001,
+    "cohere":        0.002,
+    "mistral":       0.002,
+    "nvidia":        0.003,
+    "gemini":        0.004,
+    "openrouter":    0.005,
+    "grok":          0.010,
+    "claude":        0.015,
+}
+BUDGET_TIER: str = os.getenv("BUDGET_TIER", "any").lower()   # free | low | medium | any
+_BUDGET_MAX_COST: Dict[str, float] = {
+    "free":   0.000,
+    "low":    0.002,
+    "medium": 0.008,
+    "any":    999.0,
+}
+
 # ── Mixture-of-Experts specialization routing ─────────────────────────────────
 PROVIDER_SPECIALIZATIONS: Dict[str, List[str]] = {
     "coding":    ["ollama", "claude", "groq", "cerebras", "github_models"],
@@ -535,6 +559,13 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
         if pid in avail and pid not in ordered: ordered.append(pid)
     if pref != "auto" and pref in ordered:
         ordered.remove(pref); ordered.insert(0, pref)
+
+    # Budget-aware filtering: drop providers that exceed the cost ceiling
+    if BUDGET_TIER != "any":
+        max_cost = _BUDGET_MAX_COST.get(BUDGET_TIER, 999.0)
+        affordable = [pid for pid in ordered if _PROVIDER_COST_PER_1K_TOKENS.get(pid, 0.0) <= max_cost]
+        if affordable:
+            ordered = affordable
 
     # Mixture-of-Experts: boost specialist providers to front when task type detected
     if pref == "auto" and resource_hint != "constrained":
@@ -1251,30 +1282,106 @@ def _messages_token_estimate(messages: List[Dict]) -> int:
     return total
 
 
+def _ollama_pull(model: str, base_url: str) -> None:
+    """Auto-pull a missing Ollama model (pull-on-demand)."""
+    import requests as _req
+    ollama_base = base_url.rstrip("/")
+    if ollama_base.endswith("/v1"):
+        ollama_base = ollama_base[:-3]
+    print(f"🔄 Ollama pull-on-demand: {model}")
+    try:
+        r = _req.post(f"{ollama_base}/api/pull", json={"name": model, "stream": False}, timeout=600)
+        r.raise_for_status()
+        print(f"✅ Pulled {model}")
+    except Exception as exc:
+        print(f"⚠️ Could not pull {model}: {exc}")
+        raise
+
+
 def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
     import requests
     api_key = os.getenv(cfg["env_key"],"") or ("llm7" if cfg.get("keyless") else "")
-    # Use auto-selected Ollama model when available, otherwise fall back normally
     model = _config["model"] or cfg.get("_selected_model") or cfg["default_model"]
-    resp = requests.post(
-        cfg["base_url"].rstrip("/")+"/chat/completions",
-        headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"},
-        json={"model": model,
-              "messages":[{"role":"system","content":get_system_prompt()}]+messages,
-              "temperature":_config["temperature"],"max_tokens":4096},
-        timeout=90)
+    is_local = cfg.get("local") and cfg.get("keyless")
+
+    def _do_request():
+        r = requests.post(
+            cfg["base_url"].rstrip("/")+"/chat/completions",
+            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"},
+            json={"model": model,
+                  "messages":[{"role":"system","content":get_system_prompt()}]+messages,
+                  "temperature":_config["temperature"],"max_tokens":4096},
+            timeout=90)
+        r.raise_for_status()
+        return r
+
+    try:
+        resp = _do_request()
+    except Exception as exc:
+        if is_local and ("404" in str(exc) or "not found" in str(exc).lower()):
+            _ollama_pull(model, cfg["base_url"])
+            resp = _do_request()
+        else:
+            raise
+
+    data = resp.json()
+    msg_obj = data["choices"][0]["message"]
+    content = msg_obj.get("content") or ""
+
+    # DeepSeek reasoning_content normalization
+    reasoning = msg_obj.get("reasoning_content") or ""
+    result = _parse_json(content)
+    if reasoning and isinstance(result, dict) and not result.get("thought"):
+        result["thought"] = reasoning
+
+    # Gemini parallel function-call ID mapping
+    tool_calls = msg_obj.get("tool_calls") or []
+    if tool_calls and isinstance(result, dict):
+        result.setdefault("_tool_calls", [
+            {"id": tc.get("id") or f"call_{i}", "function": tc.get("function", {})}
+            for i, tc in enumerate(tool_calls)
+        ])
+
+    return result
+
+
+def _call_grok(messages):
+    import requests, time as _t
+    headers = {
+        "Authorization": f"Bearer {os.getenv('GROK_API_KEY','')}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "model": _config["model"] or "grok-3",
+        "messages": [{"role":"system","content":get_system_prompt()}]+messages,
+        "temperature": _config["temperature"] or get_active_persona()["temperature"],
+        "max_tokens": 4096,
+    }
+    resp = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, json=body, timeout=90)
+
+    # Grok async deferred response normalization (202 → poll)
+    if resp.status_code == 202:
+        deferred = resp.json()
+        request_id = deferred.get("request_id") or deferred.get("id", "")
+        if request_id:
+            for _ in range(60):
+                _t.sleep(2)
+                poll = requests.get(
+                    f"https://api.x.ai/v1/deferred/chat/completions/{request_id}",
+                    headers=headers, timeout=30)
+                if poll.status_code == 200:
+                    resp = poll
+                    break
+                elif poll.status_code not in (202, 404):
+                    poll.raise_for_status()
+            else:
+                raise TimeoutError(f"Grok deferred request {request_id} timed out after 120s")
+        else:
+            raise RuntimeError("Grok returned 202 without request_id")
+
     resp.raise_for_status()
     return _parse_json(resp.json()["choices"][0]["message"]["content"])
 
-def _call_grok(messages):
-    import requests
-    resp = requests.post("https://api.x.ai/v1/chat/completions",
-        headers={"Authorization":f"Bearer {os.getenv('GROK_API_KEY','')}","Content-Type":"application/json"},
-        json={"model":_config["model"] or "grok-3",
-              "messages":[{"role":"system","content":get_system_prompt()}]+messages,
-              "temperature":_config["temperature"] or get_active_persona()["temperature"],"max_tokens":4096},timeout=90)
-    resp.raise_for_status()
-    return _parse_json(resp.json()["choices"][0]["message"]["content"])
 
 def _call_claude_api(messages):
     import requests
@@ -1284,7 +1391,30 @@ def _call_claude_api(messages):
               "system":get_system_prompt(),"messages":messages,
               "temperature":_config["temperature"] or get_active_persona()["temperature"],"max_tokens":4096},timeout=90)
     resp.raise_for_status()
-    return _parse_json(resp.json()["content"][0]["text"])
+    content_blocks = resp.json().get("content", [])
+
+    # Claude tool_use / tool_result parity lifecycle normalization
+    text_parts: List[str] = []
+    tool_use_blocks: List[Dict] = []
+    for block in content_blocks:
+        btype = block.get("type", "")
+        if btype == "text":
+            text_parts.append(block.get("text", ""))
+        elif btype == "tool_use":
+            tool_use_blocks.append(block)
+
+    if tool_use_blocks:
+        tu = tool_use_blocks[0]
+        return {
+            "action": "tool_call",
+            "tool": tu.get("name", ""),
+            "tool_input": tu.get("input", {}),
+            "tool_use_id": tu.get("id", ""),
+            "thought": " ".join(text_parts).strip(),
+        }
+
+    return _parse_json(" ".join(text_parts))
+
 
 def _call_single(pid: str, messages: List[Dict]) -> Dict[str, Any]:
     cfg = PROVIDERS[pid]
@@ -1293,7 +1423,30 @@ def _call_single(pid: str, messages: List[Dict]) -> Dict[str, Any]:
     if pid == "claude":       return _call_claude_api(messages)
     raise ValueError(f"No caller: {pid}")
 
+
 class AllProvidersExhausted(Exception): pass
+
+
+def _provider_exhausted_error(scope: str, tried: List[str], last_error: str = "") -> Dict[str, Any]:
+    """Structured 503 payload with scope tag and per-provider cooldown info."""
+    now = time.time()
+    cooldowns = {
+        pid: round(_cooldowns[pid] - now, 1)
+        for pid in tried
+        if pid in _cooldowns and _cooldowns[pid] > now
+    }
+    return {
+        "error": {
+            "type": "all_providers_exhausted",
+            "code": "provider_exhausted",
+            "message": f"All LLM providers failed for scope '{scope}'.",
+            "scope": scope,
+            "providers_tried": tried,
+            "cooldowns_remaining_s": cooldowns,
+            "detail": last_error,
+            "retry_after_s": int(max(cooldowns.values(), default=0)) + 1,
+        }
+    }
 
 def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, str]:
     import requests as _r
@@ -2278,6 +2431,107 @@ def run_agent_task(task, history, files=None, sid=""):
     return out
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
+# ── provider capability matrix ───────────────────────────────────────────────
+PROVIDER_CAPABILITIES: Dict[str, Dict[str, bool]] = {
+    "ollama":         {"vision": True,  "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "llm7":           {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "groq":           {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "cerebras":       {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "gemini":         {"vision": True,  "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "mistral":        {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "openrouter":     {"vision": True,  "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "nvidia":         {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "cohere":         {"vision": False, "json_mode": True,  "tools": False, "reasoning": False, "streaming": True},
+    "github_models":  {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "grok":           {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "claude":         {"vision": True,  "json_mode": False, "tools": True,  "reasoning": True,  "streaming": True},
+}
+
+# ── provider benchmark baselines (latency_ms, quality_score 0-100) ─────────────
+_PROVIDER_BENCHMARKS: Dict[str, Dict[str, Any]] = {
+    "ollama":        {"latency_ms": 500,  "quality": 75, "tier": "high",   "cost_tier": "free"},
+    "llm7":          {"latency_ms": 2000, "quality": 60, "tier": "low",    "cost_tier": "free"},
+    "groq":          {"latency_ms": 800,  "quality": 72, "tier": "medium", "cost_tier": "paid"},
+    "cerebras":      {"latency_ms": 1200, "quality": 70, "tier": "medium", "cost_tier": "paid"},
+    "gemini":        {"latency_ms": 1500, "quality": 85, "tier": "high",   "cost_tier": "paid"},
+    "mistral":       {"latency_ms": 2000, "quality": 80, "tier": "high",   "cost_tier": "paid"},
+    "openrouter":    {"latency_ms": 3000, "quality": 80, "tier": "medium", "cost_tier": "paid"},
+    "nvidia":        {"latency_ms": 1000, "quality": 78, "tier": "medium", "cost_tier": "paid"},
+    "cohere":        {"latency_ms": 2500, "quality": 65, "tier": "low",    "cost_tier": "paid"},
+    "github_models": {"latency_ms": 1800, "quality": 75, "tier": "medium", "cost_tier": "free"},
+    "grok":          {"latency_ms": 2200, "quality": 82, "tier": "high",   "cost_tier": "paid"},
+    "claude":        {"latency_ms": 2800, "quality": 90, "tier": "high",   "cost_tier": "paid"},
+}
+
+# ── per-persona provider overrides ────────────────────────────────────────────
+_PERSONA_PROVIDER_OVERRIDES: Dict[str, List[str]] = {
+    "general":   ["ollama", "claude", "gemini", "grok", "openrouter"],
+    "coder":     ["ollama", "claude", "groq", "cerebras", "github_models"],
+    "researcher": ["gemini", "grok", "openrouter", "claude", "mistral"],
+    "creative":  ["claude", "gemini", "mistral", "openrouter"],
+    "architect": ["claude", "grok", "gemini", "openrouter"],
+}
+
+def get_provider_health() -> Dict[str, Any]:
+    """Return health status for all providers including rate limit state."""
+    result = []
+    for pid, cfg in PROVIDERS.items():
+        has_key = _has_key(cfg)
+        is_limited = _is_rate_limited(pid)
+        cooldown_secs = max(0, int(_cooldowns.get(pid, 0) - time.time()))
+        benchmarks = _PROVIDER_BENCHMARKS.get(pid, {})
+        
+        result.append({
+            "id": pid,
+            "label": cfg["label"],
+            "status": "rate_limited" if is_limited else ("ready" if has_key else "unconfigured"),
+            "available": has_key and not is_limited,
+            "has_api_key": has_key,
+            "keyless": cfg.get("keyless", False),
+            "local": cfg.get("local", False),
+            "rate_limited": is_limited,
+            "cooldown_remaining_seconds": cooldown_secs,
+            "capabilities": PROVIDER_CAPABILITIES.get(pid, {}),
+            "benchmarks": {
+                "estimated_latency_ms": benchmarks.get("latency_ms", 0),
+                "quality_score": benchmarks.get("quality", 0),
+                "tier": benchmarks.get("tier", "unknown"),
+                "cost_tier": benchmarks.get("cost_tier", "unknown"),
+            },
+            "openai_compat": cfg.get("openai_compat", False),
+            "default_model": cfg.get("default_model", ""),
+        })
+    return {"providers": result, "timestamp": time.time()}
+
+def get_provider_capabilities() -> Dict[str, Any]:
+    """Return capability matrix for all providers."""
+    return {
+        "capabilities": {
+            "vision": "Supports image input and vision understanding",
+            "json_mode": "Supports JSON response format enforcement",
+            "tools": "Supports tool/function calling",
+            "reasoning": "Supports chain-of-thought and reasoning",
+            "streaming": "Supports streaming responses",
+        },
+        "providers": {
+            pid: caps for pid, caps in PROVIDER_CAPABILITIES.items()
+        },
+    }
+
+def set_provider_persona_override(persona: str, provider_order: List[str]) -> bool:
+    """Set a custom provider priority order for a specific persona."""
+    if persona not in PERSONAS:
+        return False
+    valid_providers = set(PROVIDERS.keys())
+    if not all(p in valid_providers for p in provider_order):
+        return False
+    _PERSONA_PROVIDER_OVERRIDES[persona] = provider_order
+    return True
+
+def get_provider_persona_override(persona: str) -> Optional[List[str]]:
+    """Get the custom provider order for a persona, or None if using default."""
+    return _PERSONA_PROVIDER_OVERRIDES.get(persona)
+
 def get_providers_list():
     result = []
     for pid, cfg in PROVIDERS.items():
