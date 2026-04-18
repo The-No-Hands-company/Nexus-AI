@@ -614,6 +614,135 @@ class ModelRouter:
         return "\n".join(parts)
 
 
+# ────────────────────────────────────────────────────────────────────────────
+# Budget-Aware Provider Routing (Part 6)
+# ────────────────────────────────────────────────────────────────────────────
+
+def route_to_best_provider(
+    providers: List[str],
+    budget_tokens: int,
+    require_tools: bool = True,
+    latency_critical: bool = False,
+    time_budget_s: Optional[float] = None,
+) -> str:
+    """
+    Route to the best provider based on budget and latency constraints.
+    
+    Args:
+        providers: List of provider names ["groq", "openai", "ollama", ...]
+        budget_tokens: Token budget for this request
+        require_tools: If True, provider must support tools
+        latency_critical: If True, prioritize low-latency providers
+        time_budget_s: Max time allowed (seconds), used to filter providers
+    
+    Returns:
+        Selected provider name
+    """
+    # Provider capability matrix
+    provider_matrix = {
+        "groq": {
+            "avg_latency": 0.5,
+            "cost_per_1k": 0.01,
+            "supports_tools": True,
+            "supports_streaming": True,
+        },
+        "openai": {
+            "avg_latency": 1.0,
+            "cost_per_1k": 0.15,
+            "supports_tools": True,
+            "supports_streaming": True,
+        },
+        "anthropic": {
+            "avg_latency": 1.2,
+            "cost_per_1k": 0.08,
+            "supports_tools": True,
+            "supports_streaming": True,
+        },
+        "ollama": {
+            "avg_latency": 2.0,
+            "cost_per_1k": 0.0,
+            "supports_tools": False,
+            "supports_streaming": True,
+        },
+    }
+    
+    # Filter by constraints
+    candidates = []
+    for provider in providers:
+        if provider not in provider_matrix:
+            continue
+        
+        spec = provider_matrix[provider]
+        
+        # Check tool requirement
+        if require_tools and not spec.get("supports_tools", False):
+            continue
+        
+        # Check time budget
+        if time_budget_s and spec.get("avg_latency", 0) > time_budget_s:
+            continue
+        
+        candidates.append(provider)
+    
+    if not candidates:
+        # Fallback to first provider if no valid candidate
+        return providers[0] if providers else "groq"
+    
+    # Score candidates
+    if latency_critical:
+        # Prioritize by latency
+        best = min(candidates, key=lambda p: provider_matrix[p].get("avg_latency", 999))
+    else:
+        # Prioritize by cost efficiency (cost per token given budget)
+        best = min(
+            candidates,
+            key=lambda p: provider_matrix[p].get("cost_per_1k", 0) / max(budget_tokens / 1000, 1)
+        )
+    
+    return best
+
+
+def can_satisfy_within_budget(
+    request_tokens: int,
+    budget_tokens: int,
+    expected_output_tokens: int,
+) -> bool:
+    """
+    Check if a request can be satisfied within token budget.
+    
+    Args:
+        request_tokens: Tokens in the request/prompt
+        budget_tokens: Total available token budget
+        expected_output_tokens: Estimated output tokens needed
+    
+    Returns:
+        True if request + output fits within budget, False otherwise
+    """
+    total_needed = request_tokens + expected_output_tokens
+    return total_needed <= budget_tokens
+
+
+def get_fallback_providers(primary_provider: str) -> List[str]:
+    """
+    Get a list of fallback providers in priority order when primary fails.
+    
+    Args:
+        primary_provider: The primary provider that failed
+    
+    Returns:
+        List of fallback providers in order of preference
+    """
+    # Define fallback chains
+    fallback_chains = {
+        "groq": ["openai", "anthropic", "ollama"],
+        "openai": ["anthropic", "groq", "ollama"],
+        "anthropic": ["openai", "groq", "ollama"],
+        "ollama": ["groq", "openai", "anthropic"],
+    }
+    
+    return fallback_chains.get(primary_provider, ["groq", "openai", "anthropic"])
+
+
 # Example usage
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
