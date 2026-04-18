@@ -281,44 +281,44 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 5.1 RAG pipeline
 
-- [ ] `src/rag/pipeline.py` — end-to-end RAG orchestration
-- [ ] `src/rag/chunker.py` — document chunking
-- [ ] `src/rag/embeddings.py` — embedding generation
-- [ ] `src/rag/vector_store.py` — ChromaDB vector store
-- [ ] `src/rag/retriever.py` — retrieval + reranking
-- [ ] `src/rag/rag_system.py` — high-level RAG system class
-- [ ] `POST /rag/ingest` — ingest document text
-- [ ] `POST /rag/query` — semantic query
-- [ ] `GET /rag/status` — vector store status
-- [ ] `tool_rag_ingest`, `tool_rag_query`, `tool_rag_status` tools
-- [ ] Persistent vector store filters (date / tags / persona)
+- [x] `src/rag/pipeline.py` — end-to-end RAG orchestration
+- [x] `src/rag/chunker.py` — document chunking
+- [x] `src/rag/embeddings.py` — embedding generation
+- [x] `src/rag/vector_store.py` — ChromaDB vector store (with memory/FAISS fallback)
+- [x] `src/rag/retriever.py` — retrieval + reranking
+- [x] `src/rag/rag_system.py` — high-level RAG system class
+- [x] `POST /rag/ingest` — ingest document text (incremental updates supported)
+- [x] `POST /rag/query` — semantic query (citations + calibrated confidence + critic pass)
+- [x] `GET /rag/status` — vector store status
+- [x] `tool_rag_ingest`, `tool_rag_query`, `tool_rag_status` tools
+- [x] Persistent vector store filters (date / tags / persona) (`$eq/$contains/$in/$gte/$lte` in `src/rag/vector_store.py`)
 
 ### 5.2 RAG quality and intelligence
 
-- [ ] `src/rag/critic.py` — RAG answer quality critic
-- [ ] `src/rag/query_decomposer.py` — multi-hop query decomposition
-- [ ] `src/rag/planner.py` — RAG retrieval planning
-- [ ] Citation confidence metadata on RAG responses (source URL + chunk ref in response)
-- [ ] Generator-critic pass wired into RAG query path (auto-improve answer quality)
-- [ ] Answer calibration (model confidence vs retrieval confidence reconciliation)
-- [ ] RAG result caching (identical queries skip re-embedding)
-- [ ] Chunk overlap deduplication on ingest
-- [ ] Incremental ingest (update existing doc without full re-index)
-- [ ] RAG corpus versioning (snapshot + rollback)
+- [x] `src/rag/critic.py` — RAG answer quality critic
+- [x] `src/rag/query_decomposer.py` — multi-hop query decomposition
+- [x] `src/rag/planner.py` — RAG retrieval planning
+- [x] Citation confidence metadata on RAG responses (source URL + chunk ref in response)
+- [x] Generator-critic pass wired into RAG query path (auto-improve answer quality)
+- [x] Answer calibration (model confidence vs retrieval confidence reconciliation)
+- [x] RAG result caching (identical queries skip re-embedding)
+- [x] Chunk overlap deduplication on ingest
+- [x] Incremental ingest (update existing doc without full re-index)
+- [x] RAG corpus versioning (snapshot + rollback via `/rag/snapshots`)
 
 ### 5.3 Document understanding
 
-- [ ] `POST /documents/ingest` — upload + parse document
-- [ ] `POST /documents/understand` — document Q&A with LLM
-- [ ] `tool_read_pdf` — PDF text extraction
-- [ ] `tool_read_docx` — Word document extraction
-- [ ] `tool_read_xlsx` — Excel extraction
-- [ ] `tool_read_pptx` — PowerPoint extraction
-- [ ] `tool_read_csv` / `tool_write_csv` — CSV tools
-- [ ] Vision-based PDF understanding (scanned PDFs via OCR + vision model)
-- [ ] Table extraction from PDFs (structure-aware parsing)
-- [ ] Form field extraction (structured data from PDF forms)
-- [ ] Document comparison / diff tool
+- [x] `POST /documents/ingest` — upload + parse document
+- [x] `POST /documents/understand` — document Q&A with LLM
+- [x] `tool_read_pdf` — PDF text extraction
+- [x] `tool_read_docx` — Word document extraction
+- [x] `tool_read_xlsx` — Excel extraction
+- [x] `tool_read_pptx` — PowerPoint extraction
+- [x] `tool_read_csv` / `tool_write_csv` — CSV tools
+- [x] Vision-based PDF understanding (scanned PDFs via OCR + vision model fallback path)
+- [x] Table extraction from PDFs (structure-aware parsing)
+- [x] Form field extraction (structured data from PDF forms)
+- [x] Document comparison / diff tool (`POST /diff`, `GET /diff/history`, `GET /diff/{id}`)
 
 ---
 

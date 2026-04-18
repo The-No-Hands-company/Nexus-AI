@@ -19,6 +19,7 @@ import time
 import logging
 
 logger = logging.getLogger(__name__)
+from .logging_compat import HAS_CPP_LOGGER, CPPLogger
 
 from .query_decomposer import QueryDecomposer, DecompositionResult
 from .planner import PlannerAgent, Plan, PlanStep, StepType, StepStatus

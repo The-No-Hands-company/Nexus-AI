@@ -2688,6 +2688,7 @@ async def rag_ingest(request: Request):
     path = (data.get("path") or "").strip()
     metadata = data.get("metadata", {}) or {}
     prefix = data.get("doc_id_prefix")
+    incremental = bool(data.get("incremental", False))
 
     if not text and not path:
         return JSONResponse({"error": "text or path is required"}, status_code=400)
@@ -2701,10 +2702,92 @@ async def rag_ingest(request: Request):
             return JSONResponse({"error": f"Failed to read path {path}: {e}"}, status_code=400)
 
     try:
+        if incremental:
+            metadata = {**metadata, "incremental": True}
         count = get_rag_system().ingest(text, metadata=metadata, doc_id_prefix=prefix)
         return {"ingested_chunks": count, "status": "ok"}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+def _rag_retrieval_confidence(results: list[dict]) -> float:
+    if not results:
+        return 0.0
+    scores = []
+    for r in results:
+        try:
+            score = float(r.get("score", 0.0))
+        except Exception:
+            score = 0.0
+        scores.append(max(0.0, min(1.0, score)))
+    return round(sum(scores) / max(len(scores), 1), 4)
+
+
+def _build_rag_citations(results: list[dict]) -> list[dict]:
+    citations: list[dict] = []
+    for idx, item in enumerate(results, start=1):
+        meta = item.get("metadata", {}) if isinstance(item.get("metadata"), dict) else {}
+        source = meta.get("source_url") or meta.get("source") or f"document-{idx}"
+        chunk_ref = meta.get("chunk_index", meta.get("section", idx - 1))
+        citations.append(
+            {
+                "rank": idx,
+                "source": source,
+                "chunk_ref": chunk_ref,
+                "score": float(item.get("score", 0.0) or 0.0),
+                "id": item.get("id", ""),
+            }
+        )
+    return citations
+
+
+def _rag_answer_with_critic(query: str, results: list[dict]) -> dict:
+    from ..rag.critic import CriticAgent
+
+    if not results:
+        return {
+            "answer": "No relevant documents were found for this query.",
+            "model_confidence": 0.0,
+            "retrieval_confidence": 0.0,
+            "calibrated_confidence": 0.0,
+            "critique": None,
+        }
+
+    context = "\n\n".join(
+        f"[{i + 1}] {r.get('document', '')}"
+        for i, r in enumerate(results[:5])
+    )
+
+    prompt = (
+        "Answer the question using only the provided retrieval context. "
+        "Cite sources inline as [1], [2], etc. If uncertain, explicitly say so.\n\n"
+        f"Question: {query}\n\nContext:\n{context}"
+    )
+
+    answer_text = ""
+    model_conf = 0.55
+    try:
+        llm_resp, _provider = call_llm_with_fallback(
+            [{"role": "user", "content": prompt}],
+            "rag_query",
+        )
+        answer_text = (llm_resp.get("content") if isinstance(llm_resp, dict) else str(llm_resp) or "").strip()
+    except Exception:
+        answer_text = " ".join(str(r.get("document", "")).strip() for r in results[:3])[:1200]
+
+    retrieval_conf = _rag_retrieval_confidence(results)
+    critic = CriticAgent()
+    critique = critic.critique(query, answer_text, results)
+    model_conf = round(max(0.0, min(1.0, float(critique.overall_score))), 4)
+    calibrated = round((0.45 * retrieval_conf) + (0.55 * model_conf), 4)
+
+    return {
+        "answer": answer_text,
+        "model_confidence": model_conf,
+        "retrieval_confidence": retrieval_conf,
+        "calibrated_confidence": calibrated,
+        "critique": critique.to_dict(),
+    }
 
 
 @router.post("/rag/query")
@@ -2713,13 +2796,22 @@ async def rag_query(request: Request):
     query = (data.get("query") or "").strip()
     top_k = data.get("top_k")
     filter_metadata = data.get("filter_metadata")
+    include_answer = bool(data.get("include_answer", True))
 
     if not query:
         return JSONResponse({"error": "query field is required"}, status_code=400)
 
     try:
         results = get_rag_system().query(query, top_k=top_k, filter_metadata=filter_metadata)
-        return {"query": query, "results": results}
+        payload: dict = {
+            "query": query,
+            "results": results,
+            "citations": _build_rag_citations(results),
+            "retrieval_confidence": _rag_retrieval_confidence(results),
+        }
+        if include_answer:
+            payload.update(_rag_answer_with_critic(query, results))
+        return payload
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -2728,6 +2820,26 @@ async def rag_query(request: Request):
 def rag_status():
     try:
         return get_rag_system().stats()
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/rag/snapshots")
+async def rag_snapshot_create(request: Request):
+    data = await request.json() if request else {}
+    label = (data.get("label") or "").strip() or None
+    try:
+        return get_rag_system().create_snapshot(label=label)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.post("/rag/snapshots/{snapshot_id}/rollback")
+def rag_snapshot_rollback(snapshot_id: str):
+    try:
+        return get_rag_system().rollback_snapshot(snapshot_id)
+    except KeyError as e:
+        return JSONResponse({"error": str(e)}, status_code=404)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -2958,15 +3070,72 @@ def _extract_document_segments(
             reader = pypdf.PdfReader(full)
             total = len(reader.pages)
             segments = []
+            form_fields = []
+            try:
+                fields = reader.get_fields() or {}
+                form_fields = sorted(str(k) for k in fields.keys())
+            except Exception:
+                form_fields = []
+
+            table_rows_total = 0
             for i, page in enumerate(reader.pages):
                 text = (page.extract_text() or "").strip()
+                lines = [ln for ln in text.splitlines() if ln.strip()]
+                table_rows = []
+                for ln in lines:
+                    if "  " in ln:
+                        cols = [c.strip() for c in ln.split("  ") if c.strip()]
+                        if len(cols) >= 2:
+                            table_rows.append(" | ".join(cols))
+                table_rows_total += len(table_rows)
+
+                if table_rows:
+                    text += "\n\n[Extracted Table]\n" + "\n".join(table_rows[:60])
+
                 if text:
                     segments.append({
                         "text": text,
-                        "metadata": {**base_meta, "page": i + 1, "total_pages": total},
+                        "metadata": {
+                            **base_meta,
+                            "page": i + 1,
+                            "total_pages": total,
+                            "table_rows": len(table_rows),
+                            "form_fields": form_fields,
+                        },
                     })
             if not segments:
-                return [{"text": "❌ No extractable text found (may be a scanned PDF)", "metadata": base_meta}]
+                # OCR fallback for scanned PDFs if optional dependencies are available.
+                try:
+                    from pdf2image import convert_from_path
+                    from io import BytesIO
+                    from ..vision import ocr_image_bytes
+
+                    images = convert_from_path(full, first_page=1, last_page=min(total, 5), dpi=200)
+                    ocr_segments = []
+                    for idx, image in enumerate(images):
+                        buf = BytesIO()
+                        image.save(buf, format="PNG")
+                        ocr_text = (ocr_image_bytes(buf.getvalue(), mime_type="image/png") or "").strip()
+                        if ocr_text:
+                            ocr_segments.append({
+                                "text": ocr_text,
+                                "metadata": {
+                                    **base_meta,
+                                    "page": idx + 1,
+                                    "total_pages": total,
+                                    "ocr_used": True,
+                                    "form_fields": form_fields,
+                                },
+                            })
+                    if ocr_segments:
+                        return ocr_segments
+                except Exception:
+                    pass
+
+                return [{"text": "❌ No extractable text found (may be a scanned PDF)", "metadata": {**base_meta, "form_fields": form_fields}}]
+
+            for seg in segments:
+                seg["metadata"]["table_rows_total"] = table_rows_total
             return segments
         except ImportError:
             return [{"text": "❌ pypdf not installed. Run: pip install pypdf", "metadata": base_meta}]
@@ -3124,6 +3293,17 @@ async def documents_ingest(request: Request):
             return JSONResponse({"error": errors[0]["text"] if errors else "No content extracted"}, status_code=400)
         detected_type = valid[0]["metadata"].get("type", ftype)
         total_chars = sum(len(s["text"]) for s in valid)
+        extraction_meta = {
+            "ocr_used": any(bool(s.get("metadata", {}).get("ocr_used")) for s in valid),
+            "table_rows_total": sum(int(s.get("metadata", {}).get("table_rows", 0) or 0) for s in valid),
+            "form_fields": sorted(
+                {
+                    field
+                    for s in valid
+                    for field in (s.get("metadata", {}).get("form_fields") or [])
+                }
+            ),
+        }
         for seg in valid:
             seg_meta = {**seg["metadata"], **metadata}
             try:
@@ -3136,6 +3316,7 @@ async def documents_ingest(request: Request):
             "ingested_chunks": chunks_stored,
             "char_count": total_chars,
             "segments": len(valid),
+            "extraction": extraction_meta,
             "status": "ok",
         }
 

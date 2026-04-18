@@ -19,6 +19,46 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 
+def _metadata_matches(metadata: Dict[str, Any], filters: Optional[Dict[str, Any]]) -> bool:
+    """Evaluate rich metadata filters against a metadata row."""
+    if not filters:
+        return True
+
+    for key, expected in filters.items():
+        actual = metadata.get(key)
+
+        if isinstance(expected, dict):
+            for op, value in expected.items():
+                if op == "$eq" and actual != value:
+                    return False
+                if op == "$in":
+                    if isinstance(actual, list):
+                        if not any(item in value for item in actual):
+                            return False
+                    elif actual not in value:
+                        return False
+                if op == "$contains":
+                    if isinstance(actual, list):
+                        if value not in actual:
+                            return False
+                    elif isinstance(actual, str):
+                        if str(value).lower() not in actual.lower():
+                            return False
+                    else:
+                        return False
+                if op == "$gte":
+                    if actual is None or actual < value:
+                        return False
+                if op == "$lte":
+                    if actual is None or actual > value:
+                        return False
+        else:
+            if actual != expected:
+                return False
+
+    return True
+
+
 class VectorStoreType(Enum):
     """Supported vector store backends."""
     CHROMADB = "chromadb"
@@ -213,20 +253,26 @@ class VectorStore:
             query_embedding = query
 
         if self.config.store_type == VectorStoreType.CHROMADB:
+            where = filter_metadata if filter_metadata else None
+            if where and any(isinstance(v, dict) for v in where.values()):
+                where = None
             results = self.store.query(
                 query_embeddings=[query_embedding.tolist()],
-                n_results=min(k, max(self._document_count, 1)),
-                where=filter_metadata if filter_metadata else None,
+                n_results=min(max(k * 5, k), max(self._document_count, 1)),
+                where=where,
             )
             out = []
             for i in range(len(results["ids"][0])):
+                meta = results["metadatas"][0][i] if results["metadatas"] else {}
+                if not _metadata_matches(meta or {}, filter_metadata):
+                    continue
                 out.append({
                     "id": results["ids"][0][i],
                     "document": results["documents"][0][i],
                     "score": 1 - results["distances"][0][i],
-                    "metadata": results["metadatas"][0][i] if results["metadatas"] else {},
+                    "metadata": meta,
                 })
-            return out
+            return out[:k]
 
         elif self.config.store_type == VectorStoreType.FAISS:
             qvec = query_embedding.reshape(1, -1).astype("float32")
@@ -240,9 +286,8 @@ class VectorStore:
                 if not doc_id:
                     continue
                 info = self.metadata_store[doc_id]
-                if filter_metadata:
-                    if not all(info["metadata"].get(k_) == v_ for k_, v_ in filter_metadata.items()):
-                        continue
+                if not _metadata_matches(info["metadata"], filter_metadata):
+                    continue
                 out.append({
                     "id": doc_id,
                     "document": info["document"],
@@ -259,12 +304,8 @@ class VectorStore:
             top_idx = np.argsort(sims)[-k:][::-1]
             out = []
             for idx in top_idx:
-                if filter_metadata:
-                    if not all(
-                        self.store["metadata"][idx].get(k_) == v_
-                        for k_, v_ in filter_metadata.items()
-                    ):
-                        continue
+                if not _metadata_matches(self.store["metadata"][idx], filter_metadata):
+                    continue
                 out.append({
                     "id": self.store["ids"][idx],
                     "document": self.store["documents"][idx],

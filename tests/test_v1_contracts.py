@@ -4719,3 +4719,100 @@ class TestIntegrationAutonomyRAGReasoning(unittest.TestCase):
         self.assertEqual(reasoning_resp.status_code, 200)
         reasoning_payload = reasoning_resp.json()
         self.assertIn("consensus", reasoning_payload)
+
+
+class TestRagSection5Hardening(unittest.TestCase):
+    """Section 5 hardening checks: citations, confidence, filtering, and versioning."""
+
+    @patch("src.api.routes.call_llm_with_fallback")
+    def test_rag_query_returns_citations_and_calibrated_confidence(self, mock_call):
+        mock_call.return_value = ({"content": "Python is a web framework language [1]."}, "mock")
+
+        ingest_resp = client.post(
+            "/rag/ingest",
+            json={
+                "text": "FastAPI is a Python framework for APIs.",
+                "metadata": {"source": "fastapi_doc", "source_url": "https://example.test/fastapi"},
+            },
+        )
+        self.assertEqual(ingest_resp.status_code, 200)
+
+        query_resp = client.post("/rag/query", json={"query": "What is FastAPI?", "top_k": 3})
+        self.assertEqual(query_resp.status_code, 200)
+        payload = query_resp.json()
+        self.assertIn("citations", payload)
+        self.assertIsInstance(payload["citations"], list)
+        self.assertIn("calibrated_confidence", payload)
+        self.assertIn("retrieval_confidence", payload)
+        self.assertIn("model_confidence", payload)
+
+    def test_rag_incremental_ingest_replaces_same_source(self):
+        first = client.post(
+            "/rag/ingest",
+            json={
+                "text": "Version A: alpha component details.",
+                "metadata": {"source": "release_notes"},
+                "incremental": True,
+            },
+        )
+        self.assertEqual(first.status_code, 200)
+
+        second = client.post(
+            "/rag/ingest",
+            json={
+                "text": "Version B: beta component details.",
+                "metadata": {"source": "release_notes"},
+                "incremental": True,
+            },
+        )
+        self.assertEqual(second.status_code, 200)
+
+        query_resp = client.post(
+            "/rag/query",
+            json={"query": "beta component", "top_k": 10, "filter_metadata": {"source": "release_notes"}},
+        )
+        self.assertEqual(query_resp.status_code, 200)
+        docs = [r.get("document", "") for r in query_resp.json().get("results", [])]
+        merged = "\n".join(docs)
+        self.assertIn("Version B", merged)
+        self.assertNotIn("Version A", merged)
+
+    def test_rag_metadata_filters_support_contains_operator(self):
+        client.post(
+            "/rag/ingest",
+            json={
+                "text": "Persona specific guidance for planner agent.",
+                "metadata": {"source": "persona_doc", "tags": ["planner", "agent"], "persona": "architect"},
+            },
+        )
+        resp = client.post(
+            "/rag/query",
+            json={
+                "query": "guidance",
+                "top_k": 5,
+                "filter_metadata": {
+                    "tags": {"$contains": "planner"},
+                    "persona": {"$eq": "architect"},
+                },
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        payload = resp.json()
+        self.assertGreaterEqual(len(payload.get("results", [])), 1)
+
+    def test_rag_snapshot_and_rollback(self):
+        baseline = client.post("/rag/ingest", json={"text": "Snapshot baseline document.", "metadata": {"source": "snap_base"}})
+        self.assertEqual(baseline.status_code, 200)
+
+        snap_resp = client.post("/rag/snapshots", json={"label": "sec5_snap"})
+        self.assertEqual(snap_resp.status_code, 200)
+        snap_id = snap_resp.json().get("snapshot_id")
+        self.assertEqual(snap_id, "sec5_snap")
+
+        after = client.post("/rag/ingest", json={"text": "Post snapshot content.", "metadata": {"source": "snap_after"}})
+        self.assertEqual(after.status_code, 200)
+
+        rollback = client.post(f"/rag/snapshots/{snap_id}/rollback")
+        self.assertEqual(rollback.status_code, 200)
+        data = rollback.json()
+        self.assertEqual(data.get("rolled_back_to"), snap_id)

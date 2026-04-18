@@ -18,7 +18,11 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 import time
+import hashlib
+import copy
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -59,6 +63,12 @@ class RAGSystem:
 
         self._total_ingested: int = 0
         self._total_queries: int = 0
+        self._corpus_version: int = 0
+
+        self._query_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
+        self._snapshots: Dict[str, Dict[str, Any]] = {}
 
     # ------------------------------------------------------------------
     # Lazy component init
@@ -78,10 +88,11 @@ class RAGSystem:
             if self._vs_cfg:
                 cfg = self._vs_cfg
             else:
+                persist_root = Path(os.getenv("RAG_PERSIST_DIR", "./rag_data")).expanduser()
                 # Build config with defaults
                 cfg = VectorStoreConfig(
-                    store_type=VectorStoreType.MEMORY,  # default to memory
-                    persist_directory=Path("./rag_data").expanduser(),
+                    store_type=VectorStoreType.CHROMADB,
+                    persist_directory=persist_root,
                     embedding_dimension=self.embedding_model.dimension,
                     collection_name="nexus_documents",
                 )
@@ -132,18 +143,49 @@ class RAGSystem:
             Number of chunks stored.
         """
         t0 = time.perf_counter()
-        chunks = self.chunker.split(text, metadata=metadata)
+        meta = dict(metadata or {})
+        chunks = self.chunker.split(text, metadata=meta)
         if not chunks:
             return 0
 
-        texts = [c.text for c in chunks]
-        metas = [c.metadata for c in chunks]
+        source = str(meta.get("source") or doc_id_prefix or "").strip()
+        incremental = bool(meta.get("incremental", False))
+
+        # Deduplicate overlap-heavy chunks before embedding/indexing.
+        deduped_chunks = []
+        seen_hashes = set()
+        for c in chunks:
+            normalized = " ".join(c.text.split())
+            if not normalized:
+                continue
+            digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+            if digest in seen_hashes:
+                continue
+            seen_hashes.add(digest)
+            deduped_chunks.append(c)
+
+        if incremental and source:
+            existing = self.vector_store.get_all_documents()
+            ids_to_delete = [
+                doc.get("id", "")
+                for doc in existing
+                if isinstance(doc.get("metadata"), dict)
+                and str(doc["metadata"].get("source", "")).strip() == source
+            ]
+            ids_to_delete = [doc_id for doc_id in ids_to_delete if doc_id]
+            if ids_to_delete:
+                self.vector_store.delete(ids_to_delete)
+
+        texts = [c.text for c in deduped_chunks]
+        metas = [c.metadata for c in deduped_chunks]
 
         prefix = doc_id_prefix or f"doc{self._total_ingested}"
         ids = [f"{prefix}_chunk_{i}" for i in range(len(texts))]
 
         self.vector_store.add_documents(documents=texts, metadata=metas, ids=ids)
         self._total_ingested += len(texts)
+        self._corpus_version += 1
+        self._query_cache.clear()
 
         elapsed = time.perf_counter() - t0
         logger.info(
@@ -190,8 +232,17 @@ class RAGSystem:
             k = top_k
         t0 = time.perf_counter()
 
+        cache_key = self._build_query_cache_key(question, k, filter_metadata)
+        if cache_key in self._query_cache:
+            self._cache_hits += 1
+            self._total_queries += 1
+            return copy.deepcopy(self._query_cache[cache_key])
+
+        self._cache_misses += 1
+
         results = self.vector_store.search(question, k=k, filter_metadata=filter_metadata)
         self._total_queries += 1
+        self._query_cache[cache_key] = copy.deepcopy(results)
 
         elapsed = time.perf_counter() - t0
         logger.info(
@@ -216,12 +267,67 @@ class RAGSystem:
         return {
             "total_ingested": self._total_ingested,
             "total_queries": self._total_queries,
+            "corpus_version": self._corpus_version,
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
+            "snapshots": sorted(self._snapshots.keys()),
             "store_count": self.vector_store.count() if self._vector_store else 0,
             "embedding_backend": (
                 self._embedding_model.backend_name if self._embedding_model else "not initialized"
             ),
             "vector_store": repr(self._vector_store) if self._vector_store else "not initialized",
         }
+
+    def create_snapshot(self, label: Optional[str] = None) -> Dict[str, Any]:
+        """Create a lightweight corpus snapshot for rollback."""
+        snapshot_id = label or f"snapshot_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        docs = self.vector_store.get_all_documents()
+        self._snapshots[snapshot_id] = {
+            "created_at": datetime.utcnow().isoformat() + "Z",
+            "corpus_version": self._corpus_version,
+            "documents": docs,
+        }
+        return {"snapshot_id": snapshot_id, "documents": len(docs), "corpus_version": self._corpus_version}
+
+    def rollback_snapshot(self, snapshot_id: str) -> Dict[str, Any]:
+        """Rollback vector store contents to a prior snapshot."""
+        snapshot = self._snapshots.get(snapshot_id)
+        if not snapshot:
+            raise KeyError(f"Unknown snapshot: {snapshot_id}")
+
+        existing_ids = [doc.get("id") for doc in self.vector_store.get_all_documents() if doc.get("id")]
+        if existing_ids:
+            self.vector_store.delete(existing_ids)
+
+        docs = snapshot.get("documents", [])
+        if docs:
+            self.vector_store.add_documents(
+                documents=[d.get("document", "") for d in docs],
+                metadata=[d.get("metadata", {}) for d in docs],
+                ids=[d.get("id", f"restored_{i}") for i, d in enumerate(docs)],
+            )
+
+        self._corpus_version += 1
+        self._query_cache.clear()
+        return {
+            "rolled_back_to": snapshot_id,
+            "restored_documents": len(docs),
+            "corpus_version": self._corpus_version,
+        }
+
+    def _build_query_cache_key(
+        self,
+        question: str,
+        top_k: int,
+        filter_metadata: Optional[Dict[str, Any]],
+    ) -> str:
+        payload = {
+            "q": question,
+            "k": top_k,
+            "filter": filter_metadata or {},
+            "corpus_version": self._corpus_version,
+        }
+        return hashlib.sha1(repr(payload).encode("utf-8")).hexdigest()
 
     # ------------------------------------------------------------------
     # Lifecycle

@@ -18,6 +18,7 @@ import re
 import logging
 
 logger = logging.getLogger(__name__)
+from .logging_compat import HAS_CPP_LOGGER
 
 
 class CriticDimension(Enum):
