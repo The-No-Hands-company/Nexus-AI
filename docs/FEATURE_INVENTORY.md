@@ -30,10 +30,10 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] System resource endpoint (`GET /api/system/resources`)
 - [x] Kubernetes / Helm chart deployment manifests (`deploy/k8s/`, `deploy/helm/nexus-ai/`)
 - [x] Horizontal scaling / worker process mode (Gunicorn + Uvicorn workers) (`gunicorn.conf.py`)
-- [x] Deep health check endpoint (`GET /health/deep`) — verifies DB connectivity, vector store, provider reachability; used as K8s readiness probe
+- [~] Deep health check endpoint (`GET /health/deep`) — verifies DB connectivity, vector store, provider reachability; used as K8s readiness probe
 - [x] Liveness probe separation (`GET /health/live`) — lightweight heartbeat only, no dependency checks; used as K8s liveness probe
 - [x] Graceful shutdown with in-flight request draining (SIGTERM handler waits for active requests before exit; prevents mid-stream connection drops)
-- [x] Backpressure signaling (reject requests with 503 when worker queue depth exceeds configurable threshold)
+- [~] Backpressure signaling (reject requests with 503 when worker queue depth exceeds configurable threshold)
 - [x] Zero-downtime rolling deployment compatibility (session state moved to Redis; online_ddl.py runs idempotent ADD COLUMN IF NOT EXISTS + CREATE INDEX CONCURRENTLY at startup; no in-memory state required for cold start)
 
 ### 1.2 Database / persistence
@@ -108,18 +108,18 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 1.6 Secrets management
 
-- [x] HashiCorp Vault / AWS Secrets Manager integration (provider API keys fetched from Vault at runtime; never stored in `.env` files on disk)
+- [~] HashiCorp Vault / AWS Secrets Manager integration (provider API keys fetched from Vault at runtime; never stored in `.env` files on disk)
 - [x] Automatic secret rotation (JWT signing key + provider API keys rotated on configurable schedule without restart; daemon starts at app boot via `SECRET_ROTATION_INTERVAL_SECONDS`)
-- [x] Secret access audit trail (every secret fetch logged with caller identity, timestamp, and secret name — no secret values in logs)
+- [~] Secret access audit trail (every secret fetch logged with caller identity, timestamp, and secret name — no secret values in logs)
 - [x] Encrypted environment variable store (at-rest encryption for `.env` file contents when Vault is unavailable)
-- [x] Per-request credential injection (decrypted credentials injected into request context only; never persisted to DB or logs)
+- [~] Per-request credential injection (decrypted credentials injected into request context only; never persisted to DB or logs)
 
 ### 1.7 Observability and structured logging
 
 - [x] Structured JSON application log (every request + response logged as machine-parseable JSON with level, timestamp, module, and trace context)
 - [x] `X-Request-ID` / `X-Correlation-ID` propagation (generated on ingress, threaded through all log lines, returned in response headers — enables request tracing across workers and external calls)
-- [x] OpenTelemetry distributed tracing export (spans cover: HTTP → agent loop → tool calls → LLM provider → response; exportable to Jaeger / Zipkin / OTLP)
-- [x] Prometheus metrics endpoint (`GET /metrics`) — latency histograms per endpoint, error rate counters, queue depth gauge, active SSE stream count, per-provider request counters
+- [~] OpenTelemetry distributed tracing export (spans cover: HTTP → agent loop → tool calls → LLM provider → response; exportable to Jaeger / Zipkin / OTLP)
+- [~] Prometheus metrics endpoint (`GET /metrics`) — latency histograms per endpoint, error rate counters, queue depth gauge, active SSE stream count, per-provider request counters
 - [x] Log forwarding to external sink (Loki / Datadog / CloudWatch via configurable handler)
 - [x] Log retention and rotation policy (configurable max log age + size; automatic purge)
 - [x] Admin-accessible audit log (`GET /admin/audit-log`) — all privileged actions (role changes, quota overrides, key deletions) with actor + timestamp
@@ -173,8 +173,8 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] `PROVIDER=auto` zero-config default — Implementation: `src/agent.py:_config["provider"]` defaults to "auto", `_smart_order()` routes dynamically
 - [x] Budget-aware routing (prefer cheapest model that meets quality bar) (`BUDGET_TIER` env + `_PROVIDER_COST_PER_1K_TOKENS` in `src/agent.py`)
 - [x] Provider spend tracking per request (cost written to `usage` table) — Implementation: `src/db.py:log_usage()` writes provider/model/tokens to `usage_log` table
-- [x] Provider priority override per persona — Implementation: `src/agent.py:set_provider_persona_override()` / `get_provider_persona_override()` + `_PERSONA_PROVIDER_OVERRIDES` dict
-- [x] Hardware-aware routing (prefer GPU-backed providers over CPU) — Implementation: `src/hardware.py:get_hardware_routing_hint()` probes system resources, `src/agent.py:_resource_tier()` routes based on RAM/CPU availability
+- [~] Provider priority override per persona — Implementation: `src/agent.py:set_provider_persona_override()` / `get_provider_persona_override()` + `_PERSONA_PROVIDER_OVERRIDES` dict
+- [~] Hardware-aware routing (prefer GPU-backed providers over CPU) — Implementation: `src/hardware.py:get_hardware_routing_hint()` probes system resources, `src/agent.py:_resource_tier()` routes based on RAM/CPU availability
 - [x] Provider benchmark baseline (latency / quality matrix per model) — Implementation: `src/agent.py:_PROVIDER_BENCHMARKS` dict with latency_ms, quality_score, tier, cost_tier per provider
 - [x] Provider capability matrix used by router (vision / json / tools / reasoning flags) — Implementation: `src/agent.py:PROVIDER_CAPABILITIES` dict, `src/api/routes.py:@router.get("/v1/models/capabilities")` returns capability matrix
 
@@ -249,7 +249,7 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] Tool-call call ID tracking for parallel/compositional flows
 - [x] Streaming token counter telemetry event
 - [x] Per-request execution budget (max tokens, max tool calls, max time)
-- [x] Agent warm-up / pre-loading (keep agent context primed between calls)
+- [~] Agent warm-up / pre-loading (keep agent context primed between calls)
 
 ### 3.2 Reasoning and thinking
 
