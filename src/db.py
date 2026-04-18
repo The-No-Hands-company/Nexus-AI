@@ -4,6 +4,7 @@ Supports SQLite (default) and PostgreSQL (via DATABASE_URL).
 """
 import os
 import json
+import time
 import threading
 import sqlite3
 import contextlib
@@ -231,6 +232,54 @@ class SQLiteBackend(DatabaseBackend):
                 trained_tokens   INTEGER,
                 error            TEXT,
                 result_files     TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fine_tuning_job_events (
+                id               TEXT PRIMARY KEY,
+                job_id           TEXT NOT NULL,
+                created_at       INTEGER NOT NULL,
+                level            TEXT NOT NULL DEFAULT 'info',
+                message          TEXT NOT NULL,
+                data             TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE TABLE IF NOT EXISTS execution_traces (
+                trace_id    TEXT PRIMARY KEY,
+                events      TEXT NOT NULL DEFAULT '[]',
+                created_at  REAL NOT NULL,
+                updated_at  REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS autonomy_traces (
+                trace_id    TEXT PRIMARY KEY,
+                data        TEXT NOT NULL DEFAULT '{}',
+                created_at  REAL NOT NULL,
+                updated_at  REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS task_shared_memory (
+                key         TEXT PRIMARY KEY,
+                value       TEXT NOT NULL DEFAULT 'null',
+                updated_at  REAL NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS task_queue_jobs (
+                task_id       TEXT PRIMARY KEY,
+                description   TEXT NOT NULL,
+                priority      INTEGER NOT NULL DEFAULT 5,
+                dependencies  TEXT NOT NULL DEFAULT '[]',
+                metadata      TEXT NOT NULL DEFAULT '{}',
+                schedule_cron TEXT NOT NULL DEFAULT '',
+                status        TEXT NOT NULL DEFAULT 'pending',
+                result        TEXT NOT NULL DEFAULT '',
+                error         TEXT NOT NULL DEFAULT '',
+                created_at    REAL NOT NULL,
+                started_at    REAL,
+                finished_at   REAL
+            );
+            CREATE TABLE IF NOT EXISTS ft_training_samples (
+                id          TEXT PRIMARY KEY,
+                created_at  REAL NOT NULL,
+                task        TEXT NOT NULL,
+                result      TEXT NOT NULL,
+                quality     REAL NOT NULL DEFAULT 0.7,
+                lessons     TEXT NOT NULL DEFAULT '[]',
+                source      TEXT NOT NULL DEFAULT 'reflection'
             );
         """)
         c.commit()
@@ -679,6 +728,54 @@ class PostgresBackend(DatabaseBackend):
                     trained_tokens   INTEGER,
                     error            TEXT,
                     result_files     TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS fine_tuning_job_events (
+                    id               TEXT PRIMARY KEY,
+                    job_id           TEXT NOT NULL,
+                    created_at       INTEGER NOT NULL,
+                    level            TEXT NOT NULL DEFAULT 'info',
+                    message          TEXT NOT NULL,
+                    data             TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE TABLE IF NOT EXISTS execution_traces (
+                    trace_id    TEXT PRIMARY KEY,
+                    events      TEXT NOT NULL DEFAULT '[]',
+                    created_at  DOUBLE PRECISION NOT NULL,
+                    updated_at  DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS autonomy_traces (
+                    trace_id    TEXT PRIMARY KEY,
+                    data        TEXT NOT NULL DEFAULT '{}',
+                    created_at  DOUBLE PRECISION NOT NULL,
+                    updated_at  DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS task_shared_memory (
+                    key         TEXT PRIMARY KEY,
+                    value       TEXT NOT NULL DEFAULT 'null',
+                    updated_at  DOUBLE PRECISION NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS task_queue_jobs (
+                    task_id       TEXT PRIMARY KEY,
+                    description   TEXT NOT NULL,
+                    priority      INTEGER NOT NULL DEFAULT 5,
+                    dependencies  TEXT NOT NULL DEFAULT '[]',
+                    metadata      TEXT NOT NULL DEFAULT '{}',
+                    schedule_cron TEXT NOT NULL DEFAULT '',
+                    status        TEXT NOT NULL DEFAULT 'pending',
+                    result        TEXT NOT NULL DEFAULT '',
+                    error         TEXT NOT NULL DEFAULT '',
+                    created_at    DOUBLE PRECISION NOT NULL,
+                    started_at    DOUBLE PRECISION,
+                    finished_at   DOUBLE PRECISION
+                );
+                CREATE TABLE IF NOT EXISTS ft_training_samples (
+                    id          TEXT PRIMARY KEY,
+                    created_at  DOUBLE PRECISION NOT NULL,
+                    task        TEXT NOT NULL,
+                    result      TEXT NOT NULL,
+                    quality     DOUBLE PRECISION NOT NULL DEFAULT 0.7,
+                    lessons     TEXT NOT NULL DEFAULT '[]',
+                    source      TEXT NOT NULL DEFAULT 'reflection'
                 );
             """)
             for col_sql in [
@@ -1460,6 +1557,53 @@ def update_fine_tuning_job(job_id: str, **fields) -> bool:
     return changed > 0
 
 
+def create_fine_tuning_job_event(job_id: str, message: str, level: str = "info", data: dict | None = None) -> str:
+    import uuid as _uuid
+
+    event_id = "ftevt-" + _uuid.uuid4().hex[:12]
+    ts = int(time.time())
+    payload = json.dumps(data or {})
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO fine_tuning_job_events(id, job_id, created_at, level, message, data) VALUES(?,?,?,?,?,?)",
+            (event_id, job_id, ts, level, message, payload),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO fine_tuning_job_events(id, job_id, created_at, level, message, data) VALUES(%s,%s,%s,%s,%s,%s)",
+            (event_id, job_id, ts, level, message, payload),
+        )
+    return event_id
+
+
+def list_fine_tuning_job_events(job_id: str, limit: int = 100) -> list[dict]:
+    safe_limit = max(1, min(int(limit), 1000))
+    if isinstance(_backend, SQLiteBackend):
+        rows = _sql_fetchall(
+            "SELECT * FROM fine_tuning_job_events WHERE job_id=? ORDER BY created_at ASC LIMIT ?",
+            (job_id, safe_limit),
+        )
+    else:
+        rows = _sql_fetchall(
+            "SELECT * FROM fine_tuning_job_events WHERE job_id=%s ORDER BY created_at ASC LIMIT %s",
+            (job_id, safe_limit),
+        )
+
+    events = []
+    for row in rows:
+        item = dict(row)
+        raw_data = item.get("data")
+        if isinstance(raw_data, str) and raw_data:
+            try:
+                item["data"] = json.loads(raw_data)
+            except Exception:
+                item["data"] = {}
+        else:
+            item["data"] = {}
+        events.append(item)
+    return events
+
+
 def get_feedback_stats() -> dict:
     rows = load_feedback_export(limit=20000)
     up = sum(1 for r in rows if str(r.get("reaction")) == "thumbs_up")
@@ -1528,3 +1672,233 @@ def clear_hitl_approvals():
 
 # Note: More functions from original db.py would need to be added to the interface
 # and both backends for full parity. This is the foundation.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Execution traces persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+import time as _time
+
+
+def save_execution_trace(trace_id: str, events: list) -> None:
+    now = _time.time()
+    events_json = json.dumps(events)
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO execution_traces(trace_id, events, created_at, updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(trace_id) DO UPDATE SET events=excluded.events, updated_at=excluded.updated_at",
+            (trace_id, events_json, now, now),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO execution_traces(trace_id, events, created_at, updated_at) VALUES(%s,%s,%s,%s) "
+            "ON CONFLICT(trace_id) DO UPDATE SET events=EXCLUDED.events, updated_at=EXCLUDED.updated_at",
+            (trace_id, events_json, now, now),
+        )
+
+
+def load_execution_trace(trace_id: str) -> list | None:
+    if isinstance(_backend, SQLiteBackend):
+        rows = _sql_fetchall("SELECT events FROM execution_traces WHERE trace_id=?", (trace_id,))
+    else:
+        rows = _sql_fetchall("SELECT events FROM execution_traces WHERE trace_id=%s", (trace_id,))
+    if not rows:
+        return None
+    return json.loads(rows[0]["events"])
+
+
+def list_execution_traces(limit: int = 50) -> list[dict]:
+    rows = _sql_fetchall(
+        "SELECT trace_id, created_at, updated_at FROM execution_traces ORDER BY updated_at DESC LIMIT "
+        + str(int(limit))
+    )
+    return list(rows)
+
+
+def delete_execution_trace(trace_id: str) -> bool:
+    if isinstance(_backend, SQLiteBackend):
+        changed = _sql_execute("DELETE FROM execution_traces WHERE trace_id=?", (trace_id,))
+    else:
+        changed = _sql_execute("DELETE FROM execution_traces WHERE trace_id=%s", (trace_id,))
+    return changed > 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Autonomy traces persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def save_autonomy_trace(trace_id: str, data: dict) -> None:
+    now = _time.time()
+    data_json = json.dumps(data)
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO autonomy_traces(trace_id, data, created_at, updated_at) VALUES(?,?,?,?) "
+            "ON CONFLICT(trace_id) DO UPDATE SET data=excluded.data, updated_at=excluded.updated_at",
+            (trace_id, data_json, now, now),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO autonomy_traces(trace_id, data, created_at, updated_at) VALUES(%s,%s,%s,%s) "
+            "ON CONFLICT(trace_id) DO UPDATE SET data=EXCLUDED.data, updated_at=EXCLUDED.updated_at",
+            (trace_id, data_json, now, now),
+        )
+
+
+def load_autonomy_trace(trace_id: str) -> dict | None:
+    if isinstance(_backend, SQLiteBackend):
+        rows = _sql_fetchall("SELECT data FROM autonomy_traces WHERE trace_id=?", (trace_id,))
+    else:
+        rows = _sql_fetchall("SELECT data FROM autonomy_traces WHERE trace_id=%s", (trace_id,))
+    if not rows:
+        return None
+    return json.loads(rows[0]["data"])
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Task queue shared memory persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def db_set_shared_memory(key: str, value) -> None:
+    now = _time.time()
+    value_json = json.dumps(value)
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO task_shared_memory(key, value, updated_at) VALUES(?,?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (key, value_json, now),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO task_shared_memory(key, value, updated_at) VALUES(%s,%s,%s) "
+            "ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at",
+            (key, value_json, now),
+        )
+
+
+def db_get_shared_memory(key: str):
+    if isinstance(_backend, SQLiteBackend):
+        rows = _sql_fetchall("SELECT value FROM task_shared_memory WHERE key=?", (key,))
+    else:
+        rows = _sql_fetchall("SELECT value FROM task_shared_memory WHERE key=%s", (key,))
+    if not rows:
+        return None
+    return json.loads(rows[0]["value"])
+
+
+def db_delete_shared_memory(key: str) -> bool:
+    if isinstance(_backend, SQLiteBackend):
+        changed = _sql_execute("DELETE FROM task_shared_memory WHERE key=?", (key,))
+    else:
+        changed = _sql_execute("DELETE FROM task_shared_memory WHERE key=%s", (key,))
+    return changed > 0
+
+
+def db_list_shared_memory() -> dict:
+    rows = _sql_fetchall("SELECT key, value FROM task_shared_memory ORDER BY key")
+    return {r["key"]: json.loads(r["value"]) for r in rows}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Task queue job persistence
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def db_save_task_job(task_id: str, description: str, priority: int, dependencies: list,
+                     metadata: dict, schedule_cron: str, status: str, result: str,
+                     error: str, created_at: float, started_at=None, finished_at=None) -> None:
+    deps_json = json.dumps(dependencies)
+    meta_json = json.dumps(metadata)
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO task_queue_jobs(task_id, description, priority, dependencies, metadata, "
+            "schedule_cron, status, result, error, created_at, started_at, finished_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(task_id) DO UPDATE SET status=excluded.status, result=excluded.result, "
+            "error=excluded.error, started_at=excluded.started_at, finished_at=excluded.finished_at, "
+            "metadata=excluded.metadata",
+            (task_id, description, priority, deps_json, meta_json, schedule_cron, status,
+             result, error, created_at, started_at, finished_at),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO task_queue_jobs(task_id, description, priority, dependencies, metadata, "
+            "schedule_cron, status, result, error, created_at, started_at, finished_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT(task_id) DO UPDATE SET status=EXCLUDED.status, result=EXCLUDED.result, "
+            "error=EXCLUDED.error, started_at=EXCLUDED.started_at, finished_at=EXCLUDED.finished_at, "
+            "metadata=EXCLUDED.metadata",
+            (task_id, description, priority, deps_json, meta_json, schedule_cron, status,
+             result, error, created_at, started_at, finished_at),
+        )
+
+
+def db_list_task_jobs(status: str = "", limit: int = 50) -> list[dict]:
+    if status:
+        if isinstance(_backend, SQLiteBackend):
+            rows = _sql_fetchall(
+                "SELECT * FROM task_queue_jobs WHERE status=? ORDER BY created_at DESC LIMIT " + str(int(limit)),
+                (status,),
+            )
+        else:
+            rows = _sql_fetchall(
+                "SELECT * FROM task_queue_jobs WHERE status=%s ORDER BY created_at DESC LIMIT " + str(int(limit)),
+                (status,),
+            )
+    else:
+        rows = _sql_fetchall(
+            "SELECT * FROM task_queue_jobs ORDER BY created_at DESC LIMIT " + str(int(limit))
+        )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["dependencies"] = json.loads(d.get("dependencies") or "[]")
+        d["metadata"] = json.loads(d.get("metadata") or "{}")
+        result.append(d)
+    return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fine-tuning training samples (reflection → fine-tuning pipeline)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def save_ft_training_sample(task: str, result: str, quality: float,
+                             lessons: list, source: str = "reflection") -> str:
+    import uuid as _uuid
+    sample_id = "fts-" + _uuid.uuid4().hex[:12]
+    now = _time.time()
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO ft_training_samples(id, created_at, task, result, quality, lessons, source) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (sample_id, now, task, result, quality, json.dumps(lessons), source),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO ft_training_samples(id, created_at, task, result, quality, lessons, source) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s)",
+            (sample_id, now, task, result, quality, json.dumps(lessons), source),
+        )
+    return sample_id
+
+
+def list_ft_training_samples(limit: int = 100, min_quality: float = 0.0) -> list[dict]:
+    if isinstance(_backend, SQLiteBackend):
+        rows = _sql_fetchall(
+            "SELECT * FROM ft_training_samples WHERE quality >= ? ORDER BY created_at DESC LIMIT " + str(int(limit)),
+            (min_quality,),
+        )
+    else:
+        rows = _sql_fetchall(
+            "SELECT * FROM ft_training_samples WHERE quality >= %s ORDER BY created_at DESC LIMIT " + str(int(limit)),
+            (min_quality,),
+        )
+    result = []
+    for r in rows:
+        d = dict(r)
+        d["lessons"] = json.loads(d.get("lessons") or "[]")
+        result.append(d)
+    return result

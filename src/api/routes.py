@@ -18,9 +18,20 @@ from ..scheduler import (
     restore_from_db,
 )
 from ..gist_backup import restore_from_gist
-from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries, list_users as db_list_users, update_user_role as db_update_user_role, get_user as db_get_user, _backend as db_backend, update_user_email as db_update_user_email, create_api_key as db_create_api_key, list_api_keys as db_list_api_keys, get_api_key_by_hash as db_get_api_key_by_hash, revoke_api_key as db_revoke_api_key, touch_api_key as db_touch_api_key, get_or_create_oauth_user as db_get_or_create_oauth_user, create_fine_tuning_job as db_create_fine_tuning_job, get_fine_tuning_job as db_get_fine_tuning_job, list_fine_tuning_jobs as db_list_fine_tuning_jobs, update_fine_tuning_job as db_update_fine_tuning_job)
+from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries, list_users as db_list_users, update_user_role as db_update_user_role, get_user as db_get_user, _backend as db_backend, update_user_email as db_update_user_email, create_api_key as db_create_api_key, list_api_keys as db_list_api_keys, get_api_key_by_hash as db_get_api_key_by_hash, revoke_api_key as db_revoke_api_key, touch_api_key as db_touch_api_key, get_or_create_oauth_user as db_get_or_create_oauth_user, create_fine_tuning_job as db_create_fine_tuning_job, get_fine_tuning_job as db_get_fine_tuning_job, list_fine_tuning_jobs as db_list_fine_tuning_jobs, update_fine_tuning_job as db_update_fine_tuning_job, create_fine_tuning_job_event as db_create_fine_tuning_job_event, list_fine_tuning_job_events as db_list_fine_tuning_job_events, save_execution_trace as db_save_execution_trace, load_execution_trace as db_load_execution_trace, list_execution_traces as db_list_execution_traces, delete_execution_trace as db_delete_execution_trace, save_autonomy_trace as db_save_autonomy_trace, load_autonomy_trace as db_load_autonomy_trace, db_set_shared_memory, db_get_shared_memory, db_delete_shared_memory, db_list_shared_memory, db_save_task_job, db_list_task_jobs, save_ft_training_sample as db_save_ft_training_sample, list_ft_training_samples as db_list_ft_training_samples)
 from ..personas import list_personas, set_persona, get_active_persona_name, get_persona
-from ..memory import (add_memory, get_memory_context, summarize_history, get_semantic_memory, add_semantic_memory, delete_all as delete_all_memory, get_all as get_all_memory)
+from ..memory import (
+    add_memory,
+    get_memory_context,
+    summarize_history,
+    get_semantic_memory,
+    add_semantic_memory,
+    delete_all as delete_all_memory,
+    get_all as get_all_memory,
+    get_episodic_timeline as get_episodic_memory,
+    export_memory_bundle as export_memory_bundle,
+    import_memory_bundle as import_memory_bundle,
+)
 from ..autonomy import Orchestrator, PlanningSystem, classify_subtask
 from ..safety import GuardrailViolation, check_user_task, scrub_pii
 from ..safety_pipeline import SAFETY_POLICY_PROFILES, get_safety_policy, screen_input, explain_prompt_injection
@@ -30,8 +41,13 @@ from ..knowledge_graph import (
     kg_list_entities as _kg_list,
     kg_get as _kg_get,
     kg_delete as _kg_delete,
+    kg_graph as _kg_graph,
+    kg_merge as _kg_merge,
+    kg_import_ontology as _kg_import,
+    kg_hybrid_search as _kg_hybrid_search,
 )
 from ..execution_trace import (
+    save_checkpoint as _save_checkpoint,
     list_traces as _list_traces,
     load_checkpoints as _load_checkpoints,
     get_latest_checkpoint as _get_latest_checkpoint,
@@ -518,6 +534,15 @@ def _orchestrator_llm(prompt: str, task: str = "") -> str:
     if isinstance(result, dict):
         return result.get("content", str(result))
     return str(result)
+
+
+def _save_autonomy_checkpoint(trace_id: str, step_idx: int, goal: str, events: list[dict]) -> None:
+    """Persist autonomy execution checkpoint snapshots for replay/resume."""
+    try:
+        _save_checkpoint(trace_id, step_idx, goal, [], events)
+    except Exception:
+        # Checkpointing should not fail the user-visible autonomy request.
+        pass
 
 
 def _hash_api_key(raw: str) -> str:
@@ -1905,6 +1930,23 @@ async def add_semantic_mem(request: Request):
         return {"error": str(e)}
 
 
+@router.get("/memory/episodic")
+def get_episodic_mem(limit: int = 100):
+    return {"events": get_episodic_memory(limit=limit), "count": len(get_episodic_memory(limit=limit))}
+
+
+@router.get("/memory/export")
+def memory_export(limit: int = 1000):
+    return export_memory_bundle(limit=limit)
+
+
+@router.post("/memory/import")
+async def memory_import(request: Request):
+    data = await request.json()
+    result = import_memory_bundle(data if isinstance(data, dict) else {}, source="api_import")
+    return {"ok": True, **result}
+
+
 # ── Benchmark endpoints ────────────────────────────────────────────────────────
 _BENCHMARK_PROBES = [
     ("arithmetic",  "What is 17 * 23?"),
@@ -2015,6 +2057,175 @@ async def reason_consensus(request: Request):
         }
     except Exception as exc:
         return _api_error(str(exc), "consensus_error", 500)
+
+
+@router.post("/reason/graph-of-thought")
+async def reason_graph_of_thought(request: Request):
+    from ..thinking import build_got_prompt, parse_got_response
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    task = (body.get("task") or body.get("query") or "").strip()
+    if not task:
+        return _api_error("task is required", "validation_error", 422)
+
+    try:
+        safe_task = check_user_task(task, policy_profile=_config.get("safety_profile", "standard"))
+        raw_resp, provider = call_llm_with_fallback(
+            [{"role": "user", "content": build_got_prompt(safe_task)}],
+            safe_task,
+        )
+    except GuardrailViolation as exc:
+        return _api_error(exc.reason, exc.code, 422)
+    except Exception as exc:
+        return _api_error(str(exc), "reasoning_error", 500)
+
+    raw_text = raw_resp.get("content") or str(raw_resp)
+    parsed = parse_got_response(raw_text)
+    return {"task": safe_task, "provider": provider, **parsed, "raw_response": raw_text}
+
+
+@router.post("/reason/mcts")
+async def reason_mcts(request: Request):
+    from ..thinking import run_mcts_planning
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    goal = (body.get("goal") or body.get("task") or "").strip()
+    if not goal:
+        return _api_error("goal is required", "validation_error", 422)
+
+    iterations = max(2, min(int(body.get("iterations", 8)), 24))
+    max_depth = max(1, min(int(body.get("max_depth", 4)), 8))
+    branching = max(2, min(int(body.get("branching", 3)), 5))
+
+    try:
+        safe_goal = check_user_task(goal, policy_profile=_config.get("safety_profile", "standard"))
+    except GuardrailViolation as exc:
+        return _api_error(exc.reason, exc.code, 422)
+
+    providers_used: List[str] = []
+
+    def _llm_fn(prompt: str) -> str:
+        result, provider = call_llm_with_fallback([{"role": "user", "content": prompt}], safe_goal)
+        providers_used.append(provider)
+        return result.get("content") or str(result)
+
+    try:
+        outcome = run_mcts_planning(
+            safe_goal,
+            llm_fn=_llm_fn,
+            iterations=iterations,
+            max_depth=max_depth,
+            branching=branching,
+        )
+    except Exception as exc:
+        return _api_error(str(exc), "reasoning_error", 500)
+
+    return {
+        "goal": safe_goal,
+        "best_plan": outcome.get("best_plan", []),
+        "best_score": outcome.get("best_score", 0.0),
+        "best_rationale": outcome.get("best_rationale", ""),
+        "tree_size": outcome.get("tree_size", 0),
+        "iterations": outcome.get("iterations", iterations),
+        "all_plans": outcome.get("all_plans", []),
+        "providers": providers_used,
+    }
+
+
+@router.post("/reason/socratic")
+async def reason_socratic(request: Request):
+    from ..thinking import (
+        build_socratic_prompt,
+        parse_socratic_response,
+        build_socratic_answer_prompt,
+    )
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    topic = (body.get("topic") or body.get("task") or "").strip()
+    if not topic:
+        return _api_error("topic is required", "validation_error", 422)
+
+    depth = max(1, min(int(body.get("depth", 3)), 6))
+
+    try:
+        safe_topic = check_user_task(topic, policy_profile=_config.get("safety_profile", "standard"))
+        tree_resp, tree_provider = call_llm_with_fallback(
+            [{"role": "user", "content": build_socratic_prompt(safe_topic, depth=depth)}],
+            safe_topic,
+        )
+        question_tree = parse_socratic_response(tree_resp.get("content") or str(tree_resp))
+        answer_resp, answer_provider = call_llm_with_fallback(
+            [{"role": "user", "content": build_socratic_answer_prompt(safe_topic, question_tree)}],
+            safe_topic,
+        )
+    except GuardrailViolation as exc:
+        return _api_error(exc.reason, exc.code, 422)
+    except Exception as exc:
+        return _api_error(str(exc), "reasoning_error", 500)
+
+    answer_text = answer_resp.get("content") or str(answer_resp)
+    return {
+        "topic": safe_topic,
+        "depth": depth,
+        "question_tree": question_tree,
+        "answer": answer_text,
+        "providers": {"question_tree": tree_provider, "answer": answer_provider},
+    }
+
+
+@router.post("/reason/verify")
+async def reason_verify(request: Request):
+    from ..thinking import build_verification_prompt, parse_verification_response
+
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    claim = (body.get("claim") or "").strip()
+    steps = body.get("steps") or []
+    domain = str(body.get("domain", "general") or "general")
+    if not claim:
+        return _api_error("claim is required", "validation_error", 422)
+    if not isinstance(steps, list):
+        return _api_error("steps must be an array", "validation_error", 422)
+
+    try:
+        safe_claim = check_user_task(claim, policy_profile=_config.get("safety_profile", "standard"))
+        resp, provider = call_llm_with_fallback(
+            [{"role": "user", "content": build_verification_prompt(safe_claim, steps, domain=domain)}],
+            safe_claim,
+        )
+    except GuardrailViolation as exc:
+        return _api_error(exc.reason, exc.code, 422)
+    except Exception as exc:
+        return _api_error(str(exc), "reasoning_error", 500)
+
+    raw_text = resp.get("content") or str(resp)
+    parsed = parse_verification_response(raw_text)
+    return {
+        "claim": safe_claim,
+        "domain": domain,
+        "provider": provider,
+        **parsed,
+        "raw_response": raw_text,
+    }
 
 
 def _extract_citation_urls(text: str) -> list[str]:
@@ -3083,6 +3294,7 @@ async def autonomy_plan(request: Request):
             ],
         }
         autonomy_traces[trace_id] = {"type": "plan", "status": "ready", **plan}
+        db_save_autonomy_trace(trace_id, autonomy_traces[trace_id])
         return plan
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
@@ -3111,20 +3323,38 @@ async def autonomy_execute(request: Request):
     except Exception:
         max_subtasks = 6
     trace_id = secrets.token_hex(8)
+    checkpoint_events: List[Dict[str, Any]] = [{"type": "autonomy_start", "goal": goal, "trace_id": trace_id}]
+    _save_autonomy_checkpoint(trace_id, 0, goal, checkpoint_events)
     try:
         orchestrator = Orchestrator(_orchestrator_llm, max_parallel=2)
         result = orchestrator.execute(goal, {"strategy": strategy, "max_subtasks": max_subtasks})
         result["trace_id"] = trace_id
+        for idx, subtask in enumerate(result.get("subtasks", []), 1):
+            checkpoint_events.append({"type": "subtask_done", "trace_id": trace_id, "subtask": subtask})
+            _save_autonomy_checkpoint(trace_id, idx, goal, checkpoint_events)
+        checkpoint_events.append(
+            {
+                "type": "autonomy_done",
+                "trace_id": trace_id,
+                "result": result.get("result", ""),
+                "plan_summary": result.get("plan_summary", ""),
+                "execution_time": result.get("execution_time", 0),
+            }
+        )
+        _save_autonomy_checkpoint(trace_id, len(checkpoint_events), goal, checkpoint_events)
         autonomy_traces[trace_id] = {"type": "execution", "goal": goal, "status": "done", **result}
+        db_save_autonomy_trace(trace_id, autonomy_traces[trace_id])
         return result
     except Exception as e:
+        checkpoint_events.append({"type": "error", "trace_id": trace_id, "error": str(e)})
+        _save_autonomy_checkpoint(trace_id, len(checkpoint_events), goal, checkpoint_events)
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
 @router.get("/autonomy/trace/{trace_id}")
 def autonomy_trace(trace_id: str):
     """Retrieve a stored plan or execution trace by its ID."""
-    trace = autonomy_traces.get(trace_id)
+    trace = autonomy_traces.get(trace_id) or db_load_autonomy_trace(trace_id)
     if trace is None:
         return JSONResponse({"error": "trace not found"}, status_code=404)
     return trace
@@ -3159,7 +3389,22 @@ async def new_session(request: Request = None):
 
 @router.delete("/session/{sid}")
 def clear_session(sid: str):
+    history = sessions.get(sid, [])
+    if history:
+        try:
+            summary = summarize_history(history, call_llm_with_fallback)
+            if summary:
+                add_memory(
+                    summary,
+                    tags=[sid, "session_close"],
+                    persona=get_active_persona_name(),
+                    session_id=sid,
+                    source="session_close",
+                )
+        except Exception:
+            pass
     sessions.pop(sid, None)
+    db_delete_shared_memory(f"session_history:{sid}")
     _session_state.pop(sid, None)
     return {"cleared":sid}
 
@@ -3649,7 +3894,9 @@ async def agent_post(request: Request):
 
     history = sessions.get(sid,[]) if sid else []
     result  = run_agent_task(task, history, files, sid=sid or "")
-    if sid: sessions[sid]=result["history"]
+    if sid:
+        sessions[sid]=result["history"]
+        db_set_shared_memory(f"session_history:{sid}", result["history"])
     return {"result":result["result"],"provider":result["provider"],"model":result["model"],"session_id":sid}
 
 
@@ -3683,6 +3930,7 @@ async def agent_stream(request: Request):
         return _api_error(exc.reason, exc.code, 422)
 
     execution_traces[trace_id] = []
+    db_save_execution_trace(trace_id, execution_traces[trace_id])
 
     history  = sessions.get(sid,[]) if sid else []
     loop     = asyncio.get_event_loop()
@@ -3696,12 +3944,15 @@ async def agent_stream(request: Request):
                 if stop_evt.is_set(): break
                 if event["type"]=="done" and sid:
                     sessions[sid] = event.get("history", history)
+                    db_set_shared_memory(f"session_history:{sid}", sessions[sid])
                 trace_event = {k:v for k,v in event.items() if k not in ("history","workdir")}
                 execution_traces[trace_id].append(trace_event)
+                db_save_execution_trace(trace_id, execution_traces[trace_id])
                 loop.call_soon_threadsafe(queue.put_nowait, event)
         except Exception as e:
             error_event = {"type":"error","message":str(e)}
             execution_traces[trace_id].append(error_event)
+            db_save_execution_trace(trace_id, execution_traces[trace_id])
             loop.call_soon_threadsafe(queue.put_nowait,error_event)
         finally:
             _active_streams.pop(stream_id, None)
@@ -3724,7 +3975,7 @@ async def agent_stream(request: Request):
 
 @router.get("/agent/trace/{trace_id}")
 def get_agent_trace(trace_id: str):
-    trace = execution_traces.get(trace_id)
+    trace = execution_traces.get(trace_id) or db_load_execution_trace(trace_id)
     if trace is None:
         return _api_error("trace not found", "not_found", 404)
     return {"trace_id": trace_id, "events": trace}
@@ -3733,7 +3984,10 @@ def get_agent_trace(trace_id: str):
 @router.post("/agent/stop/{stream_id}")
 def stop_stream(stream_id: str):
     evt = _active_streams.get(stream_id)
-    if evt: evt.set(); return {"stopped":stream_id}
+    if evt:
+        evt.set()
+        db_set_shared_memory(f"stream_stop:{stream_id}", {"stopped": True, "stopped_at": time.time()})
+        return {"stopped":stream_id}
     return {"not_found":stream_id}
 
 
@@ -4123,6 +4377,7 @@ async def hierarchical_orchestrate(request: Request):
             "stages_completed": hr.stages_completed,
         }
         autonomy_traces[trace_id] = {"type": "hierarchical", "status": "done", **result}
+        db_save_autonomy_trace(trace_id, autonomy_traces[trace_id])
         return result
     except Exception as exc:
         return _api_error(str(exc), "orchestration_error", 500)
@@ -4131,7 +4386,7 @@ async def hierarchical_orchestrate(request: Request):
 @router.get("/orchestrate/hierarchical/{trace_id}")
 def get_hierarchical_trace(trace_id: str):
     """Retrieve a stored hierarchical orchestration result by trace ID."""
-    trace = autonomy_traces.get(trace_id)
+    trace = autonomy_traces.get(trace_id) or db_load_autonomy_trace(trace_id)
     if trace is None:
         return JSONResponse({"error": "trace not found"}, status_code=404)
     return trace
@@ -4421,11 +4676,52 @@ def kg_entity_delete_endpoint(name: str):
     return {"deleted": name, "ok": True}
 
 
+@router.get("/kg/graph")
+def kg_graph_endpoint(limit: int = 500):
+    return _kg_graph(limit=limit)
+
+
+@router.post("/kg/merge")
+async def kg_merge_endpoint(request: Request):
+    data = await request.json()
+    primary = (data.get("primary") or "").strip()
+    duplicate = (data.get("duplicate") or "").strip()
+    if not primary or not duplicate:
+        return _api_error("primary and duplicate are required", "validation_error", 422)
+    result = _kg_merge(primary, duplicate)
+    if not result.get("merged"):
+        return _api_error("merge failed", "merge_error", 400)
+    return result
+
+
+@router.post("/kg/import")
+async def kg_import_endpoint(request: Request):
+    data = await request.json()
+    content = str(data.get("content", "") or "")
+    if not content.strip():
+        return _api_error("content is required", "validation_error", 422)
+    fmt = str(data.get("format", "auto") or "auto")
+    limit = int(data.get("limit", 2000) or 2000)
+    return _kg_import(content, fmt=fmt, limit=limit)
+
+
+@router.get("/kg/hybrid-search")
+def kg_hybrid_search_endpoint(q: str = "", limit: int = 10):
+    if not q.strip():
+        return _api_error("q is required", "validation_error", 422)
+    return _kg_hybrid_search(q.strip(), limit=limit)
+
+
 # ── Execution Trace replay/resume endpoints ──────────────────────────────────
 
 @router.get("/tasks")
 def list_tasks(limit: int = 50):
     traces = _list_traces(limit=limit)
+    persisted = db_list_execution_traces(limit=limit)
+    seen = {t.get("trace_id") for t in traces if isinstance(t, dict)}
+    for trace in persisted:
+        if trace.get("trace_id") not in seen:
+            traces.append(trace)
     return {"traces": traces, "count": len(traces)}
 
 
@@ -4433,6 +4729,8 @@ def list_tasks(limit: int = 50):
 def get_task_trace(trace_id: str):
     # Check in-memory first (live traces), then SQLite checkpoints
     in_memory = execution_traces.get(trace_id)
+    if in_memory is None:
+        in_memory = db_load_execution_trace(trace_id)
     checkpoints = _load_checkpoints(trace_id)
     if in_memory is None and not checkpoints:
         return _api_error("trace not found", "not_found", 404)
@@ -4447,6 +4745,8 @@ async def replay_task(trace_id: str):
 
     # Prefer in-memory events, fall back to last SQLite checkpoint's events
     stored_events = execution_traces.get(trace_id)
+    if stored_events is None:
+        stored_events = db_load_execution_trace(trace_id)
     if stored_events is None:
         cp = _get_latest_checkpoint(trace_id)
         stored_events = cp["events"] if cp else None
@@ -4482,6 +4782,7 @@ async def resume_task(trace_id: str, request: Request):
 
     new_trace_id = str(uuid.uuid4())
     execution_traces[new_trace_id] = []
+    db_save_execution_trace(new_trace_id, execution_traces[new_trace_id])
     loop = asyncio.get_event_loop()
     queue: asyncio.Queue = asyncio.Queue()
     stop_evt = threading.Event()
@@ -4498,10 +4799,12 @@ async def resume_task(trace_id: str, request: Request):
                     sessions[sid] = event.get("history", saved_history)
                 trace_event = {k: v for k, v in event.items() if k not in ("history", "workdir")}
                 execution_traces[new_trace_id].append(trace_event)
+                db_save_execution_trace(new_trace_id, execution_traces[new_trace_id])
                 loop.call_soon_threadsafe(queue.put_nowait, event)
         except Exception as e:
             err_event = {"type": "error", "message": str(e)}
             execution_traces[new_trace_id].append(err_event)
+            db_save_execution_trace(new_trace_id, execution_traces[new_trace_id])
             loop.call_soon_threadsafe(queue.put_nowait, err_event)
         finally:
             _active_streams.pop(new_stream_id, None)
@@ -4529,6 +4832,7 @@ async def resume_task(trace_id: str, request: Request):
 def delete_task_trace(trace_id: str):
     deleted = _delete_trace(trace_id)
     execution_traces.pop(trace_id, None)
+    deleted = db_delete_execution_trace(trace_id) or deleted
     if not deleted:
         return _api_error("trace not found", "not_found", 404)
     return {"deleted": trace_id, "ok": True}
@@ -5486,6 +5790,68 @@ def v1_get_file_content(file_id: str):
     return FileResponse(data_path, filename=meta.get("filename", file_id))
 
 
+@router.get("/v1/fine-tuning/training-samples")
+def v1_list_training_samples(limit: int = 100, min_quality: float = 0.0):
+    safe_limit = min(max(int(limit or 100), 1), 500)
+    safe_quality = max(0.0, min(float(min_quality or 0.0), 1.0))
+    return {
+        "object": "list",
+        "data": db_list_ft_training_samples(limit=safe_limit, min_quality=safe_quality),
+    }
+
+
+@router.post("/v1/fine-tuning/training-samples/export")
+async def v1_export_training_samples(request: Request):
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    min_quality = max(0.0, min(float(body.get("min_quality", 0.7) or 0.7), 1.0))
+    limit = min(max(int(body.get("limit", 200) or 200), 1), 1000)
+    model = str(body.get("model", "gpt-3.5-turbo") or "gpt-3.5-turbo")
+
+    samples = db_list_ft_training_samples(limit=limit, min_quality=min_quality)
+    if not samples:
+        return _v1_error("no training samples matched the requested filter", "not_found_error", 404)
+
+    _ensure_files_dir()
+    file_id = f"file-{uuid.uuid4().hex[:12]}"
+    data_path = os.path.join(_FILES_DIR, file_id)
+    lines = []
+    for sample in samples:
+        lesson_text = "\n".join(f"- {lesson}" for lesson in (sample.get("lessons") or []))
+        messages = [
+            {"role": "system", "content": "You are a helpful assistant that improves future responses using retrospective quality signals."},
+            {"role": "user", "content": str(sample.get("task") or "")},
+            {"role": "assistant", "content": str(sample.get("result") or "")},
+        ]
+        completion = str(sample.get("result") or "")
+        if lesson_text:
+            completion += "\n\nRetrospective lessons:\n" + lesson_text
+        lines.append(json.dumps({"messages": messages, "completion": completion}))
+
+    with open(data_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+
+    meta = {
+        "id": file_id,
+        "object": "file",
+        "bytes": os.path.getsize(data_path),
+        "created_at": int(time.time()),
+        "filename": f"reflection-training-{model.replace('/', '-')}.jsonl",
+        "purpose": "fine-tune",
+        "status": "processed",
+        "sample_count": len(samples),
+        "min_quality": min_quality,
+    }
+    with open(_file_meta_path(file_id), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh)
+
+    return meta
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Fine-tuning API  — persisted compatibility lifecycle (/v1/fine-tuning/jobs)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5502,6 +5868,7 @@ def _run_fine_tuning_job(job_id: str):
             return
 
         db_update_fine_tuning_job(job_id, status="running")
+        db_create_fine_tuning_job_event(job_id, "Job status changed to running", data={"status": "running"})
         time.sleep(0.6)
 
         job = db_get_fine_tuning_job(job_id)
@@ -5519,12 +5886,23 @@ def _run_fine_tuning_job(job_id: str):
             finished_at=int(time.time()),
             result_files=[str(job.get("training_file") or "")],
         )
+        db_create_fine_tuning_job_event(
+            job_id,
+            "Job completed successfully",
+            data={"status": "succeeded", "fine_tuned_model": ft_model, "trained_tokens": trained_tokens},
+        )
     except Exception as exc:
         db_update_fine_tuning_job(
             job_id,
             status="failed",
             finished_at=int(time.time()),
             error={"message": str(exc), "code": "fine_tuning_job_error"},
+        )
+        db_create_fine_tuning_job_event(
+            job_id,
+            "Job failed",
+            level="error",
+            data={"status": "failed", "error": str(exc)},
         )
 
 
@@ -5553,6 +5931,7 @@ async def v1_create_fine_tuning_job(request: Request):
         status="queued",
     ).model_dump()
     db_create_fine_tuning_job(job)
+    db_create_fine_tuning_job_event(job["id"], "Job created", data={"status": "queued"})
 
     threading.Thread(target=_run_fine_tuning_job, args=(job["id"],), daemon=True).start()
     return job
@@ -5595,7 +5974,33 @@ def v1_cancel_fine_tuning_job(job_id: str):
         finished_at=int(time.time()),
         error={"message": "Cancelled by user", "code": "cancelled"},
     )
+    db_create_fine_tuning_job_event(job_id, "Job cancelled", data={"status": "cancelled"})
     return db_get_fine_tuning_job(job_id)
+
+
+@router.get("/v1/fine-tuning/jobs/{job_id}/events")
+def v1_list_fine_tuning_job_events(job_id: str, limit: int = 100):
+    init_db()
+    job = db_get_fine_tuning_job(job_id)
+    if job is None:
+        return _v1_error("fine-tuning job not found", "not_found_error", 404)
+
+    events = db_list_fine_tuning_job_events(job_id, limit=limit)
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": event.get("id"),
+                "object": "fine_tuning.job.event",
+                "created_at": int(event.get("created_at") or 0),
+                "level": event.get("level", "info"),
+                "message": event.get("message", ""),
+                "data": event.get("data", {}),
+            }
+            for event in events
+        ],
+        "has_more": False,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -5911,15 +6316,25 @@ async def agent_reflect(request: Request):
     from ..thinking import build_reflection_prompt, parse_reflection_response
     prompt = build_reflection_prompt(task, result, tool_trace or [])
     try:
-        raw = call_llm_with_fallback([{"role": "user", "content": prompt}])
+        raw_resp, provider = call_llm_with_fallback([{"role": "user", "content": prompt}], task)
     except Exception as exc:
         return _api_error(f"LLM call failed: {exc}", "model_error", 502)
 
-    parsed = parse_reflection_response(raw)
+    raw_text = raw_resp.get("content") or str(raw_resp)
+    parsed = parse_reflection_response(raw_text)
+    sample_id = db_save_ft_training_sample(
+        task=task,
+        result=result,
+        quality=float(parsed.get("quality_score", 0.7) or 0.7),
+        lessons=list(parsed.get("lessons", []) or []),
+        source="reflection",
+    )
     return {
         "task":         task,
         "reflection":   parsed,
-        "raw_response": raw,
+        "provider": provider,
+        "fine_tuning_sample_id": sample_id,
+        "raw_response": raw_text,
     }
 
 
@@ -5933,24 +6348,46 @@ async def autonomy_execute_stream(request: Request):
     strategy     = str(body.get("strategy", "parallel"))
     max_subtasks = int(body.get("max_subtasks", 6))
     sid          = str(body.get("sid", ""))
+    trace_id     = secrets.token_hex(8)
 
     if not goal:
         return _api_error("'goal' is required", "invalid_request_error", 400)
 
     import queue as _queue
     event_queue: "_queue.Queue[dict | None]" = _queue.Queue()
+    checkpoint_events: List[Dict[str, Any]] = []
 
     def _run_autonomy():
         try:
-            llm_fn = lambda msgs: call_llm_with_fallback(msgs)
-            orchestrator = Orchestrator(llm=llm_fn)
-            event_queue.put({"type": "autonomy_start", "goal": goal})
+            orchestrator = Orchestrator(llm=_orchestrator_llm)
+            start_evt = {"type": "autonomy_start", "goal": goal, "trace_id": trace_id}
+            checkpoint_events.append(start_evt)
+            _save_autonomy_checkpoint(trace_id, 0, goal, checkpoint_events)
+            event_queue.put(start_evt)
             result = orchestrator.execute(goal, context={"strategy": strategy, "max_subtasks": max_subtasks, "sid": sid})
-            for subtask in result.get("subtasks", []):
-                event_queue.put({"type": "subtask_done", "subtask": subtask})
-            event_queue.put({"type": "autonomy_done", "result": result.get("result", ""), "plan_summary": result.get("plan_summary", ""), "execution_time": result.get("execution_time", 0)})
+            result["trace_id"] = trace_id
+            for idx, subtask in enumerate(result.get("subtasks", []), 1):
+                evt = {"type": "subtask_done", "trace_id": trace_id, "subtask": subtask}
+                checkpoint_events.append(evt)
+                _save_autonomy_checkpoint(trace_id, idx, goal, checkpoint_events)
+                event_queue.put(evt)
+            done_evt = {
+                "type": "autonomy_done",
+                "trace_id": trace_id,
+                "result": result.get("result", ""),
+                "plan_summary": result.get("plan_summary", ""),
+                "execution_time": result.get("execution_time", 0),
+            }
+            checkpoint_events.append(done_evt)
+            _save_autonomy_checkpoint(trace_id, len(checkpoint_events), goal, checkpoint_events)
+            autonomy_traces[trace_id] = {"type": "execution_stream", "goal": goal, "status": "done", **result}
+            db_save_autonomy_trace(trace_id, autonomy_traces[trace_id])
+            event_queue.put(done_evt)
         except Exception as exc:
-            event_queue.put({"type": "error", "error": str(exc)})
+            err_evt = {"type": "error", "trace_id": trace_id, "error": str(exc)}
+            checkpoint_events.append(err_evt)
+            _save_autonomy_checkpoint(trace_id, len(checkpoint_events), goal, checkpoint_events)
+            event_queue.put(err_evt)
         finally:
             event_queue.put(None)  # sentinel
 
@@ -5965,7 +6402,11 @@ async def autonomy_execute_stream(request: Request):
                 break
             yield f"data: {json.dumps(event)}\n\n"
 
-    return StreamingResponse(_gen(), media_type="text/event-stream")
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "X-Trace-Id": trace_id},
+    )
 
 
 # ── Task queue routes ─────────────────────────────────────────────────────────

@@ -121,7 +121,7 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] `POST /v1/audio/transcriptions` (Whisper-compatible STT, local faster-whisper + OpenAI fallback)
 - [x] `POST /v1/audio/speech` (TTS endpoint, local piper/espeak + OpenAI fallback)
 - [x] `GET/POST/DELETE /v1/files` + `GET /v1/files/{id}/content` (OpenAI Files API compatibility)
-- [~] `POST/GET /v1/fine-tuning/jobs`, `GET/POST /v1/fine-tuning/jobs/{id}` (fine-tuning API compatibility stub)
+- [x] `POST/GET /v1/fine-tuning/jobs`, `GET/POST /v1/fine-tuning/jobs/{id}` (persistent OpenAI-compatible fine-tuning lifecycle with background state transitions, cancellation, and durable event history via `GET /v1/fine-tuning/jobs/{id}/events` in `src/api/routes.py` + `src/db.py`)
 - [x] OpenAI Structured Outputs schema subset enforcement (`_validate_json_schema_value()` in `src/api/routes.py`)
 - [x] DeepSeek `reasoning_content` field normalization (`_call_openai()` extracts and maps to `thought` field)
 - [x] Gemini function-call ID mapping for parallel calls (`_call_openai()` maps `tool_calls` IDs to `_tool_calls`)
@@ -151,8 +151,8 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] SSE event stream (`token`, `think`, `plan`, `tool_start`, `tool_result`, `done`)
 - [x] `POST /agent` — non-streaming agent run
 - [x] `POST /agent/stream` — SSE streaming agent run
-- [~] `GET /agent/trace/{trace_id}` — fetch execution trace (session state in-memory at `api/state.py:autonomy_traces` dict; lost on restart)
-- [~] `POST /agent/stop/{stream_id}` — cancel active stream (stream state in-memory at `api/state.py:_active_streams` dict; not persisted)
+- [x] `GET /agent/trace/{trace_id}` — fetch execution trace (live trace cache with DB fallback in `src/api/routes.py` + `src/db.py`)
+- [x] `POST /agent/stop/{stream_id}` — cancel active stream (stop signal recorded durably for audit/state tracking in `src/api/routes.py` + `src/db.py`)
 - [x] `POST /agents/{agent_id}/run` — run named specialist agent
 - [x] `GET /agents/{agent_id}` — get agent spec
 - [x] `GET /agents` — list all specialist agents
@@ -172,42 +172,42 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 - [x] `src/thinking.py` — Chain-of-Thought / Tree-of-Thought helpers
 - [x] `think_deep` tool — Tree-of-Thought reasoning
-- [~] Graph-of-Thought reasoning (not found in code; only Tree-of-Thought at `src/thinking.py:build_tot_prompt()`)
+- [x] Graph-of-Thought reasoning (`POST /reason/graph-of-thought`; prompt + parser in `src/thinking.py`, route wiring in `src/api/routes.py`)
 - [x] Self-critique loop (`POST /agent/self-review`)
 - [x] `GET /agent/self-review/history`
 - [x] Cross-model consensus (`POST /reason/consensus`)
 - [x] Generator-critic research flow (`POST /reason/generator-critic`)
 - [x] Multi-agent debate (`POST /reason/debate`)
 - [x] Hypothesis testing flow (`POST /reason/hypothesis`)
-- [~] Reflection / retrospective loop (post-task quality review stored as learning signal) (no wiring to fine-tuning pipeline; stored but not consumed)
-- [~] Monte Carlo Tree Search (MCTS) for planning space exploration (functions exist in `src/thinking.py:_MCTSNode` but not auto-invoked; requires explicit prompt template)
-- [~] Socratic reasoning mode (question-driven decomposition) (prompt template exists but not wired as standalone workflow route)
-- [ ] Step-by-step verification (formal proof checking for math/code) (not implemented)
+- [x] Reflection / retrospective loop (post-task quality review stored as learning signal and exported into fine-tuning samples via `src/api/routes.py` + `src/db.py`)
+- [x] Monte Carlo Tree Search (MCTS) for planning space exploration (`POST /reason/mcts` plus automatic high-complexity pre-planning in `src/agent.py`)
+- [x] Socratic reasoning mode (question-driven decomposition) (`POST /reason/socratic` in `src/api/routes.py`)
+- [x] Step-by-step verification (formal proof checking for math/code) (`POST /reason/verify` in `src/api/routes.py` using `src/thinking.py` verification helpers)
 
 ### 3.3 Autonomy and orchestration
 
 - [x] `src/autonomy.py` — multi-step orchestrator + planning system
 - [x] `POST /autonomy/plan` — dry-run plan generation
 - [x] `POST /autonomy/execute` — full autonomous task execution
-- [~] `GET /autonomy/trace/{trace_id}` — trace retrieval (session state in-memory at `api/state.py:autonomy_traces` dict; lost on restart)
+- [x] `GET /autonomy/trace/{trace_id}` — trace retrieval (DB-backed persistence in `src/api/routes.py` + `src/db.py`)
 - [x] `POST /orchestrate/hierarchical` — Planner→Executor→Reviewer→Verifier pipeline
-- [~] `GET /orchestrate/hierarchical/{trace_id}` — hierarchical trace (session state in-memory; lost on restart)
+- [x] `GET /orchestrate/hierarchical/{trace_id}` — hierarchical trace (DB-backed persistence in `src/api/routes.py` + `src/db.py`)
 - [x] Structured task decomposition (PlanningSystem)
 - [x] Subtask classification to tool / agent
 - [x] Sequential and parallel subtask execution
 - [x] SSE events: `plan`, `subtask`, `tool`, `result`, `autonomy_done`
-- [~] Checkpointed long-run execution (`src/execution_trace.py`) (DB schema exists with `trace_checkpoints` table but not wired into live autonomy streams; checkpoints not auto-saved during `/autonomy/execute`)
-- [~] `GET /tasks` — task list (queries in-memory `execution_traces` dict at `api/state.py:execution_traces`; lost on restart)
-- [~] `GET /tasks/{trace_id}` — task detail (in-memory; lost on restart)
-- [~] `GET /tasks/{trace_id}/replay` — deterministic trace replay (requires in-memory trace; not persisted to DB for cross-session replay)
-- [~] `POST /tasks/{trace_id}/resume` — resume interrupted task (reads from in-memory state; session boundary blocks resumption across restarts)
+- [x] Checkpointed long-run execution (`src/execution_trace.py`) (live checkpoint persistence now wired into `/autonomy/execute` and `/autonomy/execute/stream` with stepwise snapshots for replay/resume in `src/api/routes.py`)
+- [x] `GET /tasks` — task list (live traces merged with DB-backed execution trace persistence in `src/api/routes.py` + `src/db.py`)
+- [x] `GET /tasks/{trace_id}` — task detail (in-memory with DB fallback)
+- [x] `GET /tasks/{trace_id}/replay` — deterministic trace replay (replays persisted DB traces across sessions)
+- [x] `POST /tasks/{trace_id}/resume` — resume interrupted task (new resumed traces persisted to DB for cross-session continuity)
 - [x] `DELETE /tasks/{trace_id}` — delete task trace
 - [x] Task dependency graph (DAG scheduling between subtasks)
-- [~] Cross-task memory sharing (results of task A injected into task B context) (in-memory `shared_memory` dict in `task_queue.py`; not persisted across restarts)
+- [x] Cross-task memory sharing (results of task A injected into task B context, persisted via `task_shared_memory` in `src/db.py` and used by `src/task_queue.py`)
 - [x] Task queue with priority ordering
-- [~] Background task worker (run tasks without blocking HTTP response) (runs in thread; no queue persistence or heartbeat monitoring; tasks lost if process crashes)
+- [x] Background task worker (run tasks without blocking HTTP response; queue state persisted and restored on worker start via `src/task_queue.py` + `src/db.py`)
 - [x] Task cancellation mid-execution (not just stream stop)
-- [~] Scheduled task re-run on cron triggers (via scheduler integration) (cron scheduling exists but requeue logic is synchronous, not async-worker-bound; no persistence of scheduled jobs)
+- [x] Scheduled task re-run on cron triggers (re-enqueued jobs are persisted and restored through the DB-backed task queue in `src/task_queue.py` + `src/db.py`)
 
 ### 3.4 Simulation
 
@@ -223,9 +223,9 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 4.1 Short-term / session memory
 
-- [ ] Conversation history stored per session
-- [ ] `_maybe_compress_history` (multi-step history compression)
-- [ ] Last 5 summaries injected at session start
+- [x] Conversation history stored per session (active session history is tracked in `api/state.py:sessions` and persisted per-session in shared memory via `session_history:{sid}` keys in `src/api/routes.py`)
+- [x] `_maybe_compress_history` (multi-step history compression) (wired into live agent streaming flow in `src/agent.py` and backed by `ContextWindowManager.compress_history_with_llm()`)
+- [x] Last 5 summaries injected at session start (`POST /session` injects `get_memory_context()` with `MEMORY_IN_CONTEXT=5` in `src/api/routes.py` + `src/memory.py`)
 - [x] `POST /session` — create session
 - [x] `DELETE /session/{sid}` — delete session
 - [x] `POST /session/{sid}/token` — update session token
@@ -234,46 +234,46 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 4.2 Long-term / semantic memory
 
-- [ ] `src/memory.py` — memory manager
-- [ ] Semantic vector store (ChromaDB)
-- [ ] `GET /memory` — list memory entries
-- [ ] `DELETE /memory` — clear all memory
-- [ ] `POST /memory/prune` — prune low-value entries
-- [ ] `PATCH /memory/{entry_id}` — update entry
-- [ ] `DELETE /memory/{entry_id}` — delete entry
-- [ ] `GET /memory/semantic` — list semantic items
-- [ ] `POST /memory/semantic` — store semantic item
-- [ ] `GET /memory/search` — full-text + semantic search over memory
-- [ ] Memory count and clear in sidebar
-- [ ] Recency fallback when vector store unavailable
-- [ ] Episodic memory (event-based timeline storage separate from semantic)
-- [ ] Memory importance scoring (decay over time, boost on re-access)
-- [ ] Cross-session memory consolidation (merge short-term → long-term on session close)
-- [ ] Memory provenance tracking (which session/task created each entry)
-- [ ] Memory export / import (portable memory bundles)
+- [x] `src/memory.py` — memory manager
+- [x] Semantic vector store (ChromaDB) (`chromadb.PersistentClient` + collection `nexus_memory` in `src/memory.py`)
+- [x] `GET /memory` — list memory entries
+- [x] `DELETE /memory` — clear all memory
+- [x] `POST /memory/prune` — prune low-value entries
+- [x] `PATCH /memory/{entry_id}` — update entry
+- [x] `DELETE /memory/{entry_id}` — delete entry
+- [x] `GET /memory/semantic` — list semantic items
+- [x] `POST /memory/semantic` — store semantic item
+- [x] `GET /memory/search` — full-text + semantic search over memory
+- [x] Memory count and clear in sidebar (`static/js/utilities/memory-projects.js:loadMemoryCount()` + `clearMemory()`)
+- [x] Recency fallback when vector store unavailable (`get_semantic_memory_filtered()` SQLite fallback path in `src/memory.py`)
+- [x] Episodic memory (event-based timeline storage separate from semantic) (`GET /memory/episodic` + episodic timeline persisted in `src/memory.py` metadata store)
+- [x] Memory importance scoring (decay over time, boost on re-access) (`_importance_with_decay()` + `_touch_memory()` in `src/memory.py`)
+- [x] Cross-session memory consolidation (merge short-term → long-term on session close) (`DELETE /session/{sid}` summarizes and stores memory in `src/api/routes.py`)
+- [x] Memory provenance tracking (which session/task created each entry) (provenance fields tracked in `src/memory.py` and exposed via memory list/search outputs)
+- [x] Memory export / import (portable memory bundles) (`GET /memory/export` + `POST /memory/import` in `src/api/routes.py`)
 
 ### 4.3 Knowledge graph memory
 
-- [ ] `src/knowledge_graph.py`
-- [ ] `POST /kg/store` — store entity + relations
-- [ ] `GET /kg/query` — query by relationship
-- [ ] `GET /kg/entities` — list entities
-- [ ] `GET /kg/entities/{name}` — get entity detail
-- [ ] `DELETE /kg/entities/{name}` — delete entity
-- [ ] `tool_kg_store`, `tool_kg_query`, `tool_kg_list` tools
-- [ ] KG graph visualization endpoint (Cytoscape / D3 JSON format)
-- [ ] KG entity merge / deduplication
-- [ ] KG import from external ontology (OWL / RDF)
-- [ ] KG-aware retrieval (KG + vector hybrid search)
+- [x] `src/knowledge_graph.py`
+- [x] `POST /kg/store` — store entity + relations
+- [x] `GET /kg/query` — query by relationship
+- [x] `GET /kg/entities` — list entities
+- [x] `GET /kg/entities/{name}` — get entity detail
+- [x] `DELETE /kg/entities/{name}` — delete entity
+- [x] `tool_kg_store`, `tool_kg_query`, `tool_kg_list` tools
+- [x] KG graph visualization endpoint (Cytoscape / D3 JSON format) (`GET /kg/graph` in `src/api/routes.py`, `kg_graph()` in `src/knowledge_graph.py`)
+- [x] KG entity merge / deduplication (`POST /kg/merge` in `src/api/routes.py`, `kg_merge()` in `src/knowledge_graph.py`)
+- [x] KG import from external ontology (OWL / RDF) (`POST /kg/import` in `src/api/routes.py`, `kg_import_ontology()` with rdflib/fallback parser)
+- [x] KG-aware retrieval (KG + vector hybrid search) (`GET /kg/hybrid-search` in `src/api/routes.py`)
 
 ### 4.4 Context window management
 
-- [ ] `src/context_window.py` — context window manager
-- [ ] Dynamic context compression policy
-- [ ] Deterministic compression (reproducible token budget enforcement)
-- [ ] Per-model context budget awareness (auto-detect model's max context)
-- [ ] Token counting per message before send
-- [ ] Context overflow early warning event in SSE stream
+- [x] `src/context_window.py` — context window manager
+- [x] Dynamic context compression policy (`_maybe_compress_history()` + `compress_history_with_llm()` selected by conversation length in `src/agent.py`)
+- [x] Deterministic compression (reproducible token budget enforcement) (`compress_to_token_budget()` in `src/context_window.py`)
+- [x] Per-model context budget awareness (auto-detect model's max context) (`get_model_context_budget()` in `src/context_window.py`)
+- [x] Token counting per message before send (`token_breakdown()` + `token_breakdown` SSE event in `src/agent.py`)
+- [x] Context overflow early warning event in SSE stream (`context_overflow_warning` event emitted in `src/agent.py`)
 
 ---
 

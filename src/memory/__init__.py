@@ -35,6 +35,9 @@ get_semantic_memory = _mod.get_semantic_memory
 get_semantic_memory_filtered = _mod.get_semantic_memory_filtered
 prune_old_memories = _mod.prune_old_memories
 add_semantic_memory = _mod.add_semantic_memory
+get_episodic_timeline = _mod.get_episodic_timeline
+export_memory_bundle = _mod.export_memory_bundle
+import_memory_bundle = _mod.import_memory_bundle
 
 __all__ = [
     "add_memory",
@@ -46,4 +49,7 @@ __all__ = [
     "get_semantic_memory_filtered",
     "prune_old_memories",
     "add_semantic_memory",
+    "get_episodic_timeline",
+    "export_memory_bundle",
+    "import_memory_bundle",
 ]

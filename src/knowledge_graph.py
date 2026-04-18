@@ -228,6 +228,146 @@ def kg_delete(name: str) -> bool:
     return False
 
 
+def kg_graph(limit: int = 500) -> dict:
+    """Return graph payload compatible with Cytoscape / D3 style consumers."""
+    c = _conn()
+    entities = c.execute(
+        "SELECT id, name, type, updated_at FROM kg_entities ORDER BY updated_at DESC LIMIT ?",
+        (max(1, min(int(limit), 5000)),),
+    ).fetchall()
+    relations = c.execute(
+        "SELECT id, from_entity, relation, to_entity, weight, created_at "
+        "FROM kg_relations ORDER BY id DESC LIMIT ?",
+        (max(1, min(int(limit) * 3, 15000)),),
+    ).fetchall()
+
+    nodes = [
+        {
+            "data": {
+                "id": e["name"],
+                "label": e["name"],
+                "type": e["type"],
+                "updated_at": e["updated_at"],
+            }
+        }
+        for e in entities
+    ]
+    edges = [
+        {
+            "data": {
+                "id": f"rel-{r['id']}",
+                "source": r["from_entity"],
+                "target": r["to_entity"],
+                "label": r["relation"],
+                "relation": r["relation"],
+                "weight": r["weight"],
+                "created_at": r["created_at"],
+            }
+        }
+        for r in relations
+    ]
+    return {"nodes": nodes, "edges": edges, "count": {"nodes": len(nodes), "edges": len(edges)}}
+
+
+def kg_merge(primary_name: str, duplicate_name: str) -> dict:
+    """Merge duplicate_name into primary_name and rewire all relations."""
+    primary = kg_get(primary_name)
+    duplicate = kg_get(duplicate_name)
+    if not primary or not duplicate:
+        return {"merged": False, "reason": "missing_entity"}
+
+    merged_facts = dict(primary.get("facts", {}))
+    merged_facts.update(duplicate.get("facts", {}))
+    kg_store(primary_name, entity_type=primary.get("type", "concept"), facts=merged_facts, relations=[])
+
+    c = _conn()
+    c.execute("UPDATE kg_relations SET from_entity=? WHERE from_entity=?", (primary_name, duplicate_name))
+    c.execute("UPDATE kg_relations SET to_entity=? WHERE to_entity=?", (primary_name, duplicate_name))
+    c.execute(
+        "DELETE FROM kg_relations WHERE id NOT IN ("
+        "SELECT MIN(id) FROM kg_relations GROUP BY from_entity, relation, to_entity"
+        ")"
+    )
+    c.commit()
+    kg_delete(duplicate_name)
+    return {"merged": True, "primary": primary_name, "removed": duplicate_name}
+
+
+def kg_import_ontology(content: str, fmt: str = "auto", limit: int = 2000) -> dict:
+    """Import OWL/RDF style triples with rdflib fallback to a simple N-Triples parser."""
+    text = (content or "").strip()
+    if not text:
+        return {"imported_entities": 0, "imported_relations": 0}
+
+    triples: list[tuple[str, str, str]] = []
+    parsed_with_rdflib = False
+    try:
+        import rdflib  # type: ignore
+
+        graph = rdflib.Graph()
+        parse_fmt = None if fmt == "auto" else fmt
+        graph.parse(data=text, format=parse_fmt)
+        for subject, predicate, obj in graph:
+            triples.append((str(subject), str(predicate), str(obj)))
+        parsed_with_rdflib = True
+    except Exception:
+        pass
+
+    if not parsed_with_rdflib:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.endswith("."):
+                line = line[:-1].strip()
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            subject = parts[0].strip("<>")
+            predicate = parts[1].strip("<>")
+            obj = " ".join(parts[2:]).strip().strip('"').strip("<>")
+            triples.append((subject, predicate, obj))
+
+    entity_count = 0
+    relation_count = 0
+    seen_entities: set[str] = set()
+    for subject, predicate, obj in triples[: max(1, min(int(limit), 10000))]:
+        s_name = subject.rsplit("/", 1)[-1].rsplit("#", 1)[-1] or subject
+        o_name = obj.rsplit("/", 1)[-1].rsplit("#", 1)[-1] or obj
+        rel = predicate.rsplit("/", 1)[-1].rsplit("#", 1)[-1] or predicate
+        if s_name not in seen_entities:
+            kg_store(s_name, "concept", {}, [])
+            seen_entities.add(s_name)
+            entity_count += 1
+        if o_name not in seen_entities:
+            kg_store(o_name, "concept", {}, [])
+            seen_entities.add(o_name)
+            entity_count += 1
+        kg_relate(s_name, rel, o_name, 1.0)
+        relation_count += 1
+
+    return {
+        "imported_entities": entity_count,
+        "imported_relations": relation_count,
+        "triples_processed": min(len(triples), max(1, min(int(limit), 10000))),
+        "parser": "rdflib" if parsed_with_rdflib else "fallback",
+    }
+
+
+def kg_hybrid_search(query: str, limit: int = 10) -> dict:
+    """Combine KG query with semantic memory retrieval for hybrid recall."""
+    from .memory import get_semantic_memory_filtered
+
+    kg_results = kg_query(query, limit=limit)
+    semantic_results = get_semantic_memory_filtered(query=query, limit=limit)
+    return {
+        "query": query,
+        "kg": kg_results,
+        "semantic": semantic_results,
+        "count": {"kg": len(kg_results), "semantic": len(semantic_results)},
+    }
+
+
 def kg_to_context_string(query: str, limit: int = 5) -> str:
     """Format the top KG matches as a [KG CONTEXT] injection string.
 
