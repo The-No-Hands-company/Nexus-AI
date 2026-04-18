@@ -1611,7 +1611,9 @@ def _compress_history(history: List[Dict]) -> List[Dict]:
 
 # ── streaming agent ───────────────────────────────────────────────────────────
 def stream_agent_task(task: str, history: list, files: list | None = None,
-                      stop_evt=None, sid: str = "", trace_id: str = "") -> Iterator[Dict[str, Any]]:
+                      stop_evt=None, sid: str = "", trace_id: str = "",
+                      max_tool_calls: int = 0, max_time_s: float = 0.0,
+                      budget_tokens_out: int = 0) -> Iterator[Dict[str, Any]]:
     def _stopped(): return stop_evt is not None and stop_evt.is_set()
 
     # Extract + store token from task; mask it before sending to LLM
@@ -1758,7 +1760,20 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     complexity = _score_complexity(clean_task)
     yield {"type":"complexity","level":complexity}
 
+    # ── per-request execution budget ─────────────────────────────────────────
+    _budget_start = time.time()
+    _tool_call_count = 0
+
     for _ in range(MAX_LOOP):
+        # Budget checks
+        if max_time_s > 0 and (time.time() - _budget_start) > max_time_s:
+            yield {"type": "budget_exceeded", "reason": "max_time_s",
+                   "elapsed_s": round(time.time() - _budget_start, 1)}
+            break
+        if max_tool_calls > 0 and _tool_call_count >= max_tool_calls:
+            yield {"type": "budget_exceeded", "reason": "max_tool_calls",
+                   "tool_calls": _tool_call_count}
+            break
         if _stopped():
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "",{})
             yield {"type":"done","content":"*(Stopped)*","provider":cfg.get("label","?"),
@@ -1913,6 +1928,15 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             yield {"type": "confidence", "value": round(confidence, 4)}
             if _trace_steps:
                 yield {"type": "trace", "steps": _trace_steps}
+            # ── token streaming telemetry event ───────────────────────────────
+            yield {
+                "type": "token",
+                "in_tokens": input_token_estimate,
+                "out_tokens": output_tokens,
+                "total_tokens": input_token_estimate + output_tokens,
+                "tool_calls": _tool_call_count,
+                "elapsed_s": round(time.time() - _budget_start, 2),
+            }
             yield {
                 "type": "token_count",
                 "in_tokens": input_token_estimate,
@@ -2036,6 +2060,107 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                    "file_path": None, "file_content": None, "artifact": False}
             messages.append({"role": "assistant", "content": json.dumps(action)})
             messages.append({"role": "user", "content": f"Tool result:\n{output}\n\nContinue."})
+            continue
+
+        # ── Parallel tool fan-out ─────────────────────────────────────────────
+        if kind == "parallel_tools":
+            tools_list = action.get("tools") or []
+            if not tools_list:
+                messages.append({"role": "assistant", "content": json.dumps(action)})
+                messages.append({"role": "user", "content": "Tool result:\nNo tools provided.\n\nContinue."})
+                continue
+
+            _ptid = f"ptool_{int(time.time()*1000)}"
+            yield {"type": "tool_start", "id": _ptid, "action": "parallel_tools",
+                   "icon": "⚡", "label": f"Parallel fan-out ({len(tools_list)} tools)",
+                   "call_ids": [f"{_ptid}_{i}" for i in range(len(tools_list))]}
+
+            def _run_one(sub_action: Dict) -> Dict:
+                _sr = dispatch_builtin(sub_action)
+                if _sr:
+                    return _sr
+                return {"result": f"unknown tool: {sub_action.get('action','?')}", "status": "error"}
+
+            with __import__("concurrent.futures").futures.ThreadPoolExecutor(
+                max_workers=min(len(tools_list), 6)
+            ) as pool:
+                _futures = {pool.submit(_run_one, t): (i, t) for i, t in enumerate(tools_list)}
+                _presults = {}
+                for fut in __import__("concurrent.futures").futures.as_completed(_futures, timeout=90):
+                    idx, sub_act = _futures[fut]
+                    call_id = f"{_ptid}_{idx}"
+                    try:
+                        r = fut.result()
+                        _presults[call_id] = r
+                        yield {"type": "tool", "id": call_id, "parent_id": _ptid,
+                               "status": r.get("status", "done"),
+                               "icon": TOOL_ICONS.get(sub_act.get("action", ""), "🔧"),
+                               "action": sub_act.get("action", "?"), "tool_name": sub_act.get("action", "?"),
+                               "label": str(sub_act)[:120], "result": str(r.get("result", ""))[:400],
+                               "input": sub_act, "metadata": r.get("metadata", {}),
+                               "file_path": None, "file_content": None, "artifact": False}
+                    except Exception as exc:
+                        _presults[call_id] = {"result": str(exc), "status": "error"}
+                        yield {"type": "tool", "id": call_id, "parent_id": _ptid,
+                               "status": "error", "action": sub_act.get("action", "?"),
+                               "label": str(sub_act)[:120], "result": str(exc),
+                               "file_path": None, "file_content": None, "artifact": False}
+                        _tool_call_count += 1
+
+            _tool_call_count += len(tools_list)
+            combined = "\n".join(
+                f"[{k}] {v.get('result','')}" for k, v in sorted(_presults.items())
+            )
+            messages.append({"role": "assistant", "content": json.dumps(action)})
+            messages.append({"role": "user", "content": f"Parallel tool results:\n{combined}\n\nContinue."})
+            _step_idx += 1
+            if trace_id:
+                _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
+            continue
+
+        # ── Compositional (chained sequential) tool calls ─────────────────────
+        if kind == "chain_tools":
+            tools_list = action.get("tools") or []
+            if not tools_list:
+                messages.append({"role": "assistant", "content": json.dumps(action)})
+                messages.append({"role": "user", "content": "Tool result:\nNo tools in chain.\n\nContinue."})
+                continue
+
+            _ctid = f"ctool_{int(time.time()*1000)}"
+            yield {"type": "tool_start", "id": _ctid, "action": "chain_tools",
+                   "icon": "🔗", "label": f"Chained tool calls ({len(tools_list)} steps)",
+                   "call_ids": [f"{_ctid}_{i}" for i in range(len(tools_list))]}
+
+            _prev_result = ""
+            _chain_results = []
+            for ci, sub_action in enumerate(tools_list):
+                call_id = f"{_ctid}_{ci}"
+                # Inject previous result as context in the action if it uses a template
+                if _prev_result and sub_action.get("_inject_prev"):
+                    sub_action = dict(sub_action)
+                    for k, v in sub_action.items():
+                        if isinstance(v, str) and "{prev}" in v:
+                            sub_action[k] = v.replace("{prev}", _prev_result[:800])
+                _cr = dispatch_builtin(sub_action)
+                if not _cr:
+                    _cr = {"result": f"unknown tool: {sub_action.get('action','?')}", "status": "error"}
+                _prev_result = str(_cr.get("result", ""))
+                _chain_results.append(_prev_result)
+                _tool_call_count += 1
+                yield {"type": "tool", "id": call_id, "parent_id": _ctid,
+                       "status": _cr.get("status", "done"),
+                       "icon": TOOL_ICONS.get(sub_action.get("action", ""), "🔧"),
+                       "action": sub_action.get("action", "?"), "tool_name": sub_action.get("action", "?"),
+                       "label": str(sub_action)[:120], "result": _prev_result[:400],
+                       "input": sub_action, "metadata": _cr.get("metadata", {}),
+                       "file_path": None, "file_content": None, "artifact": False}
+
+            messages.append({"role": "assistant", "content": json.dumps(action)})
+            messages.append({"role": "user",
+                              "content": f"Chain final result:\n{_prev_result[:1200]}\n\nContinue."})
+            _step_idx += 1
+            if trace_id:
+                _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
             continue
 
         if kind == "simulate":
@@ -2176,6 +2301,14 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         label = (action.get("query") or action.get("path") or action.get("cmd") or
                  action.get("url") or action.get("location") or action.get("expr") or
                  action.get("timezone") or kind)
+
+        # ── tool_start telemetry event ────────────────────────────────────────
+        _tid_start = f"tool_{int(time.time()*1000)}"
+        yield {"type": "tool_start", "id": _tid_start, "action": kind,
+               "icon": icon, "label": str(label)[:120],
+               "call_id": _tid_start, "input": action}
+        _tool_call_count += 1
+        # ─────────────────────────────────────────────────────────────────────
 
         if builtin_result is not None:
             # builtin_result is now a structured trace dict from dispatch_builtin
@@ -2429,6 +2562,37 @@ def run_agent_task(task, history, files=None, sid=""):
     if ensemble_meta:
         out["ensemble"] = ensemble_meta
     return out
+
+
+# ── agent warm-up / pre-loading ───────────────────────────────────────────────
+_WARMUP_CACHE: Dict[str, Dict[str, Any]] = {}   # sid → {messages, ts}
+_WARMUP_TTL = 300                                # seconds before cache expires
+
+
+def warmup_agent(sid: str = "", persona: str = "") -> Dict[str, Any]:
+    """Prime an agent context for a given session so the first real call is faster.
+
+    Performs a lightweight LLM call using the system prompt + a sentinel greeting,
+    caches the resulting messages under ``sid``, and returns metadata.
+    This reduces cold-start latency when the user sends their first message.
+    """
+    cache_key = f"{sid}:{persona or _config.get('persona', 'general')}"
+    cached = _WARMUP_CACHE.get(cache_key)
+    if cached and (time.time() - cached["ts"]) < _WARMUP_TTL:
+        return {"warmed": False, "cached": True, "age_s": round(time.time() - cached["ts"])}
+
+    warmup_msg = [{"role": "user",
+                   "content": "System ready. Acknowledge with one word."}]
+    try:
+        _, pid, _ = call_llm_smart(warmup_msg, "warmup")
+        _WARMUP_CACHE[cache_key] = {
+            "messages": warmup_msg,
+            "provider": pid,
+            "ts": time.time(),
+        }
+        return {"warmed": True, "cached": False, "provider": pid}
+    except Exception as exc:
+        return {"warmed": False, "cached": False, "error": str(exc)}
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 # ── provider capability matrix ───────────────────────────────────────────────

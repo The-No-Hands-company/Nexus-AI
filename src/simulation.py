@@ -297,8 +297,20 @@ class SimulationEngine:
         seed: str = "",
         n_personas: int = 5,
         n_rounds: int = 3,
+        scenario: Optional[str] = None,
     ) -> SimulationResult:
-        """Run a complete swarm simulation and return a structured result."""
+        """Run a complete swarm simulation and return a structured result.
+
+        If `scenario` is given it is looked up in SCENARIO_LIBRARY and used
+        to seed `topic` and `seed` unless those are explicitly provided.
+        """
+        if scenario and scenario in SCENARIO_LIBRARY:
+            tmpl = SCENARIO_LIBRARY[scenario]
+            if not topic or topic == tmpl.get("topic", ""):
+                topic = topic or tmpl["topic"]
+            seed  = seed or tmpl.get("seed", "")
+            n_personas = n_personas if n_personas != 5 else tmpl.get("n_personas", n_personas)
+            n_rounds   = n_rounds   if n_rounds   != 3 else tmpl.get("n_rounds",   n_rounds)
         n_personas = max(2, min(n_personas, self._max_personas))
         n_rounds   = max(1, min(n_rounds,   self._max_rounds))
         sim_id     = uuid.uuid4().hex[:12]
@@ -326,3 +338,197 @@ class SimulationEngine:
             report        = synthesis["report"],
             elapsed_sec   = time.time() - t0,
         )
+
+
+# ---------------------------------------------------------------------------
+# Scenario library — pre-built simulation templates
+# ---------------------------------------------------------------------------
+
+SCENARIO_LIBRARY: Dict[str, Dict[str, Any]] = {
+    "ai_regulation": {
+        "topic": "Should advanced AI development be regulated by governments?",
+        "seed": (
+            "Recent advances in large language models have prompted calls for "
+            "mandatory safety evaluations, compute thresholds, and liability "
+            "frameworks. Critics argue regulation stifles innovation and is "
+            "technically infeasible. Proponents cite existential risk."
+        ),
+        "n_personas": 6,
+        "n_rounds": 3,
+    },
+    "climate_policy": {
+        "topic": "What is the most effective global climate policy for 2030?",
+        "seed": (
+            "IPCC reports indicate 1.5°C threshold may be crossed by 2035 "
+            "without drastic action. Options include carbon tax, cap-and-trade, "
+            "green new deals, and nuclear energy expansion."
+        ),
+        "n_personas": 5,
+        "n_rounds": 4,
+    },
+    "ubi_economics": {
+        "topic": "Would universal basic income improve societal well-being?",
+        "seed": (
+            "UBI pilots in Finland, Kenya, and Stockton CA show mixed results: "
+            "improved mental health and small employment upticks vs. concerns "
+            "about inflation, funding, and work disincentives."
+        ),
+        "n_personas": 5,
+        "n_rounds": 3,
+    },
+    "remote_work": {
+        "topic": "Is remote work better for productivity and talent retention than office work?",
+        "seed": (
+            "Post-pandemic data shows 30% of knowledge workers now fully remote. "
+            "Studies are conflicted: some show 13% productivity gains, others show "
+            "collaboration deficits and harder onboarding."
+        ),
+        "n_personas": 4,
+        "n_rounds": 3,
+    },
+    "crypto_future": {
+        "topic": "Will cryptocurrencies replace traditional financial systems by 2040?",
+        "seed": (
+            "Bitcoin and Ethereum have market caps exceeding $1T combined. "
+            "CBDCs are being piloted by 130+ countries. DeFi protocols process "
+            "billions daily but face regulatory pressure and volatility."
+        ),
+        "n_personas": 5,
+        "n_rounds": 3,
+    },
+    "space_colonisation": {
+        "topic": "Should humanity prioritise Mars colonisation in the next 20 years?",
+        "seed": (
+            "SpaceX Starship aims to land humans on Mars by 2030. NASA Artemis "
+            "focuses on the Moon first. Critics argue resources should go to "
+            "solving Earth's problems first. Proponents cite species survival."
+        ),
+        "n_personas": 5,
+        "n_rounds": 3,
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Simulation comparison (A/B diffing)
+# ---------------------------------------------------------------------------
+
+def compare_simulations(
+    sim_a: Dict[str, Any],
+    sim_b: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Diff two SimulationResult dicts and return a structured comparison.
+
+    Parameters
+    ----------
+    sim_a, sim_b : dicts produced by ``SimulationResult.to_dict()``
+
+    Returns
+    -------
+    dict with keys:
+        same_topic, confidence_delta, prediction_agreement,
+        a_only_drivers, b_only_drivers, shared_drivers,
+        a_only_minority, b_only_minority,
+        round_count_delta, persona_count_delta, summary
+    """
+    same_topic = sim_a.get("topic") == sim_b.get("topic")
+
+    conf_a = float(sim_a.get("confidence", 0.5))
+    conf_b = float(sim_b.get("confidence", 0.5))
+    confidence_delta = round(conf_b - conf_a, 4)
+
+    pred_a = str(sim_a.get("prediction", "")).strip().lower()
+    pred_b = str(sim_b.get("prediction", "")).strip().lower()
+    prediction_agreement = pred_a == pred_b
+
+    # key_drivers comparison — available in synthesis data
+    drivers_a = set(sim_a.get("key_drivers", []))
+    drivers_b = set(sim_b.get("key_drivers", []))
+    shared_drivers  = sorted(drivers_a & drivers_b)
+    a_only_drivers  = sorted(drivers_a - drivers_b)
+    b_only_drivers  = sorted(drivers_b - drivers_a)
+
+    minority_a = set(sim_a.get("minority_views", []))
+    minority_b = set(sim_b.get("minority_views", []))
+    a_only_minority = sorted(minority_a - minority_b)
+    b_only_minority = sorted(minority_b - minority_a)
+
+    round_delta   = int(sim_b.get("n_rounds", 0))   - int(sim_a.get("n_rounds", 0))
+    persona_delta = int(sim_b.get("n_personas", 0)) - int(sim_a.get("n_personas", 0))
+
+    summary_parts = []
+    if same_topic:
+        summary_parts.append("Both simulations share the same topic.")
+    else:
+        summary_parts.append(
+            f"Topics differ: A='{sim_a.get('topic','')}' vs B='{sim_b.get('topic','')}'"
+        )
+    if prediction_agreement:
+        summary_parts.append("Predictions agree.")
+    else:
+        summary_parts.append("Predictions diverge.")
+    summary_parts.append(
+        f"Confidence shift: {conf_a:.2f} → {conf_b:.2f} (Δ{confidence_delta:+.3f})."
+    )
+    if shared_drivers:
+        summary_parts.append(f"Shared drivers: {', '.join(shared_drivers[:3])}.")
+
+    return {
+        "same_topic":            same_topic,
+        "confidence_delta":      confidence_delta,
+        "prediction_agreement":  prediction_agreement,
+        "a_only_drivers":        a_only_drivers,
+        "b_only_drivers":        b_only_drivers,
+        "shared_drivers":        shared_drivers,
+        "a_only_minority":       a_only_minority,
+        "b_only_minority":       b_only_minority,
+        "round_count_delta":     round_delta,
+        "persona_count_delta":   persona_delta,
+        "summary":               " ".join(summary_parts),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Training signal export (simulation → fine-tuning dataset)
+# ---------------------------------------------------------------------------
+
+def export_training_dataset(results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Convert a list of SimulationResult dicts into an OpenAI fine-tuning JSONL format.
+
+    Each simulation becomes one training example:
+      - system: describes the simulation context
+      - user:   the topic
+      - assistant: the structured prediction report
+
+    Returns a list of {"messages": [...]} dicts, one per simulation.
+    """
+    dataset: List[Dict[str, Any]] = []
+    for result in results:
+        topic      = result.get("topic", "")
+        report     = result.get("report", "")
+        prediction = result.get("prediction", "")
+        confidence = result.get("confidence", 0.5)
+        minority   = result.get("minority_views", [])
+
+        system_msg = (
+            "You are a multi-agent swarm simulation engine. "
+            "Given a topic, produce a structured prediction report "
+            "including a clear prediction, confidence score, key drivers, "
+            "minority views, and a detailed analysis."
+        )
+        user_msg = f"Run a swarm simulation about: {topic}"
+        assistant_msg = json.dumps({
+            "prediction":    prediction,
+            "confidence":    confidence,
+            "minority_views": minority,
+            "report":        report,
+        }, ensure_ascii=False)
+
+        dataset.append({
+            "messages": [
+                {"role": "system",    "content": system_msg},
+                {"role": "user",      "content": user_msg},
+                {"role": "assistant", "content": assistant_msg},
+            ]
+        })
+    return dataset

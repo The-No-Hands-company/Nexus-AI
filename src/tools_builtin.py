@@ -510,6 +510,10 @@ def dispatch_builtin(action: dict) -> dict | None:
     if kind == "read_pptx":
         r = tool_read_pptx(action.get("path", ""), action.get("workdir", "/tmp"))
         return _tool_trace(action, r, {"path": action.get("path", "")})
+    if kind == "ollama_list_models":
+        from .agent import tool_ollama_list_models
+        r = tool_ollama_list_models()
+        return _tool_trace(action, r)
     return None
 
 

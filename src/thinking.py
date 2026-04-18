@@ -1,8 +1,10 @@
 """
 Phase 1 reasoning helpers — Tree-of-Thought, Graph-of-Thought, self-critique,
-cross-model consensus.
+cross-model consensus, MCTS planning, Socratic reasoning, step-by-step verification.
 """
 import json
+import math
+import random
 
 
 def build_tot_prompt(query: str, mode: str = "tree") -> str:
@@ -370,4 +372,304 @@ def parse_hypothesis_conclusion(response: str) -> dict:
             "uncertainty":        "",
             "next_steps":         [],
             "overall_confidence": 0.5,
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Monte Carlo Tree Search (MCTS) for planning
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_mcts_expand_prompt(goal: str, path: list, depth: int) -> str:
+    """Ask the LLM to generate N candidate next steps from the current plan path."""
+    path_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(path)) if path else "  (start)"
+    return (
+        f"You are a planning agent using Monte Carlo Tree Search.\n\n"
+        f"Goal: {goal}\n\n"
+        f"Current plan path (depth {depth}):\n{path_str}\n\n"
+        f"Generate exactly 3 distinct candidate NEXT STEPS to advance toward the goal.\n"
+        f"Each step should be concrete and actionable.\n\n"
+        f"Respond ONLY in this JSON format:\n"
+        f'{{"steps": ["step A", "step B", "step C"]}}'
+    )
+
+
+def build_mcts_score_prompt(goal: str, plan: list) -> str:
+    """Ask the LLM to score a complete plan for goal achievement."""
+    plan_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(plan))
+    return (
+        f"Score this plan for achieving the following goal.\n\n"
+        f"Goal: {goal}\n\n"
+        f"Plan:\n{plan_str}\n\n"
+        f"Respond ONLY in this JSON format:\n"
+        f'{{"score": 0.0, "rationale": "brief reason"}}\n\n'
+        f"score must be between 0.0 (plan fails) and 1.0 (plan perfectly achieves goal)."
+    )
+
+
+class _MCTSNode:
+    """Minimal MCTS node for planning."""
+    __slots__ = ("step", "parent", "children", "visits", "value", "depth")
+
+    def __init__(self, step: str, parent=None, depth: int = 0):
+        self.step = step
+        self.parent = parent
+        self.children: list = []
+        self.visits: int = 0
+        self.value: float = 0.0
+        self.depth = depth
+
+    def ucb1(self, exploration: float = 1.41) -> float:
+        if self.visits == 0:
+            return float("inf")
+        parent_visits = self.parent.visits if self.parent else self.visits
+        return self.value / self.visits + exploration * math.sqrt(
+            math.log(parent_visits + 1) / self.visits
+        )
+
+    def best_child(self) -> "_MCTSNode":
+        return max(self.children, key=lambda c: c.ucb1())
+
+    def path(self) -> list:
+        steps = []
+        node = self
+        while node.parent is not None:
+            steps.append(node.step)
+            node = node.parent
+        steps.reverse()
+        return steps
+
+
+def run_mcts_planning(
+    goal: str,
+    llm_fn,               # callable(prompt: str) -> str
+    iterations: int = 8,
+    max_depth: int = 4,
+    branching: int = 3,
+) -> dict:
+    """Run MCTS to find an optimal plan for ``goal``.
+
+    Args:
+        goal:       The planning goal.
+        llm_fn:     A function that calls an LLM and returns the response string.
+        iterations: Number of MCTS simulation iterations.
+        max_depth:  Maximum plan depth (number of steps).
+        branching:  Number of children to expand per node.
+
+    Returns:
+        dict with keys: best_plan (list[str]), best_score (float), tree_size (int),
+        all_plans (list[dict]) sorted best-first.
+    """
+    root = _MCTSNode("(root)", parent=None, depth=0)
+    all_plans: list = []
+
+    def _expand(node: _MCTSNode) -> list:
+        prompt = build_mcts_expand_prompt(goal, node.path(), node.depth)
+        raw = llm_fn(prompt)
+        try:
+            data = json.loads(raw) if raw.strip().startswith("{") else {}
+            steps = data.get("steps", [raw])
+        except Exception:
+            steps = [raw]
+        children = []
+        for step in steps[:branching]:
+            child = _MCTSNode(str(step).strip(), parent=node, depth=node.depth + 1)
+            node.children.append(child)
+            children.append(child)
+        return children
+
+    def _simulate(node: _MCTSNode) -> float:
+        plan = node.path()
+        if not plan:
+            return 0.0
+        prompt = build_mcts_score_prompt(goal, plan)
+        raw = llm_fn(prompt)
+        try:
+            data = json.loads(raw) if raw.strip().startswith("{") else {}
+            score = float(data.get("score", 0.5))
+            all_plans.append({"plan": plan, "score": round(score, 4),
+                               "rationale": data.get("rationale", "")})
+            return score
+        except Exception:
+            return 0.5
+
+    def _backpropagate(node: _MCTSNode, score: float) -> None:
+        n = node
+        while n is not None:
+            n.visits += 1
+            n.value += score
+            n = n.parent
+
+    for _ in range(iterations):
+        # Selection
+        node = root
+        while node.children and node.depth < max_depth:
+            node = node.best_child()
+        # Expansion
+        if node.depth < max_depth:
+            children = _expand(node)
+            if children:
+                node = random.choice(children)
+        # Simulation + backprop
+        score = _simulate(node)
+        _backpropagate(node, score)
+
+    all_plans.sort(key=lambda p: p["score"], reverse=True)
+    best = all_plans[0] if all_plans else {"plan": [], "score": 0.0, "rationale": ""}
+
+    def _count_nodes(n: _MCTSNode) -> int:
+        return 1 + sum(_count_nodes(c) for c in n.children)
+
+    return {
+        "best_plan": best["plan"],
+        "best_score": best["score"],
+        "best_rationale": best["rationale"],
+        "tree_size": _count_nodes(root),
+        "iterations": iterations,
+        "all_plans": all_plans[:10],
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Socratic reasoning mode (question-driven decomposition)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_socratic_prompt(topic: str, depth: int = 3) -> str:
+    """Build a Socratic questioning prompt to decompose a topic into sub-questions."""
+    return (
+        f"You are a Socratic reasoning agent. Your task is to decompose the following topic "
+        f"or question into a hierarchy of sub-questions that, when answered, will fully resolve "
+        f"the original topic.\n\n"
+        f"Topic: {topic}\n\n"
+        f"Generate a Socratic question tree up to depth {depth}. "
+        f"Each question should probe a fundamental assumption or sub-problem.\n\n"
+        f"Respond ONLY in this JSON format:\n"
+        f'{{"root_question": "...", "sub_questions": [{{"question": "...", '
+        f'"sub_questions": [{{"question": "...", "sub_questions": []}}]}}]}}'
+    )
+
+
+def parse_socratic_response(response: str) -> dict:
+    """Parse Socratic question tree from LLM response."""
+    try:
+        data = json.loads(response)
+        return {
+            "root_question": data.get("root_question", response[:200]),
+            "sub_questions": data.get("sub_questions", []),
+        }
+    except Exception:
+        return {"root_question": response[:200], "sub_questions": []}
+
+
+def build_socratic_answer_prompt(topic: str, question_tree: dict) -> str:
+    """Build prompt to answer a Socratic question tree bottom-up."""
+    def _flatten(node: dict, depth: int = 0) -> list:
+        indent = "  " * depth
+        lines = [f"{indent}Q: {node.get('root_question') or node.get('question', '')}"]
+        for sub in node.get("sub_questions", []):
+            lines.extend(_flatten(sub, depth + 1))
+        return lines
+
+    flat = "\n".join(_flatten(question_tree))
+    return (
+        f"Answer the following question hierarchy bottom-up (answer leaf questions first, "
+        f"then synthesise upward).\n\n"
+        f"Original topic: {topic}\n\n"
+        f"Question tree:\n{flat}\n\n"
+        f"Provide a structured answer that synthesises all levels into a final conclusion."
+    )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Step-by-step verification (formal proof checking for math/code)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_verification_prompt(claim: str, steps: list, domain: str = "general") -> str:
+    """Build a verification prompt for step-by-step formal checking.
+
+    Args:
+        claim:  The conclusion or answer to be verified.
+        steps:  List of reasoning/derivation steps that led to the claim.
+        domain: One of "math", "code", "logic", "general".
+    """
+    steps_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(steps)) if steps else "  (no steps provided)"
+    domain_hint = {
+        "math":    "Check each step for arithmetic, algebraic, and logical validity.",
+        "code":    "Check each step for correctness, edge cases, and runtime errors.",
+        "logic":   "Check each step for logical validity and sound inference.",
+        "general": "Check each step for correctness, consistency, and completeness.",
+    }.get(domain, "Check each step for correctness.")
+
+    return (
+        f"You are a formal verification agent. {domain_hint}\n\n"
+        f"Claim to verify: {claim}\n\n"
+        f"Derivation steps:\n{steps_str}\n\n"
+        f"For each step, identify:\n"
+        f"  - Is it VALID, INVALID, or UNCERTAIN?\n"
+        f"  - If invalid/uncertain, explain the issue.\n\n"
+        f"Then give an overall verdict.\n\n"
+        f"Respond ONLY in this JSON format:\n"
+        f'{{"steps": [{{"step": 1, "valid": true, "issue": ""}}], '
+        f'"overall": "valid|invalid|uncertain", "confidence": 0.0-1.0, '
+        f'"corrected_claim": "...", "explanation": "..."}}'
+    )
+
+
+def parse_verification_response(response: str) -> dict:
+    """Parse step-by-step verification result from LLM response."""
+    try:
+        data = json.loads(response)
+        return {
+            "steps":            data.get("steps", []),
+            "overall":          data.get("overall", "uncertain"),
+            "confidence":       float(data.get("confidence", 0.5)),
+            "corrected_claim":  data.get("corrected_claim", ""),
+            "explanation":      data.get("explanation", response[:300]),
+        }
+    except Exception:
+        overall = "valid" if "valid" in response.lower() else "uncertain"
+        return {
+            "steps": [], "overall": overall, "confidence": 0.5,
+            "corrected_claim": "", "explanation": response[:300],
+        }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Reflection / retrospective loop
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_reflection_prompt(task: str, result: str, tool_trace: list) -> str:
+    """Build a post-task reflection prompt to extract learning signals."""
+    trace_str = "\n".join(
+        f"  [{t.get('action','?')}] {str(t.get('result',''))[:120]}"
+        for t in (tool_trace or [])[:10]
+    ) or "  (no tools used)"
+    return (
+        f"You are a retrospective analysis agent. Review this completed task and extract "
+        f"learning signals for future improvement.\n\n"
+        f"Task: {task}\n\n"
+        f"Tool trace:\n{trace_str}\n\n"
+        f"Final result (excerpt): {str(result)[:500]}\n\n"
+        f"Respond ONLY in this JSON format:\n"
+        f'{{"quality_score": 0.0-1.0, "what_worked": ["..."], "what_failed": ["..."], '
+        f'"lessons": ["..."], "suggested_improvements": ["..."], "summary": "..."}}'
+    )
+
+
+def parse_reflection_response(response: str) -> dict:
+    """Parse reflection/retrospective response."""
+    try:
+        data = json.loads(response)
+        return {
+            "quality_score":           float(data.get("quality_score", 0.7)),
+            "what_worked":             data.get("what_worked", []),
+            "what_failed":             data.get("what_failed", []),
+            "lessons":                 data.get("lessons", []),
+            "suggested_improvements":  data.get("suggested_improvements", []),
+            "summary":                 data.get("summary", response[:200]),
+        }
+    except Exception:
+        return {
+            "quality_score": 0.7, "what_worked": [], "what_failed": [],
+            "lessons": [], "suggested_improvements": [],
+            "summary": response[:200],
         }

@@ -160,13 +160,13 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [ ] Auto-retry on malformed LLM output
 - [ ] Confidence scoring on responses
 - [ ] `AllProvidersExhausted` → 503 retry guidance on `/agents/{agent_id}/run`
-- [ ] Parallel tool-call execution (fan-out multiple tools simultaneously)
-- [ ] Compositional (chained sequential) tool-call support (Audit 2026-04-17: No code backing found)
+- [x] Parallel tool-call execution (fan-out multiple tools simultaneously)
+- [x] Compositional (chained sequential) tool-call support
 - [x] Partial tool-failure recovery (continue after one tool errors) — Pointers: route=`POST /agent`, `POST /agent/stream` (`src/api/routes.py`); tool=`dispatch_builtin` + `_tool_trace(..., status="error")` (`src/tools_builtin.py`); module=`src/agent.py:_execute_parallel_tool_call`, `src/agent.py:_run_parallel_tool_batch`.
-- [ ] Tool-call call ID tracking for parallel/compositional flows
-- [ ] Streaming token counter telemetry event
-- [ ] Per-request execution budget (max tokens, max tool calls, max time)
-- [ ] Agent warm-up / pre-loading (keep agent context primed between calls)
+- [x] Tool-call call ID tracking for parallel/compositional flows
+- [x] Streaming token counter telemetry event
+- [x] Per-request execution budget (max tokens, max tool calls, max time)
+- [x] Agent warm-up / pre-loading (keep agent context primed between calls)
 
 ### 3.2 Reasoning and thinking
 
@@ -179,10 +179,10 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [ ] Generator-critic research flow (`POST /reason/generator-critic`)
 - [ ] Multi-agent debate (`POST /reason/debate`)
 - [ ] Hypothesis testing flow (`POST /reason/hypothesis`)
-- [ ] Reflection / retrospective loop (post-task quality review stored as learning signal)
-- [ ] Monte Carlo Tree Search (MCTS) for planning space exploration
-- [ ] Socratic reasoning mode (question-driven decomposition)
-- [ ] Step-by-step verification (formal proof checking for math/code)
+- [x] Reflection / retrospective loop (post-task quality review stored as learning signal)
+- [x] Monte Carlo Tree Search (MCTS) for planning space exploration
+- [x] Socratic reasoning mode (question-driven decomposition)
+- [x] Step-by-step verification (formal proof checking for math/code)
 
 ### 3.3 Autonomy and orchestration
 
@@ -195,27 +195,27 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [ ] Structured task decomposition (PlanningSystem)
 - [ ] Subtask classification to tool / agent
 - [ ] Sequential and parallel subtask execution
-- [ ] SSE events: `plan`, `subtask`, `tool`, `result`, `autonomy_done`
+- [x] SSE events: `plan`, `subtask`, `tool`, `result`, `autonomy_done`
 - [ ] Checkpointed long-run execution (`src/execution_trace.py`)
 - [ ] `GET /tasks` — task list
 - [ ] `GET /tasks/{trace_id}` — task detail
 - [ ] `GET /tasks/{trace_id}/replay` — deterministic trace replay
 - [ ] `POST /tasks/{trace_id}/resume` — resume interrupted task
 - [ ] `DELETE /tasks/{trace_id}` — delete task trace
-- [ ] Task dependency graph (DAG scheduling between subtasks)
-- [ ] Cross-task memory sharing (results of task A injected into task B context)
-- [ ] Task queue with priority ordering
-- [ ] Background task worker (run tasks without blocking HTTP response)
-- [ ] Task cancellation mid-execution (not just stream stop)
-- [ ] Scheduled task re-run on cron triggers (via scheduler integration)
+- [x] Task dependency graph (DAG scheduling between subtasks)
+- [x] Cross-task memory sharing (results of task A injected into task B context)
+- [x] Task queue with priority ordering
+- [x] Background task worker (run tasks without blocking HTTP response)
+- [x] Task cancellation mid-execution (not just stream stop)
+- [x] Scheduled task re-run on cron triggers (via scheduler integration)
 
 ### 3.4 Simulation
 
 - [ ] `src/simulation.py` — simulation engine
 - [ ] `POST /simulate` — run agent simulation scenario
-- [ ] Scenario library (pre-built simulation templates)
-- [ ] Simulation result comparison (A/B run diffing)
-- [ ] Simulation → training signal pipeline (export to fine-tuning dataset)
+- [x] Scenario library (pre-built simulation templates)
+- [x] Simulation result comparison (A/B run diffing)
+- [x] Simulation → training signal pipeline (export to fine-tuning dataset)
 
 ---
 
@@ -864,9 +864,9 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 | Status | Count (approx)       |
 |--------|----------------------|
-| `[x]` Fully implemented | 147 |
-| `[~]` Stub / partial    | 0   |
-| `[ ]` Not yet started   | 461 |
+| `[x]` Fully implemented | 171 |
+| `[~]` Stub / partial    | 4   |
+| `[ ]` Not yet started   | 445 |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).
