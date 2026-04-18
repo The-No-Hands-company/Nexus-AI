@@ -1,6 +1,7 @@
 import os, re, json, glob, time, subprocess, threading, resource
 from functools import lru_cache
 from datetime import datetime, timezone
+from contextlib import nullcontext
 from typing import Dict, Any, List, Iterator, Optional
 from .tools_builtin import dispatch_builtin
 from .autonomy import Orchestrator, classify_subtask, PlanningSystem
@@ -23,6 +24,7 @@ from .safety_pipeline import SAFETY_POLICY_PROFILES, describe_block, screen_outp
 from .safety_types import SafetyAction
 from .approvals import create_tool_approval, list_tool_approvals, decide_tool_approval, consume_approved_action
 from .memory import add_memory, summarize_history as _summarize_history, get_memory_context
+from .secrets_manager import get_secret, inject_request_credentials, secret_access_context
 try:
     init_usage_table()
 except Exception:
@@ -571,7 +573,21 @@ def _is_rl_error(exc):
     if isinstance(exc, __import__('requests').HTTPError):
         if exc.response is not None and exc.response.status_code == 429: return True
     return any(p in msg for p in ["rate limit","rate_limit","too many requests","quota","throttl"])
-def _has_key(cfg): return cfg.get("keyless",False) or bool(os.getenv(cfg["env_key"],"").strip())
+def _provider_secret_name(cfg: Dict[str, Any]) -> str:
+    return str(cfg.get("env_key", "") or "").strip()
+
+
+def _provider_api_key(cfg: Dict[str, Any]) -> str:
+    if cfg.get("keyless", False):
+        return "llm7" if cfg.get("label", "").lower().startswith("llm7") else ""
+    secret_name = _provider_secret_name(cfg)
+    if not secret_name:
+        return ""
+    return str(get_secret(secret_name, "") or "").strip()
+
+
+def _has_key(cfg):
+    return cfg.get("keyless", False) or bool(_provider_api_key(cfg))
 
 def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[str]:
     pref = _config["provider"]
@@ -598,6 +614,29 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
         if pid in avail and pid not in ordered: ordered.append(pid)
     if pref != "auto" and pref in ordered:
         ordered.remove(pref); ordered.insert(0, pref)
+
+    # Persona-level provider priority override (when provider=auto).
+    if pref == "auto":
+        persona_name = get_active_persona_name()
+        persona_override = get_provider_persona_override(persona_name)
+        if persona_override:
+            boosted = [p for p in persona_override if p in ordered]
+            ordered = boosted + [p for p in ordered if p not in boosted]
+
+    # Hardware-aware bias: promote providers that can exploit local/accelerated compute.
+    try:
+        from .hardware import get_hardware_routing_hint
+
+        hw = get_hardware_routing_hint()
+        if hw.get("has_gpu"):
+            gpu_favored = {"ollama", "groq", "cerebras", "nvidia", "github_models"}
+            gpu_first = [p for p in ordered if p in gpu_favored]
+            cpu_rest = [p for p in ordered if p not in gpu_favored]
+            ordered = gpu_first + cpu_rest
+        elif hw.get("prefer_local") and "ollama" in ordered:
+            ordered = ["ollama"] + [p for p in ordered if p != "ollama"]
+    except Exception:
+        pass
 
     # Budget-aware filtering: drop providers that exceed the cost ceiling
     if BUDGET_TIER != "any":
@@ -1339,7 +1378,10 @@ def _ollama_pull(model: str, base_url: str) -> None:
 
 def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
     import requests
-    api_key = os.getenv(cfg["env_key"],"") or ("llm7" if cfg.get("keyless") else "")
+    secret_name = _provider_secret_name(cfg)
+    ctx = inject_request_credentials([secret_name]) if secret_name else nullcontext({})
+    with ctx as creds:
+        api_key = str((creds.get(secret_name) if secret_name else "") or _provider_api_key(cfg) or "")
     model = _config["model"] or cfg.get("_selected_model") or cfg["default_model"]
     is_local = cfg.get("local") and cfg.get("keyless")
 
@@ -1386,8 +1428,11 @@ def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
 
 def _call_grok(messages):
     import requests, time as _t
+    secret_name = "GROK_API_KEY"
+    with inject_request_credentials([secret_name]) as creds:
+        grok_key = str(creds.get(secret_name) or get_secret(secret_name, "") or "")
     headers = {
-        "Authorization": f"Bearer {os.getenv('GROK_API_KEY','')}",
+        "Authorization": f"Bearer {grok_key}",
         "Content-Type": "application/json",
     }
     body = {
@@ -1424,8 +1469,11 @@ def _call_grok(messages):
 
 def _call_claude_api(messages):
     import requests
+    secret_name = "CLAUDE_API_KEY"
+    with inject_request_credentials([secret_name]) as creds:
+        claude_key = str(creds.get(secret_name) or get_secret(secret_name, "") or "")
     resp = requests.post("https://api.anthropic.com/v1/messages",
-        headers={"x-api-key":os.getenv("CLAUDE_API_KEY",""),"anthropic-version":"2023-06-01","Content-Type":"application/json"},
+        headers={"x-api-key":claude_key,"anthropic-version":"2023-06-01","Content-Type":"application/json"},
         json={"model":_config["model"] or "claude-sonnet-4-20250514",
               "system":get_system_prompt(),"messages":messages,
               "temperature":_config["temperature"] or get_active_persona()["temperature"],"max_tokens":4096},timeout=90)
@@ -1489,6 +1537,18 @@ def _provider_exhausted_error(scope: str, tried: List[str], last_error: str = ""
 
 def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, str]:
     import requests as _r
+    tracer = None
+    llm_counter = None
+    llm_latency = None
+    try:
+        from .observability import get_tracer, LLM_CALLS_TOTAL, LLM_LATENCY
+
+        tracer = get_tracer()
+        llm_counter = LLM_CALLS_TOTAL
+        llm_latency = LLM_LATENCY
+    except Exception:
+        tracer = None
+
     resources = get_system_resources()
     order = _smart_order(task or (messages[-1].get("content","") if messages else ""), resources)
     if not order: raise AllProvidersExhausted("No providers available.")
@@ -1500,11 +1560,30 @@ def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, 
     last_err = None
     for pid in order:
         if _is_rate_limited(pid): continue
+        started = time.time()
         try:
-            result = _call_single(pid, messages)
+            if tracer:
+                with tracer.start_as_current_span("llm.provider.call") as span:
+                    if hasattr(span, "set_attribute"):
+                        span.set_attribute("llm.provider", pid)
+                        span.set_attribute("llm.task", task or "")
+                        span.set_attribute("llm.routed_order", " -> ".join(order[:5]))
+                    result = _call_single(pid, messages)
+            else:
+                result = _call_single(pid, messages)
+            elapsed = max(0.0, time.time() - started)
+            if llm_counter is not None:
+                llm_counter.labels(provider=pid, status="ok").inc()
+            if llm_latency is not None:
+                llm_latency.labels(provider=pid).observe(elapsed)
             return result, pid
         except Exception as e:
             last_err = e
+            elapsed = max(0.0, time.time() - started)
+            if llm_counter is not None:
+                llm_counter.labels(provider=pid, status="error").inc()
+            if llm_latency is not None:
+                llm_latency.labels(provider=pid).observe(elapsed)
             if _is_rl_error(e): _mark_rate_limited(pid); print(f"↩️ {pid} rate-limited")
             elif isinstance(e, (_r.ConnectionError, _r.Timeout)): print(f"⚠️ {pid} connection error")
             else: print(f"⚠️ {pid}: {e}")
@@ -1695,6 +1774,28 @@ def _compress_history(history: List[Dict]) -> List[Dict]:
     return [compressed_msg, follow_up] + new_turns
 
 
+def _dispatch_builtin_traced(action: Dict[str, Any], sid: str = "") -> Dict[str, Any] | None:
+    """Dispatch a built-in tool with OpenTelemetry tracing around execution."""
+    tracer = None
+    try:
+        from .observability import get_tracer
+
+        tracer = get_tracer()
+    except Exception:
+        tracer = None
+
+    if tracer is None:
+        return dispatch_builtin(action, session_id=sid or "")
+
+    tool_name = str(action.get("action", "unknown"))
+    with tracer.start_as_current_span("tool.dispatch") as span:
+        if hasattr(span, "set_attribute"):
+            span.set_attribute("tool.name", tool_name)
+            span.set_attribute("session.id", sid or "")
+            return dispatch_builtin(action, session_id=sid or "")
+        return dispatch_builtin(action, session_id=sid or "")
+
+
 # ── streaming agent ───────────────────────────────────────────────────────────
 def stream_agent_task(task: str, history: list, files: list | None = None,
                       stop_evt=None, sid: str = "", trace_id: str = "",
@@ -1714,6 +1815,16 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
     # Mask tokens before LLM ever sees them
     clean_task = mask_token(task)
+
+    # Auto warm-up keeps first-turn latency stable for new/expired sessions.
+    if os.getenv("AGENT_AUTO_WARMUP", "true").lower() in ("1", "true", "yes"):
+        _wk = f"{sid}:{_config.get('persona', 'general')}"
+        _cached = _WARMUP_CACHE.get(_wk)
+        if not _cached or (time.time() - _cached.get("ts", 0)) > _WARMUP_TTL:
+            try:
+                warmup_agent(sid=sid or "runtime", persona=_config.get("persona", "general"))
+            except Exception:
+                pass
 
     # Accumulated reasoning trace — populated by think/think_deep steps
     _trace_steps: List[Dict[str, Any]] = []
@@ -2199,7 +2310,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                    "call_ids": [f"{_ptid}_{i}" for i in range(len(tools_list))]}
 
             def _run_one(sub_action: Dict) -> Dict:
-                _sr = dispatch_builtin(sub_action)
+                _sr = _dispatch_builtin_traced(sub_action, sid=sid)
                 if _sr:
                     return _sr
                 return {"result": f"unknown tool: {sub_action.get('action','?')}", "status": "error"}
@@ -2264,7 +2375,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     for k, v in sub_action.items():
                         if isinstance(v, str) and "{prev}" in v:
                             sub_action[k] = v.replace("{prev}", _prev_result[:800])
-                _cr = dispatch_builtin(sub_action)
+                _cr = _dispatch_builtin_traced(sub_action, sid=sid)
                 if not _cr:
                     _cr = {"result": f"unknown tool: {sub_action.get('action','?')}", "status": "error"}
                 _prev_result = str(_cr.get("result", ""))
@@ -2418,7 +2529,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
                 continue
 
-        builtin_result = dispatch_builtin(action)
+        builtin_result = _dispatch_builtin_traced(action, sid=sid)
 
         icon  = TOOL_ICONS.get(kind, "🔧")
         label = (action.get("query") or action.get("path") or action.get("cmd") or
@@ -2596,7 +2707,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                         result = tool_web_search(action.get("query", ""))
                     else:
                         # re-dispatch via dispatch_builtin (covers read_page, api_call, youtube_*)
-                        _br = dispatch_builtin(action)
+                        _br = _dispatch_builtin_traced(action, sid=sid)
                         result = _br["result"] if _br else f"Tool failed after {err_class} retry: {e}"
                 except Exception as e2:
                     result = f"Tool failed after {err_class} retry: {e2}"
