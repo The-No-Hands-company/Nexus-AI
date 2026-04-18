@@ -2,7 +2,7 @@
 
 > **Purpose:** Ground-truth map of every feature Nexus AI has, partially has, or needs.
 > A feature is anything that makes the system behave differently — even a single guard clause.
-> Legend: `[x]` = fully implemented | `[~]` = stub / partial | `[ ]` = not yet started
+> Legend: `[x]` = fully implemented and production ready | `[~]` = implemented but partial / stub / mock / non-persistent | `[ ]` = not yet started
 
 ---
 
@@ -121,7 +121,7 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] `POST /v1/audio/transcriptions` (Whisper-compatible STT, local faster-whisper + OpenAI fallback)
 - [x] `POST /v1/audio/speech` (TTS endpoint, local piper/espeak + OpenAI fallback)
 - [x] `GET/POST/DELETE /v1/files` + `GET /v1/files/{id}/content` (OpenAI Files API compatibility)
-- [x] `POST/GET /v1/fine-tuning/jobs`, `GET/POST /v1/fine-tuning/jobs/{id}` (fine-tuning API compatibility stub)
+- [~] `POST/GET /v1/fine-tuning/jobs`, `GET/POST /v1/fine-tuning/jobs/{id}` (fine-tuning API compatibility stub)
 - [x] OpenAI Structured Outputs schema subset enforcement (`_validate_json_schema_value()` in `src/api/routes.py`)
 - [x] DeepSeek `reasoning_content` field normalization (`_call_openai()` extracts and maps to `thought` field)
 - [x] Gemini function-call ID mapping for parallel calls (`_call_openai()` maps `tool_calls` IDs to `_tool_calls`)
@@ -151,8 +151,8 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] SSE event stream (`token`, `think`, `plan`, `tool_start`, `tool_result`, `done`)
 - [x] `POST /agent` — non-streaming agent run
 - [x] `POST /agent/stream` — SSE streaming agent run
-- [x] `GET /agent/trace/{trace_id}` — fetch execution trace
-- [x] `POST /agent/stop/{stream_id}` — cancel active stream
+- [~] `GET /agent/trace/{trace_id}` — fetch execution trace (session state in-memory at `api/state.py:autonomy_traces` dict; lost on restart)
+- [~] `POST /agent/stop/{stream_id}` — cancel active stream (stream state in-memory at `api/state.py:_active_streams` dict; not persisted)
 - [x] `POST /agents/{agent_id}/run` — run named specialist agent
 - [x] `GET /agents/{agent_id}` — get agent spec
 - [x] `GET /agents` — list all specialist agents
@@ -172,42 +172,42 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 - [x] `src/thinking.py` — Chain-of-Thought / Tree-of-Thought helpers
 - [x] `think_deep` tool — Tree-of-Thought reasoning
-- [x] Graph-of-Thought reasoning
+- [~] Graph-of-Thought reasoning (not found in code; only Tree-of-Thought at `src/thinking.py:build_tot_prompt()`)
 - [x] Self-critique loop (`POST /agent/self-review`)
 - [x] `GET /agent/self-review/history`
 - [x] Cross-model consensus (`POST /reason/consensus`)
 - [x] Generator-critic research flow (`POST /reason/generator-critic`)
 - [x] Multi-agent debate (`POST /reason/debate`)
 - [x] Hypothesis testing flow (`POST /reason/hypothesis`)
-- [x] Reflection / retrospective loop (post-task quality review stored as learning signal)
-- [x] Monte Carlo Tree Search (MCTS) for planning space exploration
-- [x] Socratic reasoning mode (question-driven decomposition)
-- [x] Step-by-step verification (formal proof checking for math/code)
+- [~] Reflection / retrospective loop (post-task quality review stored as learning signal) (no wiring to fine-tuning pipeline; stored but not consumed)
+- [~] Monte Carlo Tree Search (MCTS) for planning space exploration (functions exist in `src/thinking.py:_MCTSNode` but not auto-invoked; requires explicit prompt template)
+- [~] Socratic reasoning mode (question-driven decomposition) (prompt template exists but not wired as standalone workflow route)
+- [ ] Step-by-step verification (formal proof checking for math/code) (not implemented)
 
 ### 3.3 Autonomy and orchestration
 
 - [x] `src/autonomy.py` — multi-step orchestrator + planning system
 - [x] `POST /autonomy/plan` — dry-run plan generation
 - [x] `POST /autonomy/execute` — full autonomous task execution
-- [x] `GET /autonomy/trace/{trace_id}` — trace retrieval
+- [~] `GET /autonomy/trace/{trace_id}` — trace retrieval (session state in-memory at `api/state.py:autonomy_traces` dict; lost on restart)
 - [x] `POST /orchestrate/hierarchical` — Planner→Executor→Reviewer→Verifier pipeline
-- [x] `GET /orchestrate/hierarchical/{trace_id}` — hierarchical trace
+- [~] `GET /orchestrate/hierarchical/{trace_id}` — hierarchical trace (session state in-memory; lost on restart)
 - [x] Structured task decomposition (PlanningSystem)
 - [x] Subtask classification to tool / agent
 - [x] Sequential and parallel subtask execution
 - [x] SSE events: `plan`, `subtask`, `tool`, `result`, `autonomy_done`
-- [x] Checkpointed long-run execution (`src/execution_trace.py`)
-- [x] `GET /tasks` — task list
-- [x] `GET /tasks/{trace_id}` — task detail
-- [x] `GET /tasks/{trace_id}/replay` — deterministic trace replay
-- [x] `POST /tasks/{trace_id}/resume` — resume interrupted task
+- [~] Checkpointed long-run execution (`src/execution_trace.py`) (DB schema exists with `trace_checkpoints` table but not wired into live autonomy streams; checkpoints not auto-saved during `/autonomy/execute`)
+- [~] `GET /tasks` — task list (queries in-memory `execution_traces` dict at `api/state.py:execution_traces`; lost on restart)
+- [~] `GET /tasks/{trace_id}` — task detail (in-memory; lost on restart)
+- [~] `GET /tasks/{trace_id}/replay` — deterministic trace replay (requires in-memory trace; not persisted to DB for cross-session replay)
+- [~] `POST /tasks/{trace_id}/resume` — resume interrupted task (reads from in-memory state; session boundary blocks resumption across restarts)
 - [x] `DELETE /tasks/{trace_id}` — delete task trace
 - [x] Task dependency graph (DAG scheduling between subtasks)
-- [x] Cross-task memory sharing (results of task A injected into task B context)
+- [~] Cross-task memory sharing (results of task A injected into task B context) (in-memory `shared_memory` dict in `task_queue.py`; not persisted across restarts)
 - [x] Task queue with priority ordering
-- [x] Background task worker (run tasks without blocking HTTP response)
+- [~] Background task worker (run tasks without blocking HTTP response) (runs in thread; no queue persistence or heartbeat monitoring; tasks lost if process crashes)
 - [x] Task cancellation mid-execution (not just stream stop)
-- [x] Scheduled task re-run on cron triggers (via scheduler integration)
+- [~] Scheduled task re-run on cron triggers (via scheduler integration) (cron scheduling exists but requeue logic is synchronous, not async-worker-bound; no persistence of scheduled jobs)
 
 ### 3.4 Simulation
 
@@ -376,7 +376,7 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [ ] `tool_youtube_transcript` — get YouTube transcript
 - [ ] `tool_youtube` — YouTube summary
 - [ ] `web_search` — structured web search with citations (Brave / SerpAPI / DuckDuckGo) (Audit 2026-04-17: No code backing found)
-- [x] `screenshot_capture` — headless browser screenshot — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py` registry + `tool_screenshot`); module=`src/tools_builtin.py:tool_screenshot` (stub).
+- [~] `screenshot_capture` — headless browser screenshot — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py` registry + `tool_screenshot`); module=`src/tools_builtin.py:tool_screenshot` (stub).
 - [x] `screenshot_capture` — headless browser screenshot — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py` registry + `tool_screenshot`); module=`src/vision.py:capture_screenshot`.
 - [ ] `web_scrape_structured` — extract structured data from page (CSS selectors)
 - [ ] `rss_fetch` — fetch and parse RSS / Atom feed
@@ -386,16 +386,16 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 ### 6.4 Media and generation tools
 
 - [ ] `generate_image` — Pollinations image generation (Audit 2026-04-17: No code backing found)
-- [x] `generate_image_local` — local Flux / SD3 image generation via Ollama — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local` (stub).
+- [~] `generate_image_local` — local Flux / SD3 image generation via Ollama — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local` (stub).
 - [x] `generate_image_local` — local Flux / SD3 image generation via Ollama — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local`.
-- [x] `generate_video` — local video generation — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video` (stub).
+- [~] `generate_video` — local video generation — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video` (stub).
 - [x] `generate_video` — local video generation — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video`.
-- [x] `Nexus Tunnel integration` (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (mock implementation, pending WS backend).
-- [x] `Nexus Tunnel integration` (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (functional, returns mocked tunnel URLs).
-- [x] `Nexus Guardian integration` — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (mock implementation, pending API backend).
-- [x] `Nexus Guardian integration` — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (functional, returns mocked instance IDs).
-- [x] `Nexus Edge integration` — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (mock implementation, pending orchestrator backend).
-- [x] `Nexus Edge integration` — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (functional, returns mocked node IDs).
+- [~] `Nexus Tunnel integration` (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (mock implementation, pending WS backend).
+- [~] `Nexus Tunnel integration` (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (functional, returns mocked tunnel URLs).
+- [~] `Nexus Guardian integration` — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (mock implementation, pending API backend).
+- [~] `Nexus Guardian integration` — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (functional, returns mocked instance IDs).
+- [~] `Nexus Edge integration` — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (mock implementation, pending orchestrator backend).
+- [~] `Nexus Edge integration` — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (functional, returns mocked node IDs).
 - [x] `screenshot_to_text` — OCR a screenshot image — Pointers: route=`n/a`; tool=`ocr` (`src/tools_builtin.py` registry + `tool_ocr`); module=`src/vision.py:ocr_image_bytes` delegated from `src/tools_builtin.py:tool_ocr`.
 - [x] `image_describe` — vision model image description — Pointers: route=`POST /vision/understand` (`src/api/routes.py`); tool=`vision_understand` (`src/tools_builtin.py` registry + `tool_vision_understand`); module=`src/vision.py:describe_image` delegated from `src/tools_builtin.py:tool_vision_understand`.
 - [x] `image_edit` — inpaint / edit image with prompt
@@ -633,13 +633,13 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [ ] Image input in `/agent` and `/agent/stream`
 - [ ] Local vision model support via Ollama (LLaVA / Qwen-VL / Llama 4 Vision)
 - [x] Image analysis tool (`image_describe`) — Pointers: route=`POST /vision/understand` (`src/api/routes.py`); tool=`vision_understand` (`src/tools_builtin.py`); module=`src/vision.py:describe_image` delegated from `src/tools_builtin.py:tool_vision_understand`.
-- [x] Screenshot capture tool (headless browser) — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py`); module=`src/tools_builtin.py:tool_screenshot` (stub).
+- [~] Screenshot capture tool (headless browser) — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py`); module=`src/tools_builtin.py:tool_screenshot` (stub).
 - [x] OCR tool (extract text from image) — Pointers: route=`n/a`; tool=`ocr` (`src/tools_builtin.py`); module=`src/vision.py:ocr_image_bytes` delegated from `src/tools_builtin.py:tool_ocr`.
 
 ### 11.2 Image generation
 
 - [ ] `generate_image` tool — Pollinations (cloud) (Audit 2026-04-17: No code backing found)
-- [x] Local image generation — Flux / SD3 via Ollama or ComfyUI — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local` (stub).
+- [~] Local image generation — Flux / SD3 via Ollama or ComfyUI — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local` (stub).
 - [x] Image editing / inpainting tool
 - [x] Image-to-image (style transfer) tool
 - [ ] Generated image persistence (save to workdir, return URL)
@@ -657,7 +657,7 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 ### 11.4 Video
 
 - [ ] YouTube summarization wired to LLM (transcript → summary, currently tool returns raw transcript)
-- [x] Local video generation tool — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video` (stub).
+- [~] Local video generation tool — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video` (stub).
 - [x] Video-to-text (frame sampling + vision description)
 - [x] Video chapter detection
 
@@ -829,15 +829,15 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ## 18. Enterprise and Ecosystem (Phase 5 / Future)
 
-- [x] Nexus Tunnel integration (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (stub).
-- [x] Nexus Guardian integration — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (stub).
-- [x] Nexus Edge integration — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (stub).
+- [~] Nexus Tunnel integration (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (stub).
+- [~] Nexus Guardian integration — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (stub).
+- [~] Nexus Edge integration — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (stub).
 - [ ] Nexus Systems API passthrough
 - [ ] Nexus AI Hub (multi-instance management)
 - [ ] Nexus Blueprint export (portable agent workflow archive)
 - [ ] Open-source model leaderboard page
-- [x] Real-time collaboration (multi-human + multi-agent on same session) — Pointers: route=`POST /collab/rooms`, `GET /collab/rooms`, `GET /collab/rooms/{room_id}`, `DELETE /collab/rooms/{room_id}` (`src/api/routes.py`); tool=`n/a`; module=`src/collab.py:create_room`, `src/collab.py:join_room`, `src/collab.py:close_room` (stubs).
-- [x] Real-time collaboration (multi-human + multi-agent on same session) — Pointers: route=`POST /collab/rooms`, `GET /collab/rooms`, `GET /collab/rooms/{room_id}`, `DELETE /collab/rooms/{room_id}` (`src/api/routes.py`); tool=`n/a`; module=`src/collab.py:create_room`, `src/collab.py:join_room`, `src/collab.py:close_room` (in-memory implementation, pending DB/WS).
+- [~] Real-time collaboration (multi-human + multi-agent on same session) — Pointers: route=`POST /collab/rooms`, `GET /collab/rooms`, `GET /collab/rooms/{room_id}`, `DELETE /collab/rooms/{room_id}` (`src/api/routes.py`); tool=`n/a`; module=`src/collab.py:create_room`, `src/collab.py:join_room`, `src/collab.py:close_room` (stubs).
+- [~] Real-time collaboration (multi-human + multi-agent on same session) — Pointers: route=`POST /collab/rooms`, `GET /collab/rooms`, `GET /collab/rooms/{room_id}`, `DELETE /collab/rooms/{room_id}` (`src/api/routes.py`); tool=`n/a`; module=`src/collab.py:create_room`, `src/collab.py:join_room`, `src/collab.py:close_room` (in-memory implementation, pending DB/WS).
 - [x] Screenshot capture tool (headless browser) — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py`); module=`src/vision.py:capture_screenshot`.
 - [x] Local image generation — Flux / SD3 via Ollama or ComfyUI — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local`.
 - [x] Audio analysis tool (sentiment / diarization / speaker ID) — Pointers: route=`POST /audio/analyse` (`src/api/routes.py`); tool=`audio_analyse` (`src/tools_builtin.py`); module=`src/audio.py:analyse_audio`.
@@ -864,9 +864,9 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 | Status | Count (approx)       |
 |--------|----------------------|
-| `[x]` Fully implemented | 211 |
-| `[~]` Stub / partial    | 4   |
-| `[ ]` Not yet started   | 405 |
+| `[x]` Fully implemented | 189 |
+| `[~]` Stub / partial    | 18  |
+| `[ ]` Not yet started   | 401 |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).
