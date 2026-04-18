@@ -217,6 +217,40 @@ def call_llm_ensemble(
     return chosen, winning_pid, meta
 
 
+def explain_consensus(
+    chosen: Dict[str, Any],
+    winning_pid: str,
+    unanimous: bool,
+    meta: Dict[str, Any],
+) -> str:
+    """Generate a natural-language explanation of how the consensus was reached."""
+    polled    = meta.get("polled", [])
+    succeeded = meta.get("succeeded", [])
+    votes     = meta.get("action_votes", {})
+    risk      = meta.get("risk_score", 0.0)
+    errors    = meta.get("errors", {})
+
+    parts = [
+        f"Consensus reached across {len(succeeded)} of {len(polled)} providers "
+        f"(task risk score: {risk:.2f})."
+    ]
+    if unanimous:
+        parts.append(
+            f"All responding providers unanimously agreed on "
+            f"action '{_safe_action(chosen)}'."
+        )
+    else:
+        vote_str = ", ".join(f"'{k}' ×{v}" for k, v in votes.items())
+        parts.append(
+            f"Providers diverged ({vote_str}); selected the safest response "
+            f"from {winning_pid} using risk-weighted tiebreaking."
+        )
+    if errors:
+        failed = ", ".join(errors.keys())
+        parts.append(f"Providers that failed: {failed}.")
+    return " ".join(parts)
+
+
 def call_llm_consensus(
     messages: List[Dict],
     task: str,
