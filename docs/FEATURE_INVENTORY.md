@@ -55,6 +55,8 @@ Tag definitions:
 
 ---
 
+harden these to full production level:
+
 ## 1. Foundational Infrastructure
 
 ### 1.1 Application bootstrap
@@ -132,7 +134,7 @@ Tag definitions:
 - [x] Quota overage 429 response with `X-RateLimit-*` headers (Limit, Remaining, Reset, Policy, Retry-After)
 - [x] Admin dashboard for quota monitoring (`GET /admin/quota`, `POST /admin/quota/{username}`)
 - [x] Quota reset scheduler (daily/weekly) (weekly cron `0 3 * * 0` + stale-key cleanup in `src/api/routes.py`)
-- [x] IP-level rate limiting (pre-authentication; blocks DDoS and scraping before any user context exists)
+- [x] IP-level rate limiting (pre-authentication; blocks DDoS and scraping before any user context exists; request-protection exemptions for frontend bootstrap assets/routes via `src/observability.py:_is_request_protection_exempt` covering `/`, `/static/*`, `/manifest.json`, `/sw.js`, `/favicon.ico`, `/health*`, `/metrics`)
 - [x] Concurrent request limiting (max simultaneous in-flight requests per user / API key; prevents single-user queue saturation)
 - [x] Redis-backed rate limit counters (atomic cross-worker sliding windows; prerequisite for correctness at scale)
 
@@ -578,7 +580,7 @@ Tag definitions:
 - [x] `GET /settings/safety` — read safety config
 - [x] `POST /settings/safety` — update safety config
 - [x] PII redaction (actual masking in output via `scrub_pii_text()` / `screen_output()`; redacts SSN, email, phone, credit card, IP) — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=regex+privacy, validate=src/safety_pipeline.py|POST /safety/pii-scan
-- [x] Toxic content classifier (supports `openai_moderation` and optional `local_transformers` backends in `src/safety/classifier.py`, with safety-pipeline integration)
+- [x] Toxic content classifier (supports `openai_moderation` and optional `local_transformers` backends in `src/safety/classifier.py`, with safety-pipeline integration and cached local transformer pipelines via `_LOCAL_CLF_CACHE` to avoid per-request model reload)
 - [x] Output filter for unsafe completions (post-generation scan via `screen_output()`; redaction/blocking paths active)
 - [x] Jailbreak / adversarial prompt pattern library (expanded `INJECTION_PATTERNS` in `src/safety_pipeline.py` covers DAN, developer-mode, persona hijack, delimiter injection, system-prompt extraction, and encoding-relay families)
 - [x] Safety decision explanation in API response (`reason` and `detail` fields in safety issues)
@@ -844,31 +846,31 @@ Tag definitions:
 
 ### 14.1 Usage and cost
 
-- [ ] `GET /usage` — token / cost usage summary
-- [ ] Cost tracking for paid providers
-- [ ] Usage records written per request
-- [ ] Per-user usage breakdown
-- [ ] Cost forecasting (project spend based on usage trend)
-- [ ] Usage export (CSV / JSON)
-- [ ] Usage webhook (push daily summary to external endpoint)
+- [x] `GET /usage` — token / cost usage summary — Pointers: route=`GET /usage` (`src/api/routes.py`); module=`src/db.py:get_usage_stats`, `src/db.py:get_usage_daily`, `src/db.py:get_usage_records`.
+- [x] Cost tracking for paid providers — Pointers: module=`src/agent.py:stream_agent_task` (per-response `cost_usd` estimate persisted); storage=`usage_log.cost_usd` (`src/db.py`).
+- [x] Usage records written per request — Pointers: module=`src/agent.py:stream_agent_task` (`log_usage(...)`); storage=`usage_log` (`src/db.py`).
+- [x] Per-user usage breakdown — Pointers: module=`src/db.py:get_usage_by_user`; route=`GET /usage` (`src/api/routes.py`).
+- [x] Cost forecasting (project spend based on usage trend) — Pointers: route=`GET /usage` (`src/api/routes.py`, `forecast` payload).
+- [x] Usage export (CSV / JSON) — Pointers: route=`GET /usage/export` (`src/api/routes.py`).
+- [x] Usage webhook (push daily summary to external endpoint) — Pointers: route=`GET /usage/webhook`, `POST /usage/webhook`, `POST /usage/webhook/push` (`src/api/routes.py`).
 
 ### 14.2 Execution traces
 
-- [ ] `src/execution_trace.py` — replayable trace store
-- [ ] `GET /tasks/{trace_id}/replay` — deterministic trace replay
-- [ ] Trace search (find traces by tool used / agent / error type)
-- [ ] Trace export (portable JSON)
-- [ ] Trace diff (compare two runs of same task)
-- [ ] Anomaly detection on traces (flag unusual execution patterns)
+- [x] `src/execution_trace.py` — replayable trace store — Pointers: module=`src/execution_trace.py` (`save_checkpoint`, `load_checkpoints`, `list_traces`).
+- [x] `GET /tasks/{trace_id}/replay` — deterministic trace replay — Pointers: route=`GET /tasks/{trace_id}/replay` (`src/api/routes.py`).
+- [x] Trace search (find traces by tool used / agent / error type) — Pointers: route=`GET /tasks/search` (`src/api/routes.py`).
+- [x] Trace export (portable JSON) — Pointers: route=`GET /tasks/{trace_id}/export` (`src/api/routes.py`).
+- [x] Trace diff (compare two runs of same task) — Pointers: route=`GET /tasks/{trace_id}/diff` (`src/api/routes.py`); module=`src/execution_trace.py` (file diff persistence).
+- [x] Anomaly detection on traces (flag unusual execution patterns) — Pointers: route=`GET /tasks/anomalies` (`src/api/routes.py`).
 
 ### 14.3 Structured logging
 
-- [ ] Safety audit log (`GET /safety/audit`)
-- [ ] Agent bus log (`GET /agents/bus/log`)
-- [ ] Structured JSON application log (all requests + responses)
-- [ ] OpenTelemetry tracing export
-- [ ] Prometheus metrics endpoint (`GET /metrics`)
-- [ ] Log forwarding to external sink (Loki / Datadog / CloudWatch)
+- [x] Safety audit log (`GET /safety/audit`) — Pointers: route=`GET /safety/audit` (`src/api/routes.py`); storage=`src/db.py:load_safety_audit_entries`.
+- [x] Agent bus log (`GET /agents/bus/log`) — Pointers: route=`GET /agents/bus/log` (`src/api/routes.py`); module=`src/agent_bus.py`.
+- [x] Structured JSON application log (all requests + responses) — Pointers: module=`src/app.py:AuditBodyLogMiddleware` + structured logger wiring.
+- [x] OpenTelemetry tracing export — Pointers: module=`src/observability.py` (OTLP tracer setup/export).
+- [x] Prometheus metrics endpoint (`GET /metrics`) — Pointers: route=`GET /metrics` (`src/api/routes.py`); module=`src/observability.py:get_prometheus_metrics_text`.
+- [x] Log forwarding to external sink (Loki / Datadog / CloudWatch) — Pointers: module=`src/observability.py` sink forwarding handlers.
 
 ---
 
@@ -876,60 +878,61 @@ Tag definitions:
 
 ### 15.1 Chat UI
 
-- [ ] Streaming SSE word-by-word typewriter
-- [ ] Stop button (cancel mid-stream)
-- [ ] Markdown rendering
-- [ ] Syntax-highlighted code blocks
-- [ ] Inline artifact renderer (HTML / SVG)
-- [ ] Inline image bubbles
-- [ ] Multi-file artifact tabs
-- [ ] Code viewer for file ops
-- [ ] Resizable split view
-- [ ] Message reactions
-- [ ] Live confidence / reasoning trace badge
-- [ ] Streaming token counter
-- [ ] Code execution in UI (run Python / JS in sandboxed iframe)
-- [ ] Chart / graph artifact renderer (Plotly / Chart.js output)
-- [ ] Mermaid diagram renderer
-- [ ] LaTeX / math equation renderer
-- [ ] Message edit + re-run
-- [ ] Message branch (fork conversation from earlier message)
-- [ ] Message copy-as-markdown button
-- [ ] Image paste input (paste clipboard image into chat)
+- [x] Streaming SSE word-by-word typewriter — Pointers: backend token chunk stream in `src/agent.py` (`token_chunk` events in `stream_agent_task`); UI progressive render in `static/index.html` (`evt.type==='token_chunk'`).
+- [x] Stop button (cancel mid-stream) — Pointers: UI=`static/index.html` (`#stop-btn`, `stopStream()`, `setBusy()`); route=`POST /agent/stop/{stream_id}` (`src/api/routes.py`).
+- [x] Markdown rendering — Pointers: UI=`static/index.html:renderMd` (Marked.js).
+- [x] Syntax-highlighted code blocks — Pointers: UI=`static/index.html` (highlight.js include + `renderMd`/`makeCodeViewer`).
+- [x] Inline artifact renderer (HTML / SVG) — Pointers: module=`static/js/utilities/artifacts.js:makeArtifact`; panel wiring in `static/index.html` (`#artifact-panel`).
+- [x] Inline image bubbles — Pointers: SSE handler in `static/index.html` (`evt.type==='image'`), styles `.img-bubble`.
+- [x] Multi-file artifact tabs — Pointers: UI=`static/index.html` (`.artifact-tabs`, `.artifact-tab`, `openArtifactPanel`).
+- [x] Code viewer for file ops — Pointers: UI=`static/index.html:makeCodeViewer` + `evt.file_content && evt.file_path` rendering.
+- [x] Resizable split view — Pointers: UI=`static/index.html` (`#dragger`), module=`static/js/panels/tooling-utilities.js` drag handlers.
+- [x] Message reactions — Pointers: module=`static/js/utilities/interaction-ui.js:addReactionButtons`, route=`POST /reactions`.
+- [x] Live confidence / reasoning trace badge — Pointers: SSE `done` event handling in `static/index.html` (`evt.confidence` -> `.confidence-badge`).
+- [x] Streaming token counter — Pointers: live SSE token telemetry handled in `static/index.html` (`evt.type==='token'`) and `static/js/utilities/ui-helpers.js:updateLiveTokenCount`.
+- [x] Code execution in UI (run Python / JS in sandboxed iframe) — Pointers: panel `#code-runner-panel` in `static/index.html`; runtime in `static/js/panels/code-runner.js` (JS sandbox + Pyodide Python iframe).
+- [x] Chart / graph artifact renderer (Chart.js output) — Pointers: Chart.js include in `static/index.html`; fenced ` ```chart ` block rendering in `renderMd(...)` + `enhanceRenderedContent(...)`.
+- [x] Mermaid diagram renderer — Pointers: UI=`static/index.html:renderMd` (` ```mermaid ` -> `.mermaid` transform), `static/index.html:enhanceRenderedContent` (`mermaid.run(...)`).
+- [x] LaTeX / math equation renderer — Pointers: UI=`static/index.html:enhanceRenderedContent` (`renderMathInElement` with `$...$` / `$$...$$` delimiters), KaTeX assets loaded in `static/index.html`.
+- [x] Message edit + re-run — Pointers: module=`static/js/panels/tooling-utilities.js:addMessageActions` (`✏️ Edit`, `↺ Retry`).
+- [x] Message branch (fork conversation from earlier message) — Pointers: module=`static/js/panels/tooling-utilities.js:branchFromMessage`, `_buildBranchHistory` (session fork + `__restore__` history replay).
+- [x] Message copy-as-markdown button — Pointers: module=`static/js/panels/tooling-utilities.js:addMessageActions` (`⎘ MD`), `_toMarkdownForCopy`.
+- [x] Image paste input (paste clipboard image into chat) — Pointers: module=`static/js/utilities/input-handling.js` (`textarea#task` paste listener -> `processFiles`).
 
 ### 15.2 Agent console and swarm view
 
-- [ ] Swarm View UI (real-time agent graph visualization)
-- [ ] Agent Console (watch tool calls and events live in a panel)
-- [ ] Task progress panel (current subtask list with status)
-- [ ] Agent output diff viewer (compare before/after file changes)
-- [ ] Diff viewer for file edits (backend `POST /diff` exists)
+- [x] Swarm View UI (real-time agent graph visualization) — Pointers: module=`static/js/panels/swarm.js` (canvas graph + health polling); route=`GET /swarm/health`.
+- [x] Agent Console (watch tool calls and events live in a panel) — Pointers: module=`static/js/panels/swarm.js` (`/swarm/activity`, `/agents/bus/log` feed).
+- [x] Task progress panel (current subtask list with status) — Pointers: UI=`static/index.html` (`#swarm-tab-progress`, `#swarm-pane-progress`); module=`static/js/panels/swarm.js:swarmRefreshProgress`, `_renderProgressTimeline`.
+- [x] Agent output diff viewer (compare before/after file changes) — Pointers: UI=`static/index.html` (`#swarm-tab-diff`, `#swarm-pane-diff`); module=`static/js/panels/swarm.js:swarmRunDiffCompare`; route=`GET /tasks/{trace_id}/diff` (`src/api/routes.py`).
+- [x] Diff viewer for file edits (backend `POST /diff` exists) — Pointers: module=`static/js/panels/diff-history.js:openDiffViewer`, route=`POST /diff` (`src/api/routes.py`).
 
 ### 15.3 Settings and dashboards
 
-- [ ] Provider status drawer with cooldown timers
-- [ ] Settings panel (provider / model / temp overrides)
-- [ ] Multi-user admin dashboard (usage / costs / agent activity per user)
+- [x] Provider status drawer with cooldown timers — Pointers: UI=`static/index.html` (`#drawer`, provider cards/cooldowns), route=`GET /providers/health`.
+- [x] Settings panel (provider / model / temp overrides) — Pointers: UI=`static/index.html` (`#settings-modal` + `saveSettings()`), route=`GET/POST /settings`.
+- [x] Multi-user admin dashboard (usage / costs / agent activity per user) — Pointers: panel `#admin-dashboard-panel` in `static/index.html`; data loader in `static/js/panels/admin-dashboard.js` (`/admin/users`, `/admin/quota`, `/usage`).
 - [x] Command palette (Cmd+K for everything) — Pointers: route=`n/a`; tool=`n/a`; module=`static/js/utilities/search-command.js:openCommandPalette`, `static/js/utilities/search-command.js:_personaCommands`, `static/index.html` (Cmd+K key handlers + script include).
-- [ ] Model benchmark dashboard UI
-- [ ] Fine-tuning job dashboard
-- [ ] RAG corpus browser (list, search, delete ingested docs)
-- [ ] KG visualization panel
+- [x] Model benchmark dashboard UI — Pointers: panel `#benchmark-dashboard-panel` in `static/index.html`; loader in `static/js/panels/benchmark-dashboard.js` (`/benchmark/results`, `/benchmark/history`).
+- [x] Fine-tuning job dashboard — Pointers: panel `#finetune-dashboard-panel` in `static/index.html`; loader in `static/js/panels/finetune-dashboard.js`; backend list endpoint `GET /finetune/jobs` (`src/api/routes.py`).
+- [x] RAG corpus browser (list, search, delete ingested docs) — Pointers: panel `#rag-corpus-panel` in `static/index.html`; loader in `static/js/panels/rag-corpus.js`; endpoints `GET/DELETE /rag/documents*` (`src/api/routes.py`).
+- [x] KG visualization panel — Pointers: module=`static/js/panels/knowledge-graph.js` (`openKGPanel`, query/store wiring).
 
 ### 15.4 PWA and mobile
 
-- [ ] Installable PWA (manifest + service worker)
-- [ ] Mobile sidebar swipe gestures
-- [ ] Haptic feedback
-- [ ] Safe-area inset support
-- [ ] 44px touch targets
+- [x] Installable PWA (manifest + service worker) — Pointers: `static/manifest.json`, `static/sw.js`, `static/js/utilities/device-utils.js` (`beforeinstallprompt`, SW registration).
+- [x] Mobile sidebar swipe gestures — Pointers: module=`static/js/utilities/device-utils.js` (`touchstart`/`touchend` swipe open/close sidebar).
+- [x] Haptic feedback — Pointers: module=`static/js/utilities/device-utils.js:haptic`.
+- [x] Safe-area inset support — Pointers: CSS in `static/index.html` (`env(safe-area-inset-*)`).
+- [x] 44px touch targets — Pointers: coarse-pointer media query enforcing min-height 44px in `static/index.html` CSS.
 - [x] Dark / light theme toggle
-- [ ] Font size preference
-- [ ] Keyboard shortcuts (new chat / sidebar / stop)
-- [ ] Offline mode (serve cached UI without backend)
-- [ ] Push notifications for long-running task completion
-- [ ] Desktop Electron wrapper
-- [ ] Mobile native app (React Native or Capacitor)
+- [x] Font size preference — Pointers: UI `setFontSize(...)` controls in `static/index.html` + persisted prefs.
+- [x] Keyboard shortcuts (new chat / sidebar / stop) — Pointers: UI overlay + handlers in `static/index.html` / `static/js/utilities/search-command.js`.
+- [x] Offline mode (serve cached UI without backend) — Pointers: upgraded service worker in `static/sw.js` (`nexus-ai-v4`) with HTML network-first + cached-shell fallback and static-asset precache; full offline chat execution not available.
+- [x] Push notifications for long-running task completion — Pointers: notification permission + dispatch in `static/js/utilities/device-utils.js` (`enableTaskNotifications`, `notifyTaskComplete`) triggered from stream completion in `static/index.html`.
+- [~] Browser regression spec for chat + operations panels — Pointers: `tests/playwright/tests/chat-and-operations.spec.ts` (covers chat streaming, benchmark/fine-tune dashboards, RAG/admin/code-runner panel flows).
+- [~] Desktop Electron wrapper — Pointers: minimal shell scaffold in `desktop/electron/` (`main.js`, `package.json`) loading `NEXUS_AI_URL`/local server.
+- [~] Mobile native app (Capacitor shell scaffold) — Pointers: `mobile/capacitor/` (`capacitor.config.ts`, `package.json`, `README.md`).
 
 ---
 
@@ -937,11 +940,11 @@ Tag definitions:
 
 ### 16.1 Webhook runtime and delivery controls
 
-- [ ] `POST /webhook/trigger` — external trigger — Tags: owner=integrations, priority=p1, risk=high, stage=GA, deps=auth+rate_limit, validate=POST /webhook/trigger
-- [ ] `GET /webhook/status/{run_id}` — run status
-- [ ] Webhook payload signature verification (HMAC) — Tags: owner=integrations, priority=p1, risk=high, stage=GA, deps=crypto+auth, validate=POST /webhook/trigger
-- [ ] Webhook delivery retry with exponential backoff
-- [ ] Webhook event type filtering (only trigger on specific events)
+- [x] `POST /webhook/trigger` — external trigger — Tags: owner=integrations, priority=p1, risk=high, stage=GA, deps=auth+rate_limit, validate=POST /webhook/trigger — Pointers: `src/api/routes.py:webhook_trigger`.
+- [x] `GET /webhook/status/{run_id}` — run status — Pointers: `src/api/routes.py:webhook_status`.
+- [x] Webhook payload signature verification (HMAC) — Tags: owner=integrations, priority=p1, risk=high, stage=GA, deps=crypto+auth, validate=POST /webhook/trigger — Pointers: `WEBHOOK_HMAC_SECRET`, `X-Webhook-Signature-256` handling in `src/api/routes.py`.
+- [x] Webhook delivery retry with exponential backoff — Pointers: `max_retries` + `retry_backoff_secs` loop in `src/api/routes.py:webhook_trigger`.
+- [x] Webhook event type filtering (only trigger on specific events) — Pointers: `WEBHOOK_ALLOWED_EVENTS` + `event_type` gating in `src/api/routes.py:webhook_trigger`.
 
 ### 16.2 External channel integrations
 
@@ -961,8 +964,8 @@ Tag definitions:
 
 ### 17.1 Gist-based backup path
 
-- [ ] `src/gist_backup.py` — GitHub Gist backup
-- [ ] Restore from backup endpoint
+- [x] `src/gist_backup.py` — GitHub Gist backup — Pointers: `src/gist_backup.py` (`restore_from_gist`, `schedule_push`, `push_now`).
+- [x] Restore from backup endpoint — Pointers: route=`POST /backup/gist/restore` (`src/api/routes.py`); push helper route=`POST /backup/gist/push`.
 
 ### 17.2 Object storage replication
 
