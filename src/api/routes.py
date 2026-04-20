@@ -2511,21 +2511,32 @@ async def benchmark_run(request: Request):
 
     results = []
     for pid in target_providers:
+        cfg = PROVIDERS.get(pid, {})
+        model_id = str(cfg.get("model") or "").strip()
         for probe_name, probe_text in _BENCHMARK_PROBES:
             t0 = _t.time()
             try:
                 resp = _call_single(pid, [{"role": "user", "content": probe_text}])
                 latency_ms = (_t.time() - t0) * 1000
                 text = resp.get("content") or str(resp)
-                save_benchmark_result(pid, probe_name, latency_ms, len(text))
+                save_benchmark_result(
+                    pid,
+                    probe_name,
+                    latency_ms,
+                    len(text),
+                    model=model_id,
+                    task_type=probe_name,
+                )
                 results.append({
                     "provider": pid, "probe": probe_name,
+                    "model": model_id,
                     "latency_ms": round(latency_ms, 1), "response_len": len(text),
                     "ok": True,
                 })
             except Exception as exc:
                 results.append({
                     "provider": pid, "probe": probe_name,
+                    "model": model_id,
                     "latency_ms": None, "response_len": 0,
                     "ok": False, "error": str(exc)[:120],
                 })
@@ -2537,6 +2548,80 @@ def benchmark_results():
     """Return stored benchmark results (most recent first)."""
     from ..db import load_benchmark_results
     return {"results": load_benchmark_results()}
+
+
+@router.get("/benchmark/history")
+def benchmark_history(provider: str = "", model: str = "", task_type: str = "", limit: int = 500):
+    """Return benchmark history with optional provider/model/task filters."""
+    from ..db import load_benchmark_results
+
+    rows = load_benchmark_results(limit=max(1, min(int(limit or 500), 5000)))
+    provider_q = provider.strip().lower()
+    model_q = model.strip().lower()
+    task_q = task_type.strip().lower()
+
+    filtered = []
+    for row in rows:
+        p = str(row.get("provider") or "").strip().lower()
+        m = str(row.get("model") or "").strip().lower()
+        t = str(row.get("task_type") or row.get("probe") or "chat").strip().lower()
+        if provider_q and p != provider_q:
+            continue
+        if model_q and m != model_q:
+            continue
+        if task_q and t != task_q:
+            continue
+        filtered.append(row)
+
+    latency_values = [float(r.get("latency_ms") or 0.0) for r in filtered if float(r.get("latency_ms") or 0.0) > 0.0]
+    avg_latency = (sum(latency_values) / len(latency_values)) if latency_values else 0.0
+    trend = "stable"
+    if len(latency_values) >= 2:
+        half = max(1, len(latency_values) // 2)
+        recent = latency_values[:half]
+        older = latency_values[half:]
+        if older:
+            delta = (sum(recent) / len(recent)) - (sum(older) / len(older))
+            if delta < -10:
+                trend = "improving"
+            elif delta > 10:
+                trend = "degrading"
+
+    return {
+        "results": filtered,
+        "summary": {
+            "count": len(filtered),
+            "avg_latency_ms": round(avg_latency, 2),
+            "trend": trend,
+        },
+    }
+
+
+@router.get("/benchmark/leaderboard")
+def benchmark_leaderboard(sort_by: str = "task_type", limit: int = 20, provider: str = ""):
+    """Return ranked benchmark leaderboard entries."""
+    from ..leaderboard import get_leaderboard
+
+    entries = get_leaderboard(sort_by=sort_by, limit=limit, provider_filter=provider or None)
+    return {
+        "entries": [
+            {
+                "model": e.model,
+                "provider": e.provider,
+                "task_type": e.task_type,
+                "quality_score": e.quality_score,
+                "approval_rate": e.approval_rate,
+                "avg_latency_ms": e.avg_latency_ms,
+                "p95_latency_ms": e.p95_latency_ms,
+                "cost_per_1k_tokens": e.cost_per_1k_tokens,
+                "safety_pass_rate": e.safety_pass_rate,
+                "total_requests": e.total_requests,
+                "last_updated": e.last_updated,
+            }
+            for e in entries
+        ],
+        "sort_by": sort_by,
+    }
 
 
 # ── Consensus reasoning endpoint ──────────────────────────────────────────────
@@ -10487,7 +10572,7 @@ async def webauthn_register_begin(request: Request):
             "attestation": "none",
         })
     except ImportError:
-        return JSONResponse({"error": "WebAuthn support not installed (py_webauthn)"}, status_code=503)
+        return JSONResponse({"error": "WebAuthn support not installed (webauthn)"}, status_code=503)
 
 
 @router.post("/auth/webauthn/register/complete")
@@ -10536,7 +10621,7 @@ async def webauthn_register_complete(request: Request):
         write_audit_log(actor=username, action="webauthn_credential_registered", resource="auth/webauthn", metadata={"device": device_name[:40]})
         return {"registered": True}
     except ImportError:
-        return JSONResponse({"error": "WebAuthn support not installed (py_webauthn)"}, status_code=503)
+        return JSONResponse({"error": "WebAuthn support not installed (webauthn)"}, status_code=503)
     except Exception as exc:
         return _api_error(f"WebAuthn verification failed: {exc}", "invalid_request_error", 400)
 
@@ -10578,7 +10663,7 @@ async def webauthn_authenticate_begin(request: Request):
             "userVerification": "preferred",
         })
     except ImportError:
-        return JSONResponse({"error": "WebAuthn support not installed (py_webauthn)"}, status_code=503)
+        return JSONResponse({"error": "WebAuthn support not installed (webauthn)"}, status_code=503)
 
 
 @router.post("/auth/webauthn/authenticate/complete")
@@ -10632,7 +10717,7 @@ async def webauthn_authenticate_complete(request: Request):
         write_audit_log(actor=username, action="webauthn_login", resource="auth/webauthn", metadata={"credential_id": credential_id[:16]})
         return {"token": token, "refresh_token": refresh_token, "username": username}
     except ImportError:
-        return JSONResponse({"error": "WebAuthn support not installed (py_webauthn)"}, status_code=503)
+        return JSONResponse({"error": "WebAuthn support not installed (webauthn)"}, status_code=503)
     except Exception as exc:
         return _api_error(f"WebAuthn authentication failed: {exc}", "unauthorized", 401)
 
