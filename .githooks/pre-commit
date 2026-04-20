@@ -1,22 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-HOOK_BIN="/run/media/zajferx/Data/dev/The-No-hands-Company/projects/Active/Nexus-Systems/.venv/bin/detect-secrets-hook"
+repo_root="$(git rev-parse --show-toplevel)"
 
-staged_files=$(git diff --cached --name-only --diff-filter=ACM)
-if [[ -z "${staged_files}" ]]; then
+HOOK_BIN="${DETECT_SECRETS_HOOK:-}"
+if [[ -z "${HOOK_BIN}" ]]; then
+  if command -v detect-secrets-hook >/dev/null 2>&1; then
+    HOOK_BIN="$(command -v detect-secrets-hook)"
+  elif [[ -x "${repo_root}/.venv/bin/detect-secrets-hook" ]]; then
+    HOOK_BIN="${repo_root}/.venv/bin/detect-secrets-hook"
+  elif [[ -x "${HOME}/.local/bin/detect-secrets-hook" ]]; then
+    HOOK_BIN="${HOME}/.local/bin/detect-secrets-hook"
+  else
+    HOOK_BIN=""
+  fi
+fi
+
+mapfile -t staged_files < <(git diff --cached --name-only --diff-filter=ACM)
+if [[ "${#staged_files[@]}" -eq 0 ]]; then
   exit 0
 fi
 
-if echo "${staged_files}" | rg -n '(^|/)\.env($|\.)|vite\.config\.ts\.timestamp-.*\.mjs$' >/dev/null; then
+if printf '%s\n' "${staged_files[@]}" | rg -n '(^|/)\.env($|\.)|vite\.config\.ts\.timestamp-.*\.mjs$' >/dev/null; then
   echo "Blocked: .env or vite timestamp temp file detected in staged changes."
   exit 1
 fi
 
-if [[ ! -x "${HOOK_BIN}" ]]; then
-  echo "Missing detect-secrets hook binary at ${HOOK_BIN}."
+if [[ -z "${HOOK_BIN}" || ! -x "${HOOK_BIN}" ]]; then
+  echo "Missing detect-secrets hook binary."
+  echo "Set DETECT_SECRETS_HOOK or install detect-secrets-hook in PATH/.venv/.local."
   exit 1
 fi
 
-# shellcheck disable=SC2086
-"${HOOK_BIN}" ${staged_files}
+"${HOOK_BIN}" "${staged_files[@]}"

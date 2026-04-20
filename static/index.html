@@ -1013,6 +1013,7 @@
       <button onclick="openCIModal();toggleOverflow()">📋 Custom instructions</button>
       <button onclick="openMemoryModal();toggleOverflow()">🧠 Memory</button>
       <button onclick="openUsageModal();toggleOverflow()">📊 Usage</button>
+      <button onclick="openBenchmarkLeaderboardPanel();toggleOverflow()">🏆 Benchmark leaderboard</button>
       <button onclick="openHealthModal();toggleOverflow()">🏥 Provider health</button>
       <button onclick="openSafetyAudit();toggleOverflow()">🛡 Safety audit log</button>
       <button onclick="openSafetyScanner();toggleOverflow()">🧪 Safety scanner</button>
@@ -1751,6 +1752,53 @@
   </div>
 </div>
 
+<!-- ── Benchmark Leaderboard Panel ───────────────────────────────────────── -->
+<div id="benchmark-leaderboard-panel" style="position:fixed;bottom:80px;right:20px;width:760px;max-width:calc(100vw - 40px);max-height:620px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:51;box-shadow:0 8px 32px rgba(0,0,0,.45);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🏆 Benchmark Leaderboard</span>
+    <button class="panel-btn" onclick="closeBenchmarkLeaderboardPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+    <label style="font-size:.72rem;color:var(--muted);">Sort</label>
+    <select id="bl-sort" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+      <option value="task_type">Task type</option>
+      <option value="quality_score">Quality</option>
+      <option value="approval_rate">Approval rate</option>
+      <option value="avg_latency_ms">Avg latency</option>
+      <option value="safety_pass_rate">Safety pass rate</option>
+      <option value="cost_per_1k_tokens">Cost / 1K tokens</option>
+    </select>
+    <label style="font-size:.72rem;color:var(--muted);">Provider</label>
+    <input id="bl-provider" placeholder="all" style="width:120px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+    <label style="font-size:.72rem;color:var(--muted);">Limit</label>
+    <input id="bl-limit" type="number" min="1" max="200" value="20" style="width:70px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+    <button class="btn-primary" style="height:32px;font-size:.78rem;padding:0 12px;" onclick="loadBenchmarkLeaderboard()">Refresh</button>
+    <span id="bl-status" style="font-size:.72rem;color:var(--muted);margin-left:auto;"></span>
+  </div>
+  <div style="flex:1;overflow:auto;padding:10px 12px;">
+    <table style="width:100%;border-collapse:collapse;font-size:.75rem;">
+      <thead>
+        <tr style="position:sticky;top:0;background:var(--surface2);z-index:1;">
+          <th style="text-align:left;padding:8px;border:1px solid var(--border);">#</th>
+          <th style="text-align:left;padding:8px;border:1px solid var(--border);">Model</th>
+          <th style="text-align:left;padding:8px;border:1px solid var(--border);">Provider</th>
+          <th style="text-align:left;padding:8px;border:1px solid var(--border);">Task</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Quality</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Approval</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Avg ms</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">P95 ms</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Safety</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">$/1K</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Requests</th>
+        </tr>
+      </thead>
+      <tbody id="bl-body">
+        <tr><td colspan="11" style="padding:10px;border:1px solid var(--border);color:var(--muted);">Open leaderboard to load data.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
 <script>
 marked.setOptions({breaks:true,gfm:true});
 
@@ -2478,6 +2526,7 @@ async function updateApprovalsBadge(count){
 <script src="/static/js/panels/knowledge-graph.js"></script>
 <script src="/static/js/panels/trace-viewer.js"></script>
 <script src="/static/js/panels/ensemble.js"></script>
+<script src="/static/js/panels/benchmark-leaderboard.js"></script>
 <script src="/static/js/panels/tooling-utilities.js"></script>
 <script>
 init();
