@@ -466,6 +466,28 @@ def get_current_correlation_id() -> str:
 
 # ── Backpressure / rate limiting middleware ───────────────────────────────────
 
+_REQUEST_PROTECTION_EXEMPT_PREFIXES = (
+    "/static/",
+)
+
+_REQUEST_PROTECTION_EXEMPT_PATHS = {
+    "/",
+    "/health",
+    "/health/live",
+    "/health/ready",
+    "/health/deep",
+    "/metrics",
+    "/manifest.json",
+    "/sw.js",
+    "/favicon.ico",
+}
+
+
+def _is_request_protection_exempt(path: str) -> bool:
+    return path in _REQUEST_PROTECTION_EXEMPT_PATHS or any(
+        path.startswith(prefix) for prefix in _REQUEST_PROTECTION_EXEMPT_PREFIXES
+    )
+
 class BackpressureMiddleware(BaseHTTPMiddleware):
     """Reject requests with 503 when the active request count exceeds a threshold.
 
@@ -482,8 +504,7 @@ class BackpressureMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
-        # Don't apply backpressure to health / metrics probes
-        if path in ("/health", "/health/live", "/health/deep", "/metrics"):
+        if _is_request_protection_exempt(path):
             return await call_next(request)
 
         with self._lock:
@@ -552,7 +573,7 @@ class IpRateLimitMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
-        if path in ("/health", "/health/live", "/health/deep", "/metrics"):
+        if _is_request_protection_exempt(path):
             return await call_next(request)
 
         # Keep contract/integration tests deterministic; they use Starlette's test client host.
@@ -621,7 +642,7 @@ class PerPrincipalConcurrencyMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
-        if path in ("/health", "/health/live", "/health/ready", "/health/deep", "/metrics"):
+        if _is_request_protection_exempt(path):
             return await call_next(request)
 
         principal = self._principal(request)

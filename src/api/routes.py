@@ -17,8 +17,8 @@ from ..scheduler import (
     set_run_function,
     restore_from_db,
 )
-from ..gist_backup import restore_from_gist
-from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries, list_users as db_list_users, update_user_role as db_update_user_role, get_user as db_get_user, _backend as db_backend, update_user_email as db_update_user_email, create_api_key as db_create_api_key, list_api_keys as db_list_api_keys, get_api_key_by_hash as db_get_api_key_by_hash, revoke_api_key as db_revoke_api_key, touch_api_key as db_touch_api_key, get_or_create_oauth_user as db_get_or_create_oauth_user, create_fine_tuning_job as db_create_fine_tuning_job, get_fine_tuning_job as db_get_fine_tuning_job, list_fine_tuning_jobs as db_list_fine_tuning_jobs, update_fine_tuning_job as db_update_fine_tuning_job, create_fine_tuning_job_event as db_create_fine_tuning_job_event, list_fine_tuning_job_events as db_list_fine_tuning_job_events, save_execution_trace as db_save_execution_trace, load_execution_trace as db_load_execution_trace, list_execution_traces as db_list_execution_traces, delete_execution_trace as db_delete_execution_trace, save_autonomy_trace as db_save_autonomy_trace, load_autonomy_trace as db_load_autonomy_trace, db_set_shared_memory, db_get_shared_memory, db_delete_shared_memory, db_list_shared_memory, db_save_task_job, db_list_task_jobs, save_ft_training_sample as db_save_ft_training_sample, list_ft_training_samples as db_list_ft_training_samples)
+from ..gist_backup import restore_from_gist, push_now as gist_push_now
+from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, get_usage_records, get_usage_by_user, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries, list_users as db_list_users, update_user_role as db_update_user_role, get_user as db_get_user, _backend as db_backend, update_user_email as db_update_user_email, create_api_key as db_create_api_key, list_api_keys as db_list_api_keys, get_api_key_by_hash as db_get_api_key_by_hash, revoke_api_key as db_revoke_api_key, touch_api_key as db_touch_api_key, get_or_create_oauth_user as db_get_or_create_oauth_user, create_fine_tuning_job as db_create_fine_tuning_job, get_fine_tuning_job as db_get_fine_tuning_job, list_fine_tuning_jobs as db_list_fine_tuning_jobs, update_fine_tuning_job as db_update_fine_tuning_job, create_fine_tuning_job_event as db_create_fine_tuning_job_event, list_fine_tuning_job_events as db_list_fine_tuning_job_events, save_execution_trace as db_save_execution_trace, load_execution_trace as db_load_execution_trace, list_execution_traces as db_list_execution_traces, delete_execution_trace as db_delete_execution_trace, save_autonomy_trace as db_save_autonomy_trace, load_autonomy_trace as db_load_autonomy_trace, db_set_shared_memory, db_get_shared_memory, db_delete_shared_memory, db_list_shared_memory, db_save_task_job, db_list_task_jobs, save_ft_training_sample as db_save_ft_training_sample, list_ft_training_samples as db_list_ft_training_samples)
 from ..personas import list_personas, set_persona, get_active_persona_name, get_persona
 from ..memory import (
     add_memory,
@@ -1048,32 +1048,162 @@ def home(): return FileResponse("static/index.html")
 # Optional header: X-Webhook-Secret: <secret>  (validated against WEBHOOK_SECRET env var)
 
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
+WEBHOOK_HMAC_SECRET = os.getenv("WEBHOOK_HMAC_SECRET", "")
+
+
+def _webhook_allowed_events() -> set[str]:
+    raw = os.getenv("WEBHOOK_ALLOWED_EVENTS", "").strip()
+    if not raw:
+        return set()
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def _safe_int(value, default: int, min_value: int, max_value: int) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        parsed = default
+    return max(min_value, min(max_value, parsed))
 
 @router.post("/webhook/trigger")
 async def webhook_trigger(request: Request):
+    raw_body = await request.body()
+    try:
+        body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    if not isinstance(body, dict):
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
     secret = request.headers.get("x-webhook-secret", "")
     if WEBHOOK_SECRET and not hmac.compare_digest(secret, WEBHOOK_SECRET):
         return JSONResponse({"error": "invalid webhook secret"}, status_code=403)
-    try:
-        body = await _read_json_body(request)
-    except HTTPException as exc:
-        return JSONResponse({"error": str(exc.detail)}, status_code=exc.status_code)
+
+    if WEBHOOK_HMAC_SECRET:
+        signature_header = request.headers.get("x-webhook-signature-256", "").strip()
+        if not signature_header.startswith("sha256="):
+            return JSONResponse({"error": "missing or invalid webhook signature"}, status_code=403)
+        provided_sig = signature_header.split("=", 1)[1].strip().lower()
+        expected_sig = hmac.new(
+            WEBHOOK_HMAC_SECRET.encode("utf-8"),
+            raw_body,
+            digestmod=hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(provided_sig, expected_sig):
+            # Compatibility fallback for senders that sign canonicalized JSON.
+            canonical_body = json.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            canonical_sig = hmac.new(
+                WEBHOOK_HMAC_SECRET.encode("utf-8"),
+                canonical_body,
+                digestmod=hashlib.sha256,
+            ).hexdigest()
+            if not hmac.compare_digest(provided_sig, canonical_sig):
+                return JSONResponse({"error": "invalid webhook signature"}, status_code=403)
+
     task = body.get("task", "")
-    if not task: return JSONResponse({"error": "task field is required"}, status_code=400)
-    try: task = check_user_task(task, policy_profile=_config.get("safety_profile", "standard"))
-    except GuardrailViolation as exc: return _api_error(exc.reason, exc.code, 422)
+    if not task:
+        return JSONResponse({"error": "task field is required"}, status_code=400)
+    try:
+        task = check_user_task(task, policy_profile=_config.get("safety_profile", "standard"))
+    except GuardrailViolation as exc:
+        return _api_error(exc.reason, exc.code, 422)
+
+    event_type = str(body.get("event_type") or request.headers.get("x-webhook-event") or "generic").strip().lower()
+    allowed_events = _webhook_allowed_events()
+    if allowed_events and event_type not in allowed_events:
+        return JSONResponse(
+            {
+                "accepted": False,
+                "ignored": True,
+                "reason": "event_type_not_allowed",
+                "event_type": event_type,
+                "allowed_events": sorted(allowed_events),
+            },
+            status_code=202,
+        )
+
+    max_retries_default = _safe_int(os.getenv("WEBHOOK_MAX_RETRIES", "2"), default=2, min_value=0, max_value=5)
+    max_retries = _safe_int(body.get("max_retries", max_retries_default), default=max_retries_default, min_value=0, max_value=5)
+    backoff_secs_default = _safe_int(os.getenv("WEBHOOK_RETRY_BACKOFF_SECONDS", "1"), default=1, min_value=1, max_value=60)
+    retry_backoff_secs = _safe_int(body.get("retry_backoff_secs", backoff_secs_default), default=backoff_secs_default, min_value=1, max_value=60)
+
     repo = body.get("repo", "")
     run_id = "run_" + secrets.token_hex(8)
-    run_results[run_id] = {"status": "running", "result": None, "error": None}
+    run_results[run_id] = {
+        "status": "running",
+        "result": None,
+        "error": None,
+        "event_type": event_type,
+        "repo": repo,
+        "attempt": 0,
+        "max_retries": max_retries,
+        "retry_backoff_secs": retry_backoff_secs,
+        "errors": [],
+    }
+
     def _run():
+        attempt = 0
+        errors = []
         try:
-            from ..agent import run_agent_task
-            result = run_agent_task(task, [], sid=run_id)
-            run_results[run_id] = {"status": "done", "result": result, "error": None}
+            while True:
+                try:
+                    attempt += 1
+                    run_results[run_id]["status"] = "running" if attempt == 1 else "retrying"
+                    run_results[run_id]["attempt"] = attempt
+                    from ..agent import run_agent_task
+                    result = run_agent_task(task, [], sid=run_id)
+                    run_results[run_id] = {
+                        "status": "done",
+                        "result": result,
+                        "error": None,
+                        "event_type": event_type,
+                        "repo": repo,
+                        "attempt": attempt,
+                        "max_retries": max_retries,
+                        "retry_backoff_secs": retry_backoff_secs,
+                        "errors": errors,
+                    }
+                    break
+                except Exception as e:
+                    err = str(e)
+                    errors.append(err)
+                    if attempt > max_retries:
+                        run_results[run_id] = {
+                            "status": "error",
+                            "result": None,
+                            "error": err,
+                            "event_type": event_type,
+                            "repo": repo,
+                            "attempt": attempt,
+                            "max_retries": max_retries,
+                            "retry_backoff_secs": retry_backoff_secs,
+                            "errors": errors,
+                        }
+                        break
+                    delay = retry_backoff_secs * (2 ** (attempt - 1))
+                    run_results[run_id]["next_retry_in_secs"] = delay
+                    time.sleep(delay)
         except Exception as e:
-            run_results[run_id] = {"status": "error", "result": None, "error": str(e)}
+            run_results[run_id] = {
+                "status": "error",
+                "result": None,
+                "error": str(e),
+                "event_type": event_type,
+                "repo": repo,
+                "attempt": attempt,
+                "max_retries": max_retries,
+                "retry_backoff_secs": retry_backoff_secs,
+                "errors": errors,
+            }
+
     threading.Thread(target=_run, daemon=True).start()
-    return {"run_id": run_id, "status": "https://github.com/The-No-Hands-company/Nexus-AI#webhook-triggers"}
+    return {
+        "run_id": run_id,
+        "status": "https://github.com/The-No-Hands-company/Nexus-AI#webhook-triggers",
+        "event_type": event_type,
+        "max_retries": max_retries,
+        "retry_backoff_secs": retry_backoff_secs,
+    }
 
 @router.get("/webhook/status/{run_id}")
 async def webhook_status(run_id: str):
@@ -2236,7 +2366,11 @@ async def post_settings(request: Request):
                            model=data.get("model"),
                            temperature=data.get("temperature"),
                            persona=data.get("persona"),
-                           safety_profile=data.get("safety_profile"))
+                           safety_profile=data.get("safety_profile"),
+                           strict_mode_profile=data.get("strict_mode_profile"),
+                           strict_no_guess_mode=data.get("strict_no_guess_mode"),
+                           strict_confidence_threshold=data.get("strict_confidence_threshold"),
+                           strict_evidence_threshold=data.get("strict_evidence_threshold"))
     new_profile = _config.get("safety_profile", "standard")
     if data.get("safety_profile") and new_profile != prev_profile:
         _push_safety_event("profile_change", {"scope": "global", "from": prev_profile, "to": new_profile})
@@ -3455,6 +3589,49 @@ async def rag_query(request: Request):
 def rag_status():
     try:
         return get_rag_system().stats()
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.get("/rag/documents")
+def rag_documents(limit: int = 200, q: str = ""):
+    """List ingested RAG corpus documents (with optional text search)."""
+    try:
+        rag = get_rag_system()
+        docs = rag.vector_store.get_all_documents()
+        query = (q or "").strip().lower()
+        if query:
+            docs = [
+                d for d in docs
+                if query in str(d.get("document", "")).lower()
+                or query in str((d.get("metadata") or {}).get("source", "")).lower()
+                or query in str((d.get("metadata") or {}).get("title", "")).lower()
+            ]
+        safe_limit = max(1, min(int(limit), 1000))
+        docs = docs[:safe_limit]
+        return {
+            "count": len(docs),
+            "items": [
+                {
+                    "id": str(item.get("id", "")),
+                    "preview": str(item.get("document", ""))[:240],
+                    "metadata": item.get("metadata") or {},
+                }
+                for item in docs
+            ],
+        }
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@router.delete("/rag/documents/{doc_id}")
+def rag_delete_document(doc_id: str):
+    """Delete a single document from the RAG corpus by id."""
+    try:
+        rag = get_rag_system()
+        rag.vector_store.delete([doc_id])
+        rag.vector_store.persist()
+        return {"ok": True, "deleted": doc_id}
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -4956,23 +5133,169 @@ async def import_custom_personas(request: Request):
 
 
 @router.get("/usage")
-def usage_stats(days: int = 7):
-    try:
-        from ..tools_builtin import estimate_cost, PROVIDER_COSTS
-        stats = get_usage_stats(days)
-        daily = get_usage_daily(days)
-        # Add cost estimates per provider
-        for row in stats.get("by_provider", []):
-            row["est_cost_usd"] = round(
-                estimate_cost(row["provider"], row.get("in_tok",0), row.get("out_tok",0)), 4
+def usage_stats(days: int = 7, username: str = ""):
+    from ..tools_builtin import estimate_cost
+
+    safe_days = max(1, min(int(days), 365))
+    usage_user = (username or "").strip()
+    stats = get_usage_stats(safe_days)
+    daily = get_usage_daily(safe_days)
+    records = get_usage_records(days=safe_days, username=usage_user, limit=5000)
+    per_user = get_usage_by_user(days=safe_days, limit=200)
+
+    for row in stats.get("by_provider", []):
+        row["est_cost_usd"] = round(
+            estimate_cost(row.get("provider", ""), row.get("in_tok", 0), row.get("out_tok", 0)),
+            6,
+        )
+
+    token_total = {
+        "calls": 0,
+        "in_tok": 0,
+        "out_tok": 0,
+        "cost_usd": 0.0,
+    }
+    for row in records:
+        token_total["calls"] += 1
+        token_total["in_tok"] += int(row.get("in_tokens") or 0)
+        token_total["out_tok"] += int(row.get("out_tokens") or 0)
+        token_total["cost_usd"] += float(row.get("cost_usd") or 0.0)
+    token_total["total_tok"] = token_total["in_tok"] + token_total["out_tok"]
+    token_total["cost_usd"] = round(token_total["cost_usd"], 6)
+
+    # Simple trend projection: average recent daily totals * 7 days.
+    avg_daily_tokens = 0.0
+    avg_daily_calls = 0.0
+    avg_daily_cost = 0.0
+    if daily:
+        avg_daily_tokens = sum((int(d.get("in_tok", 0)) + int(d.get("out_tok", 0))) for d in daily) / len(daily)
+        avg_daily_calls = sum(int(d.get("calls", 0)) for d in daily) / len(daily)
+        avg_daily_cost = token_total["cost_usd"] / len(daily)
+
+    forecast = {
+        "window_days": 7,
+        "projected_calls": int(round(avg_daily_calls * 7)),
+        "projected_tokens": int(round(avg_daily_tokens * 7)),
+        "projected_cost_usd": round(avg_daily_cost * 7, 6),
+    }
+
+    webhook_cfg = {
+        "enabled": db_load_pref("usage_webhook_enabled", "false") == "true",
+        "url": db_load_pref("usage_webhook_url", ""),
+    }
+
+    return {
+        "days": safe_days,
+        "username": usage_user,
+        "stats": stats,
+        "daily": daily,
+        "per_user": per_user,
+        "totals": token_total,
+        "forecast": forecast,
+        "webhook": webhook_cfg,
+    }
+
+
+@router.get("/usage/export")
+def usage_export(days: int = 7, format: str = "json", username: str = ""):
+    safe_days = max(1, min(int(days), 365))
+    fmt = (format or "json").strip().lower()
+    records = get_usage_records(days=safe_days, username=(username or "").strip(), limit=50000)
+
+    if fmt == "json":
+        return {"days": safe_days, "count": len(records), "records": records}
+
+    if fmt == "csv":
+        import csv
+        import io
+
+        output = io.StringIO()
+        fieldnames = ["ts", "provider", "model", "task_type", "username", "in_tokens", "out_tokens", "cost_usd"]
+        writer = csv.DictWriter(output, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in records:
+            writer.writerow(
+                {
+                    "ts": row.get("ts", ""),
+                    "provider": row.get("provider", ""),
+                    "model": row.get("model", ""),
+                    "task_type": row.get("task_type", ""),
+                    "username": row.get("username", ""),
+                    "in_tokens": int(row.get("in_tokens") or 0),
+                    "out_tokens": int(row.get("out_tokens") or 0),
+                    "cost_usd": float(row.get("cost_usd") or 0.0),
+                }
             )
-        total = stats.get("total", {})
-        stats["total_est_cost_usd"] = round(sum(
-            r.get("est_cost_usd", 0) for r in stats.get("by_provider", [])
-        ), 4)
-        return {"stats": stats, "daily": daily}
-    except Exception as e:
-        return {"error": str(e)}
+        return Response(
+            content=output.getvalue(),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=usage-{safe_days}d.csv"},
+        )
+
+    return _api_error("format must be json or csv", "validation_error", 422)
+
+
+@router.get("/usage/webhook")
+def usage_webhook_get(request: Request):
+    require_admin(request)
+    return {
+        "enabled": db_load_pref("usage_webhook_enabled", "false") == "true",
+        "url": db_load_pref("usage_webhook_url", ""),
+        "has_secret": bool(db_load_pref("usage_webhook_secret", "")),
+    }
+
+
+@router.post("/usage/webhook")
+async def usage_webhook_set(request: Request):
+    require_admin(request)
+    data = await request.json()
+    enabled = bool(data.get("enabled", True))
+    url = str(data.get("url", "") or "").strip()
+    secret = str(data.get("secret", "") or "").strip()
+    if enabled and not url:
+        return _api_error("url is required when webhook is enabled", "validation_error", 422)
+    if url and not (url.startswith("http://") or url.startswith("https://")):
+        return _api_error("url must start with http:// or https://", "validation_error", 422)
+
+    db_save_pref("usage_webhook_enabled", "true" if enabled else "false")
+    db_save_pref("usage_webhook_url", url)
+    if secret:
+        db_save_pref("usage_webhook_secret", secret)
+    return {"ok": True, "enabled": enabled, "url": url}
+
+
+@router.post("/usage/webhook/push")
+def usage_webhook_push(request: Request, days: int = 1):
+    require_admin(request)
+
+    enabled = db_load_pref("usage_webhook_enabled", "false") == "true"
+    url = db_load_pref("usage_webhook_url", "").strip()
+    secret = db_load_pref("usage_webhook_secret", "")
+    if not enabled:
+        return _api_error("usage webhook is disabled", "invalid_request", 400)
+    if not url:
+        return _api_error("usage webhook URL is not configured", "invalid_request", 400)
+
+    payload = usage_stats(days=max(1, min(int(days), 365)), username="")
+    body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    headers = {
+        "Content-Type": "application/json",
+        "User-Agent": "nexus-ai-usage-webhook/1.0",
+    }
+    if secret:
+        signature = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+        headers["X-Nexus-Signature"] = f"sha256={signature}"
+
+    try:
+        from urllib import request as urllib_request
+
+        req = urllib_request.Request(url=url, data=body, headers=headers, method="POST")
+        with urllib_request.urlopen(req, timeout=10) as resp:
+            status_code = int(getattr(resp, "status", 200) or 200)
+        return {"ok": True, "status": status_code, "url": url}
+    except Exception as exc:
+        return _api_error(f"webhook push failed: {exc}", "upstream_error", 502)
 
 
 # ── provider health ────────────────────────────────────────────────────────────
@@ -5135,7 +5458,7 @@ async def agent_post(request: Request):
     if data.get("max_tokens_out") is not None:
         kwargs["budget_tokens_out"] = int(data.get("max_tokens_out"))
 
-    result  = run_agent_task(task, history, files, sid=sid or "", **kwargs)
+    result  = run_agent_task(task, history, files, sid=sid or "", usage_principal=principal, **kwargs)
     if sid:
         sessions[sid]=result["history"]
         db_set_shared_memory(f"session_history:{sid}", result["history"])
@@ -5216,7 +5539,7 @@ async def agent_stream(request: Request):
 
     def run_in_thread():
         try:
-            for event in stream_agent_task(task, history, files, stop_evt, sid=sid or "", trace_id=trace_id):
+            for event in stream_agent_task(task, history, files, stop_evt, sid=sid or "", trace_id=trace_id, usage_principal=principal):
                 if stop_evt.is_set(): break
                 if event["type"]=="done" and sid:
                     sessions[sid] = event.get("history", history)
@@ -6302,6 +6625,146 @@ def delete_task_trace(trace_id: str):
     return {"deleted": trace_id, "ok": True}
 
 
+@router.get("/tasks/search")
+def search_task_traces(tool: str = "", event_type: str = "", error: str = "", limit: int = 100):
+    safe_limit = max(1, min(int(limit), 500))
+    tool_filter = (tool or "").strip().lower()
+    type_filter = (event_type or "").strip().lower()
+    error_filter = (error or "").strip().lower()
+
+    traces = list_tasks(limit=safe_limit * 2).get("traces", [])
+    matched: list[dict] = []
+    for trace in traces:
+        trace_id = str(trace.get("trace_id") or "").strip()
+        if not trace_id:
+            continue
+        events = execution_traces.get(trace_id)
+        if events is None:
+            events = db_load_execution_trace(trace_id)
+        if events is None:
+            cp = _get_latest_checkpoint(trace_id)
+            events = cp.get("events", []) if cp else []
+
+        event_list = events if isinstance(events, list) else []
+        has_tool = (not tool_filter) or any(
+            tool_filter in str(evt.get("action", "")).lower() for evt in event_list if isinstance(evt, dict)
+        )
+        has_type = (not type_filter) or any(
+            type_filter == str(evt.get("type", "")).lower() for evt in event_list if isinstance(evt, dict)
+        )
+        has_error = (not error_filter) or any(
+            error_filter in str(evt.get("message", "")).lower() for evt in event_list if isinstance(evt, dict)
+        )
+        if has_tool and has_type and has_error:
+            matched.append(
+                {
+                    "trace_id": trace_id,
+                    "events": len(event_list),
+                    "task": trace.get("task", ""),
+                    "last_active": trace.get("last_active", trace.get("updated_at", "")),
+                }
+            )
+            if len(matched) >= safe_limit:
+                break
+
+    return {"results": matched, "count": len(matched)}
+
+
+@router.get("/tasks/{trace_id}/export")
+def export_task_trace(trace_id: str):
+    events = execution_traces.get(trace_id)
+    if events is None:
+        events = db_load_execution_trace(trace_id)
+    checkpoints = _load_checkpoints(trace_id)
+    if events is None and not checkpoints:
+        return _api_error("trace not found", "not_found", 404)
+    payload = {
+        "trace_id": trace_id,
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "events": events if isinstance(events, list) else [],
+        "checkpoints": checkpoints,
+    }
+    return payload
+
+
+@router.get("/tasks/{trace_id}/diff")
+def diff_task_traces(trace_id: str, other_trace_id: str = ""):
+    import difflib
+
+    if not other_trace_id.strip():
+        return _api_error("other_trace_id is required", "validation_error", 422)
+
+    left = execution_traces.get(trace_id)
+    if left is None:
+        left = db_load_execution_trace(trace_id)
+    right = execution_traces.get(other_trace_id)
+    if right is None:
+        right = db_load_execution_trace(other_trace_id)
+
+    if left is None or right is None:
+        return _api_error("one or both traces not found", "not_found", 404)
+
+    left_lines = json.dumps(left, indent=2, sort_keys=True).splitlines()
+    right_lines = json.dumps(right, indent=2, sort_keys=True).splitlines()
+    diff_lines = list(
+        difflib.unified_diff(
+            left_lines,
+            right_lines,
+            fromfile=f"a/{trace_id}",
+            tofile=f"b/{other_trace_id}",
+            lineterm="",
+        )
+    )
+    return {
+        "trace_id": trace_id,
+        "other_trace_id": other_trace_id,
+        "diff": "\n".join(diff_lines),
+        "left_events": len(left) if isinstance(left, list) else 0,
+        "right_events": len(right) if isinstance(right, list) else 0,
+    }
+
+
+@router.get("/tasks/anomalies")
+def task_trace_anomalies(limit: int = 50):
+    safe_limit = max(1, min(int(limit), 500))
+    traces = list_tasks(limit=safe_limit).get("traces", [])
+    anomalies: list[dict] = []
+
+    for trace in traces:
+        trace_id = str(trace.get("trace_id") or "")
+        if not trace_id:
+            continue
+        events = execution_traces.get(trace_id)
+        if events is None:
+            events = db_load_execution_trace(trace_id)
+        event_list = events if isinstance(events, list) else []
+
+        error_count = sum(1 for evt in event_list if isinstance(evt, dict) and str(evt.get("type", "")).lower() == "error")
+        tool_count = sum(1 for evt in event_list if isinstance(evt, dict) and str(evt.get("type", "")).lower() in {"tool", "tool_start", "tool_result"})
+
+        reasons: list[str] = []
+        if error_count > 0:
+            reasons.append(f"errors:{error_count}")
+        if len(event_list) > 500:
+            reasons.append("high_event_volume")
+        if tool_count > 200:
+            reasons.append("high_tool_activity")
+
+        if reasons:
+            anomalies.append(
+                {
+                    "trace_id": trace_id,
+                    "events": len(event_list),
+                    "errors": error_count,
+                    "tool_events": tool_count,
+                    "reasons": reasons,
+                    "last_active": trace.get("last_active", trace.get("updated_at", "")),
+                }
+            )
+
+    return {"anomalies": anomalies, "count": len(anomalies)}
+
+
 # ── Ensemble settings endpoints ──────────────────────────────────────────────
 
 @router.post("/kg/store")
@@ -6871,6 +7334,28 @@ async def db_restore(request: Request):
     return {"ok": True, "message": "Database restored successfully"}
 
 
+@router.post("/backup/gist/restore")
+def gist_restore_endpoint(request: Request):
+    """Force restore of SQLite DB from configured GitHub Gist backup."""
+    require_admin(request)
+    restored = restore_from_gist()
+    if restored:
+        return {"ok": True, "restored": True, "message": "Database restored from gist backup"}
+    return {
+        "ok": False,
+        "restored": False,
+        "message": "No gist backup restored (missing config, missing backup, or restore failed)",
+    }
+
+
+@router.post("/backup/gist/push")
+def gist_push_endpoint(request: Request):
+    """Force immediate push of SQLite DB to configured GitHub Gist backup."""
+    require_admin(request)
+    gist_push_now()
+    return {"ok": True, "message": "Gist backup push triggered"}
+
+
 # ── API key management ────────────────────────────────────────────────────────
 
 _VALID_SCOPES = {"chat", "read", "admin", "embeddings", "tools"}
@@ -7155,7 +7640,7 @@ def _quota_cleanup_task() -> str:
 def _register_quota_reset_scheduler():
     """Register weekly quota cleanup job if not already registered."""
     existing = list_jobs()
-    if any(j.get("name") == "quota-weekly-cleanup" for j in existing):
+    if any(getattr(j, "name", None) == "quota-weekly-cleanup" for j in existing):
         return
     schedule_job(
         name="quota-weekly-cleanup",
@@ -7721,6 +8206,20 @@ async def create_finetune_job(request: Request):
         "validation_file": job.get("validation_file"),
         "created_at": job.get("created_at"),
         "object": "finetune.job",
+    }
+
+
+@router.get("/finetune/jobs")
+def list_finetune_jobs(limit: int = 100, status: str = ""):
+    init_db()
+    safe_limit = max(1, min(int(limit), 500))
+    rows = db_list_fine_tuning_jobs(limit=safe_limit)
+    status_filter = (status or "").strip().lower()
+    if status_filter:
+        rows = [r for r in rows if str(r.get("status", "")).lower() == status_filter]
+    return {
+        "count": len(rows),
+        "items": rows,
     }
 
 

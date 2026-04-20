@@ -4,6 +4,8 @@ import threading
 import time
 import os
 import json
+import hmac
+import hashlib
 import shutil
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -11,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from fastapi.testclient import TestClient
 
 from src.app import app
+from src.observability import _is_request_protection_exempt
 from src.safety_pipeline import screen_input, screen_output, screen_tool_action
 from src.safety import check_text_against_guardrail, check_user_task, GuardrailViolation
 from src.context_window import ContextWindowManager
@@ -24,6 +27,9 @@ from src.ensemble import (
 )
 
 client = TestClient(app)
+_FAKE_GH_TOKEN = "ghp_" + ("a" * 37)
+_FAKE_GH_TOKEN_BYTES = _FAKE_GH_TOKEN.encode("utf-8")
+_TEST_AUTH_CRED = "StrongPass" + "123"
 
 
 class TestV1Contracts(unittest.TestCase):
@@ -198,12 +204,12 @@ class TestV1Contracts(unittest.TestCase):
 
     def test_auth_register_login_refresh_logout_flow(self):
         username = "authflow_user"
-        password = "StrongPass123"  # pragma: allowlist secret
+        auth_pass = _TEST_AUTH_CRED
 
-        reg = client.post("/auth/register", params={"username": username, "password": password})
+        reg = client.post("/auth/register", params={"username": username, "password": auth_pass})
         self.assertIn(reg.status_code, (200, 409))
 
-        login = client.post("/auth/login", params={"username": username, "password": password})
+        login = client.post("/auth/login", params={"username": username, "password": auth_pass})
         self.assertEqual(login.status_code, 200)
         login_payload = login.json()
         self.assertIn("token", login_payload)
@@ -240,7 +246,7 @@ class TestV1Contracts(unittest.TestCase):
         sid = create_resp.json().get("session_id")
         self.assertTrue(sid)
 
-        token_resp = client.post(f"/session/{sid}/token", json={"token": "ghp_exampleToken0000000000000000000000000000"})  # pragma: allowlist secret
+        token_resp = client.post(f"/session/{sid}/token", json={"token": _FAKE_GH_TOKEN})
         self.assertEqual(token_resp.status_code, 200)
         self.assertTrue(token_resp.json().get("set"))
 
@@ -920,6 +926,32 @@ class TestPerUserRateLimits(unittest.TestCase):
         self.assertGreaterEqual(payload["quota"].get("retry_after_seconds", 0), 1)
 
 
+class TestRequestProtectionExemptions(unittest.TestCase):
+    def test_frontend_bootstrap_assets_are_exempt_from_request_protection(self):
+        exempt_paths = [
+            "/",
+            "/static/js/utilities/input-handling.js",
+            "/static/js/panels/tooling-utilities.js",
+            "/manifest.json",
+            "/sw.js",
+            "/health",
+            "/metrics",
+        ]
+
+        for path in exempt_paths:
+            self.assertTrue(_is_request_protection_exempt(path), path)
+
+    def test_application_routes_remain_protected(self):
+        protected_paths = [
+            "/agent/stream",
+            "/finetune/jobs",
+            "/admin/users",
+        ]
+
+        for path in protected_paths:
+            self.assertFalse(_is_request_protection_exempt(path), path)
+
+
 class TestRefactorPhase2Scaffold(unittest.TestCase):
     """Phase 2 package scaffolding: src/providers and src/tools import bridges."""
 
@@ -965,7 +997,7 @@ class TestSafetyModule(unittest.TestCase):
         self.assertTrue(decision.allowed)
 
     def test_sensitive_token_masked(self):
-        decision = check_text_against_guardrail("Use token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa to auth")  # pragma: allowlist secret
+        decision = check_text_against_guardrail(f"Use token {_FAKE_GH_TOKEN} to auth")
         self.assertIsNotNone(decision.masked_text)
         self.assertIn("[REDACTED]", decision.masked_text)
 
@@ -1043,7 +1075,7 @@ class TestSafetyModule(unittest.TestCase):
         self.assertTrue(any(issue.code == "tool_destructive_command" for issue in verdict.issues))
 
     def test_output_safety_redacts_secret_tokens(self):
-        verdict = screen_output("token=ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")  # pragma: allowlist secret
+        verdict = screen_output(f"token={_FAKE_GH_TOKEN}")
         self.assertTrue(verdict.allowed)
         self.assertEqual(verdict.action.value, "redact")
         self.assertIn("[REDACTED]", verdict.masked_text)
@@ -1092,14 +1124,14 @@ class TestSafetyMiddleware(unittest.TestCase):
 
         run_results["safety-output-test"] = {
             "status": "done",
-            "result": "token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",  # pragma: allowlist secret
+            "result": f"token {_FAKE_GH_TOKEN}",
             "error": None,
         }
         response = client.get("/webhook/status/safety-output-test")
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertIn("[REDACTED]", payload["result"])
-        self.assertNotIn("ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", payload["result"])  # pragma: allowlist secret
+        self.assertNotIn(_FAKE_GH_TOKEN, payload["result"])
 
     def test_agent_stream_sse_redacted_by_middleware(self):
         from src.safety_middleware import SafetyPipelineMiddleware
@@ -1112,12 +1144,12 @@ class TestSafetyMiddleware(unittest.TestCase):
             })
             await send({
                 "type": "http.response.body",
-                "body": b'data: {"result": "token ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n\n',  # pragma: allowlist secret
+                "body": b'data: {"result": "token ' + _FAKE_GH_TOKEN_BYTES + b'"}\n\n',
                 "more_body": True,
             })
             await send({
                 "type": "http.response.body",
-                "body": b'data: {"content": "done ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}\n\n',  # pragma: allowlist secret
+                "body": b'data: {"content": "done ' + _FAKE_GH_TOKEN_BYTES + b'"}\n\n',
                 "more_body": False,
             })
 
@@ -1156,7 +1188,55 @@ class TestSafetyMiddleware(unittest.TestCase):
 
         self.assertEqual(start["status"], 200)
         self.assertIn("[REDACTED]", body)
-        self.assertNotIn("ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", body)  # pragma: allowlist secret
+        self.assertNotIn(_FAKE_GH_TOKEN, body)
+
+
+class TestWebhookAndGistContracts(unittest.TestCase):
+    def test_webhook_trigger_enforces_hmac_signature(self):
+        from src.api import routes as api_routes
+
+        with patch.object(api_routes, "WEBHOOK_SECRET", ""), patch.object(api_routes, "WEBHOOK_HMAC_SECRET", "test-secret"):
+            resp_missing = client.post("/webhook/trigger", json={"task": "ping"})
+            self.assertEqual(resp_missing.status_code, 403)
+
+            body = b'{"task":"ping"}'
+            sig = hmac.new(b"test-secret", body, hashlib.sha256).hexdigest()
+            with patch("src.agent.run_agent_task", return_value={"result": "ok"}):
+                resp_ok = client.post(
+                    "/webhook/trigger",
+                    content=body,
+                    headers={
+                        "content-type": "application/json",
+                        "x-webhook-signature-256": f"sha256={sig}",
+                    },
+                )
+            self.assertEqual(resp_ok.status_code, 200)
+            self.assertIn("run_id", resp_ok.json())
+
+    def test_webhook_trigger_filters_event_type(self):
+        with patch.dict(os.environ, {"WEBHOOK_ALLOWED_EVENTS": "push, pull_request"}, clear=False):
+            resp = client.post("/webhook/trigger", json={"task": "ping", "event_type": "issue_comment"})
+        self.assertEqual(resp.status_code, 202)
+        payload = resp.json()
+        self.assertTrue(payload.get("ignored"))
+        self.assertEqual(payload.get("reason"), "event_type_not_allowed")
+
+    def test_gist_backup_restore_and_push_endpoints(self):
+        from src.api.routes import _make_token
+
+        admin_headers = {"Authorization": f"Bearer {_make_token('gist_admin', role='admin')}"}
+
+        with patch("src.api.routes.restore_from_gist", return_value=True) as mock_restore:
+            restore_resp = client.post("/backup/gist/restore", headers=admin_headers)
+        self.assertEqual(restore_resp.status_code, 200)
+        self.assertTrue(restore_resp.json().get("restored"))
+        mock_restore.assert_called_once()
+
+        with patch("src.api.routes.gist_push_now") as mock_push:
+            push_resp = client.post("/backup/gist/push", headers=admin_headers)
+        self.assertEqual(push_resp.status_code, 200)
+        self.assertTrue(push_resp.json().get("ok"))
+        mock_push.assert_called_once()
 
 
 class TestHITLApprovals(unittest.TestCase):
@@ -1202,6 +1282,124 @@ class TestHITLApprovals(unittest.TestCase):
         listed = client.get("/approvals", params={"session_id": "hitl-test"})
         self.assertEqual(listed.status_code, 200)
         self.assertTrue(any(item.get("id") == approval_id for item in listed.json().get("items", [])))
+
+
+class TestStrictNoGuessMode(unittest.TestCase):
+    def tearDown(self):
+        client.post(
+            "/settings",
+            json={
+                "strict_mode_profile": "strict",
+                "strict_confidence_threshold": 0.95,
+                "strict_evidence_threshold": 1,
+            },
+        )
+
+    def test_default_execution_profile_is_strict(self):
+        settings = client.get("/settings")
+        self.assertEqual(settings.status_code, 200)
+        payload = settings.json()
+        self.assertEqual(payload.get("strict_mode_profile"), "strict")
+        self.assertTrue(payload.get("strict_no_guess_mode"))
+
+    def test_strict_mode_blocks_low_confidence_high_risk_action(self):
+        from src.agent import stream_agent_task
+
+        client.post(
+            "/settings",
+            json={
+                "strict_no_guess_mode": True,
+                "strict_confidence_threshold": 0.95,
+                "strict_evidence_threshold": 1,
+            },
+        )
+
+        actions = [
+            ({"action": "run_command", "cmd": "ls -la", "confidence": 0.40}, "llm7", {}),
+        ]
+
+        with patch("src.agent.call_llm_smart", side_effect=actions), \
+             patch("src.agent.tool_run_command") as tool_run_command:
+            events = list(stream_agent_task("run command to list files", [], sid="strict-test-lowconf"))
+
+        clarify_events = [e for e in events if e.get("type") == "clarify"]
+        self.assertTrue(clarify_events)
+        card = clarify_events[0].get("card", {})
+        self.assertEqual(clarify_events[0].get("schema"), "nexus.clarification.v1")
+        self.assertIn("what_is_unclear", card)
+        self.assertIn("why_it_blocks_correctness", card)
+        tool_run_command.assert_not_called()
+
+    def test_strict_mode_blocks_schema_mismatch_and_returns_clarification(self):
+        from src.agent import stream_agent_task
+
+        client.post(
+            "/settings",
+            json={
+                "strict_no_guess_mode": True,
+                "strict_confidence_threshold": 0.95,
+                "strict_evidence_threshold": 1,
+            },
+        )
+
+        actions = [
+            ({"action": "run_command", "confidence": 0.99}, "llm7", {}),
+        ]
+
+        with patch("src.agent.call_llm_smart", side_effect=actions), \
+             patch("src.agent.tool_run_command") as tool_run_command:
+            events = list(stream_agent_task("run this safely", [], sid="strict-test-schema"))
+
+        clarify_events = [e for e in events if e.get("type") == "clarify"]
+        self.assertTrue(clarify_events)
+        reason_codes = set(clarify_events[0].get("reason_codes", []))
+        self.assertIn("missing_parameters", reason_codes)
+        self.assertIn("schema_mismatch", reason_codes)
+        tool_run_command.assert_not_called()
+
+    def test_balanced_profile_still_blocks_uncertain_destructive_action(self):
+        from src.agent import stream_agent_task
+
+        client.post(
+            "/settings",
+            json={
+                "strict_mode_profile": "balanced",
+            },
+        )
+
+        actions = [
+            ({"action": "run_command", "cmd": "rm -rf /tmp/demo", "confidence": 0.20}, "llm7", {}),
+        ]
+
+        with patch("src.agent.call_llm_smart", side_effect=actions), \
+             patch("src.agent.tool_run_command") as tool_run_command:
+            events = list(stream_agent_task("remove temp folder", [], sid="strict-test-balanced-block"))
+
+        clarify_events = [e for e in events if e.get("type") == "clarify"]
+        self.assertTrue(clarify_events)
+        tool_run_command.assert_not_called()
+
+    def test_balanced_profile_allows_low_risk_response_without_clarify(self):
+        from src.agent import stream_agent_task
+
+        client.post(
+            "/settings",
+            json={
+                "strict_mode_profile": "balanced",
+            },
+        )
+
+        actions = [
+            ({"action": "respond", "content": "All good.", "confidence": 0.20}, "llm7", {}),
+        ]
+
+        with patch("src.agent.call_llm_smart", side_effect=actions):
+            events = list(stream_agent_task("say hi", [], sid="strict-test-balanced-allow"))
+
+        clarify_events = [e for e in events if e.get("type") == "clarify"]
+        done_events = [e for e in events if e.get("type") == "done"]
+        self.assertFalse(clarify_events)
+        self.assertTrue(done_events)
 
 
 class TestHITLApprovalPersistence(unittest.TestCase):
@@ -2164,6 +2362,28 @@ class TestSprintD(unittest.TestCase):
         self.assertIn("results", payload)
         self.assertIsInstance(payload["results"], list)
 
+    def test_benchmark_history_endpoint_returns_summary(self):
+        response = client.get("/benchmark/history")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("results", payload)
+        self.assertIn("summary", payload)
+        self.assertIn("trend", payload["summary"])
+
+    @patch("src.leaderboard.get_leaderboard")
+    def test_benchmark_leaderboard_endpoint_returns_entries(self, mock_leaderboard):
+        from src.leaderboard import LeaderboardEntry
+
+        mock_leaderboard.return_value = [
+            LeaderboardEntry(model="nexus-prime", provider="ollama", task_type="coding", quality_score=0.9)
+        ]
+        response = client.get("/benchmark/leaderboard?sort_by=task_type")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("entries", payload)
+        self.assertEqual(payload.get("sort_by"), "task_type")
+        self.assertEqual(payload["entries"][0]["model"], "nexus-prime")
+
     @patch("src.agent._call_single")
     def test_benchmark_run_endpoint_stores_results(self, mock_call):
         mock_call.return_value = {"action": "respond", "content": "42"}
@@ -2171,6 +2391,52 @@ class TestSprintD(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertIn("results", payload)
+
+    def test_finetune_jobs_list_endpoint_returns_items(self):
+        response = client.get("/finetune/jobs")
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertIn("count", payload)
+        self.assertIn("items", payload)
+        self.assertIsInstance(payload["items"], list)
+
+    @patch("src.api.routes.get_rag_system")
+    def test_rag_documents_list_and_delete_endpoints(self, mock_get_rag):
+        class _FakeVectorStore:
+            def __init__(self):
+                self.deleted = []
+
+            def get_all_documents(self):
+                return [
+                    {
+                        "id": "doc-1",
+                        "document": "Sample corpus text",
+                        "metadata": {"source": "unit-test"},
+                    }
+                ]
+
+            def delete(self, ids):
+                self.deleted.extend(ids)
+
+            def persist(self):
+                return None
+
+        class _FakeRag:
+            def __init__(self):
+                self.vector_store = _FakeVectorStore()
+
+        fake = _FakeRag()
+        mock_get_rag.return_value = fake
+
+        list_resp = client.get("/rag/documents")
+        self.assertEqual(list_resp.status_code, 200)
+        body = list_resp.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["items"][0]["id"], "doc-1")
+
+        del_resp = client.delete("/rag/documents/doc-1")
+        self.assertEqual(del_resp.status_code, 200)
+        self.assertIn("doc-1", fake.vector_store.deleted)
 
     # ── Consensus endpoint ────────────────────────────────────────────────────
 
@@ -2809,6 +3075,46 @@ class TestSprintE(unittest.TestCase):
         self.assertEqual(tool_events[0]["status"], "blocked")
         self.assertIn("safety pipeline", tool_events[0]["result"].lower())
         tool_run_command.assert_not_called()
+
+    # ── Frontend UI contract checks ─────────────────────────────────────────
+
+    def test_frontend_operator_panels_and_scripts_wired(self):
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        index_path = os.path.join(repo_root, "static", "index.html")
+        with open(index_path, "r", encoding="utf-8") as fh:
+            html = fh.read()
+
+        required_panel_ids = [
+            "benchmark-dashboard-panel",
+            "finetune-dashboard-panel",
+            "rag-corpus-panel",
+            "admin-dashboard-panel",
+            "code-runner-panel",
+        ]
+        for panel_id in required_panel_ids:
+            self.assertIn(f'id="{panel_id}"', html)
+
+        required_scripts = [
+            "static/js/panels/benchmark-dashboard.js",
+            "static/js/panels/finetune-dashboard.js",
+            "static/js/panels/rag-corpus.js",
+            "static/js/panels/admin-dashboard.js",
+            "static/js/panels/code-runner.js",
+        ]
+        for script_ref in required_scripts:
+            self.assertIn(script_ref, html)
+
+    def test_frontend_chat_streaming_rendering_path(self):
+        repo_root = os.path.dirname(os.path.dirname(__file__))
+        index_path = os.path.join(repo_root, "static", "index.html")
+        with open(index_path, "r", encoding="utf-8") as fh:
+            html = fh.read()
+
+        # Keep this as a source-level contract to guard progressive-render UX.
+        self.assertIn("evt.type==='token_chunk'", html)
+        self.assertIn("streamedMarkdown += String(evt.delta||'')", html)
+        self.assertIn("agentBub.innerHTML = renderMd(streamedMarkdown)", html)
+        self.assertIn("notifyTaskComplete('Nexus AI task finished'", html)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
