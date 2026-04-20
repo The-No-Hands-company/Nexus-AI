@@ -28,7 +28,7 @@ pyotp>=2.9.0
 qrcode[pil]>=7.4.2
 
 # WebAuthn / passkeys
-py_webauthn>=2.0.0
+webauthn==2.7.1
 
 # SAML 2.0 enterprise SSO
 pysaml2>=7.0.0
