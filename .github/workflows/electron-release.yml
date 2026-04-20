@@ -1,0 +1,109 @@
+name: Electron Build and Release
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - 'release'
+      - 'release/**'
+    tags:
+      - 'v*'
+    paths:
+      - 'desktop/electron/**'
+      - 'static/icon-*.png'
+      - '.github/workflows/electron-release.yml'
+  pull_request:
+    branches:
+      - 'release'
+      - 'release/**'
+    paths:
+      - 'desktop/electron/**'
+      - 'static/icon-*.png'
+      - '.github/workflows/electron-release.yml'
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            script: dist:linux
+            artifact_name: electron-linux
+          - os: macos-latest
+            script: dist:mac
+            artifact_name: electron-macos
+          - os: windows-latest
+            script: dist:win
+            artifact_name: electron-windows
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: desktop/electron/package-lock.json
+
+      - name: Install desktop dependencies
+        working-directory: desktop/electron
+        run: npm ci
+
+      - name: Prepare macOS signing certificate
+        if: runner.os == 'macOS' && secrets.MACOS_CERTIFICATE_P12_BASE64 != ''
+        shell: bash
+        run: |
+          CERT_PATH="$RUNNER_TEMP/macos-signing.p12"
+          echo "${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}" | base64 --decode > "$CERT_PATH"
+          echo "CSC_LINK=$CERT_PATH" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=${{ secrets.MACOS_CERTIFICATE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "APPLE_ID=${{ secrets.APPLE_ID }}" >> "$GITHUB_ENV"
+          echo "APPLE_APP_SPECIFIC_PASSWORD=${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "APPLE_TEAM_ID=${{ secrets.APPLE_TEAM_ID }}" >> "$GITHUB_ENV"
+
+      - name: Prepare Windows signing certificate
+        if: runner.os == 'Windows' && secrets.WINDOWS_CERTIFICATE_P12_BASE64 != ''
+        shell: bash
+        run: |
+          CERT_PATH="$RUNNER_TEMP/windows-signing.p12"
+          echo "${{ secrets.WINDOWS_CERTIFICATE_P12_BASE64 }}" | base64 --decode > "$CERT_PATH"
+          echo "CSC_LINK=$CERT_PATH" >> "$GITHUB_ENV"
+          echo "CSC_KEY_PASSWORD=${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}" >> "$GITHUB_ENV"
+
+      - name: Build desktop artifacts
+        working-directory: desktop/electron
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm run ${{ matrix.script }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: desktop/electron/dist/*
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-artifacts/**/*
+          draft: false
+          prerelease: false

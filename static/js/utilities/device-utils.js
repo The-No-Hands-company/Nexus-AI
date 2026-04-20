@@ -45,3 +45,33 @@ function haptic(type='light'){
     if(dx<-60 && sidebarOpen){closeSidebar();haptic('light')}
   },{passive:true});
 })();
+
+// ── PUSH NOTIFICATIONS (browser) ───────────────────────────────────────────
+async function enableTaskNotifications() {
+  if (!("Notification" in window)) {
+    alert("This browser does not support notifications.");
+    return false;
+  }
+  if (Notification.permission === "granted") {
+    addSysMsg("🔔 Task notifications already enabled");
+    return true;
+  }
+  const permission = await Notification.requestPermission();
+  const ok = permission === "granted";
+  if (ok) addSysMsg("🔔 Task notifications enabled");
+  else addSysMsg("🔕 Notification permission denied");
+  return ok;
+}
+
+function notifyTaskComplete(title, body) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (!document.hidden) return;
+  try {
+    new Notification(title || "Nexus AI", {
+      body: body || "A long-running task has completed.",
+      icon: "/static/icon-192.png",
+    });
+  } catch (_) {
+    // best-effort only
+  }
+}

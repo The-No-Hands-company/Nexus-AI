@@ -127,6 +127,24 @@ function addMessageActions(wrap, role, content, rowEl) {
   const actions = document.createElement("div");
   actions.className = "msg-actions";
 
+  const copyBtn = document.createElement("button");
+  copyBtn.className = "msg-action-btn";
+  copyBtn.textContent = "⎘ MD";
+  copyBtn.title = "Copy message as Markdown";
+  copyBtn.onclick = async () => {
+    const md = _toMarkdownForCopy(rowEl, role);
+    if (!md) return;
+    await navigator.clipboard.writeText(md).catch(() => {});
+  };
+  actions.appendChild(copyBtn);
+
+  const branchBtn = document.createElement("button");
+  branchBtn.className = "msg-action-btn";
+  branchBtn.textContent = "⑂ Branch";
+  branchBtn.title = "Fork chat from this message";
+  branchBtn.onclick = () => branchFromMessage(rowEl);
+  actions.appendChild(branchBtn);
+
   if (role === "user") {
     const editBtn = document.createElement("button");
     editBtn.className = "msg-action-btn";
@@ -171,6 +189,71 @@ function addMessageActions(wrap, role, content, rowEl) {
   }
 
   wrap.appendChild(actions);
+}
+
+function _toMarkdownForCopy(rowEl, role) {
+  const bubble = rowEl?.querySelector(".bubble");
+  if (!bubble) return "";
+  const heading = role === "user" ? "User" : "Assistant";
+  const markdown = (rowEl?.dataset?.markdown || "").trim();
+  const fallback = (bubble.innerText || "").trim();
+  const body = markdown || fallback;
+  if (!body) return "";
+  return `### ${heading}\n\n${body}\n`;
+}
+
+function _buildBranchHistory(untilRowEl) {
+  const rows = [...document.querySelectorAll("#messages .msg-row")];
+  const history = [];
+  for (const row of rows) {
+    const bubble = row.querySelector(".bubble");
+    if (!bubble) continue;
+    const role = row.classList.contains("user") ? "user" : "assistant";
+    const markdown = (row.dataset?.markdown || "").trim();
+    const content = (markdown || bubble.innerText || "").trim();
+    if (!content) continue;
+    history.push({ role, content });
+    if (row === untilRowEl) break;
+  }
+  return history;
+}
+
+async function branchFromMessage(rowEl) {
+  const history = _buildBranchHistory(rowEl);
+  if (!history.length) return;
+
+  const s = await fetch("/session", { method: "POST" }).then((r) => r.json()).catch(() => null);
+  if (!s?.session_id) return;
+
+  sid = s.session_id;
+  activeChatId = null;
+  await fetch("/agent", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ task: "__restore__", session_id: sid, _history: history }),
+  }).catch(() => {});
+
+  clearMessages();
+  showChat();
+  for (const m of history) {
+    if (m.role === "user") {
+      addBubble("user", esc(m.content).replace(/\n/g, "<br>"), "", m.content);
+    } else {
+      const inserted = addBubble("agent", renderMd(m.content), "", m.content);
+      if (inserted?.row) inserted.row.dataset.markdown = m.content;
+      if (typeof enhanceRenderedContent === "function") {
+        enhanceRenderedContent(inserted?.bub);
+      }
+    }
+  }
+
+  triggerAutoSave(200);
+  if (typeof loadChatList === "function") {
+    await loadChatList();
+  }
+  if (typeof addSysMsg === "function") {
+    addSysMsg("Forked a new branch from the selected message.");
+  }
 }
 
 function toggleTTS(btn, text) {

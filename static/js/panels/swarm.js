@@ -4,9 +4,12 @@
 // ── State ─────────────────────────────────────────────────────────────────────
 let _swarmTimer        = null;
 let _swarmGraphTimer   = null;
+let _swarmProgressTimer = null;
 let _lastSwarmTotal    = 0;
 let _swarmActiveTab    = "activity";
 let _swarmPaused       = false;
+let _swarmSelectedTrace = "";
+let _swarmCachedTasks   = [];
 
 // Graph physics state
 let _graphNodes        = [];
@@ -48,6 +51,7 @@ function closeSwarmPanel() {
   NexusApi.setPanelOpen("swarm-panel", false);
   _stopSwarmPolling();
   _stopGraphPolling();
+  _stopProgressPolling();
   _stopGraphAnim();
 }
 
@@ -55,7 +59,7 @@ function closeSwarmPanel() {
 
 function swarmTab(name) {
   _swarmActiveTab = name;
-  const tabs  = ["activity", "graph", "assign"];
+  const tabs  = ["activity", "graph", "assign", "progress", "diff"];
   for (const t of tabs) {
     const pane = document.getElementById(`swarm-pane-${t}`);
     const btn  = document.getElementById(`swarm-tab-${t}`);
@@ -69,14 +73,28 @@ function swarmTab(name) {
   if (name === "activity") {
     _startSwarmPolling();
     _stopGraphPolling();
+    _stopProgressPolling();
     _stopGraphAnim();
   } else if (name === "graph") {
     _stopSwarmPolling();
+    _stopProgressPolling();
     _initGraph();
     _startGraphPolling();
+  } else if (name === "progress") {
+    _stopSwarmPolling();
+    _stopGraphPolling();
+    _stopGraphAnim();
+    _startProgressPolling();
+  } else if (name === "diff") {
+    _stopSwarmPolling();
+    _stopGraphPolling();
+    _stopGraphAnim();
+    _stopProgressPolling();
+    swarmRefreshDiffOptions();
   } else {
     _stopSwarmPolling();
     _stopGraphPolling();
+    _stopProgressPolling();
     _stopGraphAnim();
   }
 }
@@ -121,6 +139,19 @@ function _stopSwarmPolling() {
   if (_swarmTimer) { clearInterval(_swarmTimer); _swarmTimer = null; }
 }
 
+function _startProgressPolling() {
+  if (_swarmProgressTimer) return;
+  swarmRefreshProgress();
+  _swarmProgressTimer = setInterval(swarmRefreshProgress, 2500);
+}
+
+function _stopProgressPolling() {
+  if (_swarmProgressTimer) {
+    clearInterval(_swarmProgressTimer);
+    _swarmProgressTimer = null;
+  }
+}
+
 async function _pollSwarm() {
   try {
     const r = await fetch("/swarm/activity?limit=60");
@@ -145,6 +176,175 @@ async function _pollSwarm() {
     feed.scrollTop = feed.scrollHeight;
     if (countEl) countEl.textContent = d.total + " event" + (d.total === 1 ? "" : "s");
   } catch (_) {}
+}
+
+function swarmRecordProgressEvent(evt) {
+  if (!_swarmSelectedTrace) return;
+  if (evt.trace_id && evt.trace_id !== _swarmSelectedTrace) return;
+  if (_swarmActiveTab !== "progress") return;
+  swarmRefreshProgress();
+}
+
+async function swarmRefreshProgress() {
+  const traceSel = document.getElementById("swarm-progress-trace");
+  const summaryEl = document.getElementById("swarm-progress-summary");
+  const feed = document.getElementById("swarm-progress-feed");
+  if (!traceSel || !summaryEl || !feed) return;
+
+  try {
+    const r = await fetch("/tasks?limit=40");
+    if (!r.ok) return;
+    const d = await r.json();
+    _swarmCachedTasks = d.traces || [];
+
+    if (!_swarmCachedTasks.length) {
+      traceSel.innerHTML = '<option value="">No traces available</option>';
+      summaryEl.textContent = "No autonomy traces yet.";
+      feed.innerHTML = '<div style="color:var(--muted);font-size:.75rem;">Run an autonomy task to populate subtasks.</div>';
+      return;
+    }
+
+    traceSel.innerHTML = _swarmCachedTasks.map((t) => {
+      const id = esc(t.trace_id || "");
+      const task = esc((t.task || "").slice(0, 56));
+      const selected = (_swarmSelectedTrace ? _swarmSelectedTrace === t.trace_id : false) ? "selected" : "";
+      return `<option value="${id}" ${selected}>${id} — ${task}</option>`;
+    }).join("");
+
+    if (!_swarmSelectedTrace) {
+      _swarmSelectedTrace = _swarmCachedTasks[0].trace_id;
+      traceSel.value = _swarmSelectedTrace;
+    }
+
+    traceSel.onchange = () => {
+      _swarmSelectedTrace = traceSel.value;
+      swarmRefreshProgress();
+    };
+
+    const selId = _swarmSelectedTrace || traceSel.value;
+    if (!selId) return;
+    const traceResp = await fetch(`/tasks/${encodeURIComponent(selId)}`);
+    if (!traceResp.ok) return;
+    const traceData = await traceResp.json();
+    const events = traceData.events || [];
+    _renderProgressTimeline(events, summaryEl, feed);
+  } catch (_) {}
+}
+
+function _renderProgressTimeline(events, summaryEl, feed) {
+  const items = [];
+  let running = 0;
+  let done = 0;
+  let failed = 0;
+
+  for (const evt of events) {
+    if (!evt || typeof evt !== "object") continue;
+    const t = String(evt.type || "");
+    if (t === "plan" && Array.isArray(evt.steps)) {
+      evt.steps.forEach((step, idx) => {
+        items.push({ label: String(step || `Step ${idx + 1}`), status: "pending" });
+      });
+      continue;
+    }
+    if (t === "subtask") {
+      const label = String(evt.subtask?.description || evt.description || evt.message || "Subtask");
+      const found = items.find((i) => i.label === label);
+      if (found) found.status = "running";
+      else items.push({ label, status: "running" });
+      continue;
+    }
+    if (t === "subtask_done") {
+      const label = String(evt.subtask?.description || evt.description || evt.message || "Subtask");
+      const found = items.find((i) => i.label === label);
+      if (found) found.status = "done";
+      else items.push({ label, status: "done" });
+      continue;
+    }
+    if (t === "error") {
+      const label = String(evt.message || "Subtask error");
+      items.push({ label, status: "failed" });
+    }
+  }
+
+  for (const it of items) {
+    if (it.status === "running") running += 1;
+    else if (it.status === "done") done += 1;
+    else if (it.status === "failed") failed += 1;
+  }
+  const pending = Math.max(0, items.length - running - done - failed);
+  summaryEl.textContent = `Subtasks: ${items.length} · done ${done} · running ${running} · pending ${pending} · failed ${failed}`;
+
+  if (!items.length) {
+    feed.innerHTML = '<div style="color:var(--muted);font-size:.75rem;">No subtask-level events captured for this trace yet.</div>';
+    return;
+  }
+
+  feed.innerHTML = items.map((it, idx) => {
+    const palette = it.status === "done"
+      ? { icon: "✓", color: "#22c55e" }
+      : it.status === "running"
+        ? { icon: "…", color: "#f59e0b" }
+        : it.status === "failed"
+          ? { icon: "✕", color: "#ef4444" }
+          : { icon: "○", color: "var(--muted)" };
+    return `<div style="display:flex;gap:8px;align-items:flex-start;padding:6px 8px;background:var(--surface2);border-radius:7px;font-size:.75rem;">
+      <span style="min-width:18px;color:${palette.color};font-weight:700;">${palette.icon}</span>
+      <div style="flex:1;line-height:1.35;">${esc(it.label)}</div>
+      <span style="font-size:.68rem;color:var(--muted);">#${idx + 1}</span>
+    </div>`;
+  }).join("");
+}
+
+async function swarmRefreshDiffOptions() {
+  const left = document.getElementById("swarm-diff-left");
+  const right = document.getElementById("swarm-diff-right");
+  if (!left || !right) return;
+  try {
+    const r = await fetch("/tasks?limit=30");
+    if (!r.ok) return;
+    const d = await r.json();
+    const traces = d.traces || [];
+    if (!traces.length) {
+      left.innerHTML = '<option value="">No traces</option>';
+      right.innerHTML = '<option value="">No traces</option>';
+      return;
+    }
+    const options = traces.map((t) => `<option value="${esc(t.trace_id || "")}">${esc(t.trace_id || "")}</option>`).join("");
+    left.innerHTML = options;
+    right.innerHTML = options;
+    if (traces.length > 1) right.selectedIndex = 1;
+  } catch (_) {}
+}
+
+async function swarmRunDiffCompare() {
+  const left = document.getElementById("swarm-diff-left");
+  const right = document.getElementById("swarm-diff-right");
+  const out = document.getElementById("swarm-diff-output");
+  if (!left || !right || !out) return;
+
+  const leftId = (left.value || "").trim();
+  const rightId = (right.value || "").trim();
+  if (!leftId || !rightId) {
+    out.textContent = "Select two traces to compare.";
+    return;
+  }
+  if (leftId === rightId) {
+    out.textContent = "Pick two different traces for comparison.";
+    return;
+  }
+
+  out.textContent = "Computing diff...";
+  try {
+    const r = await fetch(`/tasks/${encodeURIComponent(leftId)}/diff?other_trace_id=${encodeURIComponent(rightId)}`);
+    const d = await r.json();
+    if (!r.ok) {
+      out.textContent = d.error || "Failed to diff traces.";
+      return;
+    }
+    out.textContent = d.diff || "No differences found.";
+  } catch (e) {
+    out.textContent = `Error: ${e.message}`;
+  }
 }
 
 // ── Graph: initialise canvas ──────────────────────────────────────────────────

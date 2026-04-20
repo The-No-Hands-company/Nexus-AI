@@ -34,6 +34,15 @@ function showTokenCount(inputTokens, outputTokens) {
   bar.classList.add('visible');
 }
 
+function updateLiveTokenCount(data) {
+  if (!data) return;
+  const inTokens = Number(data.in_tokens);
+  const outTokens = Number(data.out_tokens);
+  const inVal = Number.isFinite(inTokens) ? inTokens : null;
+  const outVal = Number.isFinite(outTokens) ? outTokens : null;
+  showTokenCount(inVal, outVal);
+}
+
 // ── SHORTCUTS MODAL HELPERS ───────────────────────────────────────────────────
 function openShortcuts()  { document.getElementById('shortcuts-overlay').classList.add('open'); }
 function closeShortcuts() { document.getElementById('shortcuts-overlay').classList.remove('open'); }

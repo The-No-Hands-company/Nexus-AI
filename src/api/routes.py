@@ -1,7 +1,10 @@
 import os, uuid, json, asyncio, threading, time, hmac, secrets, hashlib, base64
+from urllib import parse as _urlparse
+from urllib import request as _urlrequest
+from urllib import error as _urlerror
 import jwt as _jwt
 from datetime import datetime, timezone
-from fastapi import Request, HTTPException, APIRouter
+from fastapi import Request, HTTPException, APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse, Response
 from pydantic import ValidationError
 
@@ -1211,6 +1214,566 @@ async def webhook_status(run_id: str):
     if not result: return JSONResponse({"error": "run_id not found"}, status_code=404)
     return result
 
+
+def _http_json_request(
+    method: str,
+    url: str,
+    payload: dict | None = None,
+    headers: dict | None = None,
+    timeout: int = 15,
+) -> dict:
+    data = None
+    req_headers = {"Accept": "application/json"}
+    if headers:
+        req_headers.update({str(k): str(v) for k, v in headers.items()})
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        req_headers.setdefault("Content-Type", "application/json")
+    req = _urlrequest.Request(url=url, data=data, method=method.upper(), headers=req_headers)
+    try:
+        with _urlrequest.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+            parsed = {}
+            if body:
+                try:
+                    parsed = json.loads(body)
+                except Exception:
+                    parsed = {"raw": body}
+            return {"ok": True, "status": int(resp.getcode()), "json": parsed, "text": body}
+    except _urlerror.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace") if hasattr(exc, "read") else ""
+        parsed = {}
+        if body:
+            try:
+                parsed = json.loads(body)
+            except Exception:
+                parsed = {"raw": body}
+        return {"ok": False, "status": int(exc.code), "json": parsed, "text": body}
+    except Exception as exc:
+        return {"ok": False, "status": 0, "json": {}, "text": str(exc)}
+
+
+def _is_truthy_env(name: str, default: bool = False) -> bool:
+    val = os.getenv(name, "").strip().lower()
+    if not val:
+        return default
+    return val in {"1", "true", "yes", "on"}
+
+
+def _is_safe_callback_url(url: str) -> bool:
+    try:
+        parsed = _urlparse.urlparse(url)
+    except Exception:
+        return False
+    if parsed.scheme == "https":
+        return True
+    if parsed.scheme != "http":
+        return False
+    host = (parsed.hostname or "").lower()
+    return host in {"127.0.0.1", "localhost"}
+
+
+def _start_integration_run(
+    task: str,
+    source: str,
+    metadata: dict | None = None,
+    callback=None,
+) -> str:
+    run_id = "ext_" + secrets.token_hex(8)
+    run_results[run_id] = {
+        "status": "running",
+        "result": None,
+        "error": None,
+        "source": source,
+        "metadata": dict(metadata or {}),
+    }
+
+    def _run() -> None:
+        status_payload = run_results.get(run_id, {})
+        try:
+            result = run_agent_task(task, [], sid=run_id)
+            status_payload = {
+                "status": "done",
+                "result": result,
+                "error": None,
+                "source": source,
+                "metadata": dict(metadata or {}),
+            }
+        except Exception as exc:
+            status_payload = {
+                "status": "error",
+                "result": None,
+                "error": str(exc),
+                "source": source,
+                "metadata": dict(metadata or {}),
+            }
+        run_results[run_id] = status_payload
+        if callback:
+            try:
+                callback(run_id, status_payload)
+            except Exception:
+                pass
+
+    threading.Thread(target=_run, daemon=True).start()
+    return run_id
+
+
+def _slack_verify_signature(raw_body: bytes, timestamp: str, signature: str) -> bool:
+    secret = os.getenv("SLACK_SIGNING_SECRET", "").strip()
+    if not secret:
+        return True
+    if not timestamp or not signature:
+        return False
+    try:
+        ts = int(timestamp)
+    except Exception:
+        return False
+    if abs(int(time.time()) - ts) > 60 * 5:
+        return False
+    base = f"v0:{timestamp}:{raw_body.decode('utf-8', errors='replace')}"
+    expected = "v0=" + hmac.new(secret.encode("utf-8"), base.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+def _github_verify_signature(raw_body: bytes, signature_header: str) -> bool:
+    secret = os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()
+    if not secret:
+        return True
+    sig = (signature_header or "").strip().lower()
+    if not sig.startswith("sha256="):
+        return False
+    provided = sig.split("=", 1)[1]
+    expected = hmac.new(secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(provided, expected)
+
+
+def _slack_send_message(channel: str, text: str, thread_ts: str = "") -> dict:
+    token = os.getenv("SLACK_BOT_TOKEN", "").strip()
+    if not token or not channel:
+        return {"ok": False, "error": "slack_not_configured"}
+    payload = {"channel": channel, "text": text[:3900]}
+    if thread_ts:
+        payload["thread_ts"] = thread_ts
+    resp = _http_json_request(
+        "POST",
+        "https://slack.com/api/chat.postMessage",
+        payload=payload,
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=15,
+    )
+    api_ok = bool(resp.get("json", {}).get("ok"))
+    return {"ok": api_ok and resp.get("ok", False), "status": resp.get("status", 0), "raw": resp}
+
+
+def _discord_send_message(channel_id: str, content: str) -> dict:
+    token = os.getenv("DISCORD_BOT_TOKEN", "").strip()
+    if not token or not channel_id:
+        return {"ok": False, "error": "discord_not_configured"}
+    resp = _http_json_request(
+        "POST",
+        f"https://discord.com/api/v10/channels/{channel_id}/messages",
+        payload={"content": content[:1800]},
+        headers={"Authorization": f"Bot {token}"},
+        timeout=15,
+    )
+    return {"ok": bool(resp.get("ok")), "status": resp.get("status", 0), "raw": resp}
+
+
+def _extract_result_text(payload: dict) -> str:
+    if payload.get("status") != "done":
+        return f"Nexus run failed: {payload.get('error') or 'unknown error'}"
+    result = payload.get("result")
+    if isinstance(result, dict):
+        text = result.get("result") or result.get("content") or json.dumps(result, ensure_ascii=False)
+        return str(text)[:3900]
+    return str(result)[:3900]
+
+
+@router.post("/integrations/slack/events")
+async def integrations_slack_events(request: Request):
+    raw_body = await request.body()
+    timestamp = request.headers.get("x-slack-request-timestamp", "")
+    signature = request.headers.get("x-slack-signature", "")
+    if not _slack_verify_signature(raw_body, timestamp, signature):
+        return _api_error("invalid slack signature", "unauthorized", 403)
+
+    try:
+        body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except Exception:
+        return _api_error("invalid JSON body", "validation_error", 400)
+    if not isinstance(body, dict):
+        return _api_error("invalid JSON body", "validation_error", 400)
+
+    if body.get("type") == "url_verification":
+        return {"challenge": body.get("challenge", "")}
+
+    event = body.get("event") if isinstance(body.get("event"), dict) else {}
+    if body.get("type") != "event_callback" or event.get("type") != "message" or event.get("bot_id"):
+        return {"accepted": True, "ignored": True}
+
+    text = str(event.get("text") or "").strip()
+    if not text:
+        return {"accepted": True, "ignored": True, "reason": "empty_message"}
+    channel = str(event.get("channel") or "").strip()
+    thread_ts = str(event.get("thread_ts") or event.get("ts") or "").strip()
+
+    def _callback(_run_id: str, result_payload: dict) -> None:
+        response_text = _extract_result_text(result_payload)
+        _slack_send_message(channel, response_text, thread_ts=thread_ts)
+
+    run_id = _start_integration_run(
+        task=text,
+        source="slack",
+        metadata={"channel": channel, "thread_ts": thread_ts},
+        callback=_callback,
+    )
+    return {"accepted": True, "run_id": run_id}
+
+
+@router.post("/integrations/discord/messages")
+async def integrations_discord_messages(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    expected_secret = os.getenv("DISCORD_INBOUND_SECRET", "").strip()
+    provided_secret = request.headers.get("x-discord-secret", "")
+    if expected_secret and not hmac.compare_digest(expected_secret, provided_secret):
+        return _api_error("invalid discord secret", "unauthorized", 403)
+
+    if bool(body.get("author_bot", False)):
+        return {"accepted": True, "ignored": True}
+
+    text = str(body.get("task") or body.get("content") or "").strip()
+    if not text:
+        return _api_error("content or task is required", "validation_error", 422)
+    channel_id = str(body.get("channel_id") or "").strip()
+
+    def _callback(_run_id: str, result_payload: dict) -> None:
+        response_text = _extract_result_text(result_payload)
+        _discord_send_message(channel_id, response_text)
+
+    run_id = _start_integration_run(
+        task=text,
+        source="discord",
+        metadata={"channel_id": channel_id, "author_id": str(body.get("author_id") or "")},
+        callback=_callback,
+    )
+    return {"accepted": True, "run_id": run_id}
+
+
+@router.post("/integrations/github-actions/event")
+async def integrations_github_actions_event(request: Request):
+    raw_body = await request.body()
+    if not _github_verify_signature(raw_body, request.headers.get("x-hub-signature-256", "")):
+        return _api_error("invalid github signature", "unauthorized", 403)
+
+    try:
+        body = json.loads(raw_body.decode("utf-8")) if raw_body else {}
+    except Exception:
+        return _api_error("invalid JSON body", "validation_error", 400)
+    if not isinstance(body, dict):
+        return _api_error("invalid JSON body", "validation_error", 400)
+
+    event_name = str(request.headers.get("x-github-event") or body.get("event") or "").strip().lower()
+    if event_name not in {"push", "pull_request"}:
+        return {"accepted": False, "ignored": True, "reason": "event_not_supported", "event": event_name}
+
+    override_task = str(body.get("task") or "").strip()
+    task = override_task
+    if not task:
+        repo_name = str((body.get("repository") or {}).get("full_name") or "unknown/repo")
+        if event_name == "push":
+            ref = str(body.get("ref") or "")
+            head_commit = body.get("head_commit") if isinstance(body.get("head_commit"), dict) else {}
+            message = str(head_commit.get("message") or "").strip()
+            task = f"GitHub push event for {repo_name} on {ref}. Summarize impact and propose next action. Commit message: {message}"
+        else:
+            pr = body.get("pull_request") if isinstance(body.get("pull_request"), dict) else {}
+            title = str(pr.get("title") or "")
+            draft = bool(pr.get("draft", False))
+            action = str(body.get("action") or "updated")
+            task = f"GitHub pull_request event ({action}) for {repo_name}. Title: {title}. Draft={draft}. Provide review guidance."
+
+    run_id = _start_integration_run(
+        task=task,
+        source="github_actions",
+        metadata={"event": event_name},
+    )
+    return {"accepted": True, "run_id": run_id, "event": event_name}
+
+
+@router.post("/integrations/automation/webhook")
+async def integrations_automation_webhook(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    expected_secret = os.getenv("AUTOMATION_WEBHOOK_SECRET", "").strip()
+    provided_secret = request.headers.get("x-automation-secret", "")
+    if expected_secret and not hmac.compare_digest(expected_secret, provided_secret):
+        return _api_error("invalid automation secret", "unauthorized", 403)
+
+    task = str(body.get("task") or body.get("prompt") or body.get("text") or "").strip()
+    if not task:
+        return _api_error("task, prompt, or text is required", "validation_error", 422)
+
+    callback_url = str(body.get("callback_url") or "").strip()
+    callback_bearer = str(body.get("callback_bearer") or "").strip()
+    if callback_url and not _is_safe_callback_url(callback_url):
+        return _api_error("callback_url must be https or localhost http", "validation_error", 422)
+
+    def _callback(run_id: str, result_payload: dict) -> None:
+        if not callback_url:
+            return
+        headers = {}
+        if callback_bearer:
+            headers["Authorization"] = f"Bearer {callback_bearer}"
+        _http_json_request(
+            "POST",
+            callback_url,
+            payload={
+                "run_id": run_id,
+                "status": result_payload.get("status"),
+                "error": result_payload.get("error"),
+                "result": result_payload.get("result"),
+                "source": "automation_webhook",
+            },
+            headers=headers,
+            timeout=20,
+        )
+
+    run_id = _start_integration_run(
+        task=task,
+        source="automation_webhook",
+        metadata={"has_callback": bool(callback_url)},
+        callback=_callback if callback_url else None,
+    )
+    return {"accepted": True, "run_id": run_id}
+
+
+@router.get("/integrations/channels/status")
+def integrations_channels_status():
+    return {
+        "slack": {
+            "inbound_signature": bool(os.getenv("SLACK_SIGNING_SECRET", "").strip()),
+            "outbound_bot_token": bool(os.getenv("SLACK_BOT_TOKEN", "").strip()),
+        },
+        "discord": {
+            "inbound_secret": bool(os.getenv("DISCORD_INBOUND_SECRET", "").strip()),
+            "outbound_bot_token": bool(os.getenv("DISCORD_BOT_TOKEN", "").strip()),
+        },
+        "github_actions": {
+            "webhook_signature": bool(os.getenv("GITHUB_WEBHOOK_SECRET", "").strip()),
+        },
+        "automation": {
+            "webhook_secret": bool(os.getenv("AUTOMATION_WEBHOOK_SECRET", "").strip()),
+        },
+    }
+
+
+def _load_mcp_tools_from_env() -> list[dict]:
+    raw = os.getenv("MCP_TOOLS", "").strip()
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(parsed, list):
+        return []
+    tools = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        url = str(item.get("url") or "").strip()
+        if not name or not url:
+            continue
+        method = str(item.get("method") or "POST").strip().upper()
+        headers = item.get("headers") if isinstance(item.get("headers"), dict) else {}
+        timeout_s = _safe_int(item.get("timeout_s", 15), default=15, min_value=1, max_value=60)
+        tools.append(
+            {
+                "name": name,
+                "url": url,
+                "method": method if method in {"GET", "POST", "PUT", "PATCH", "DELETE"} else "POST",
+                "headers": {str(k): str(v) for k, v in headers.items()},
+                "timeout_s": timeout_s,
+            }
+        )
+    return tools
+
+
+def _call_mcp_tool(name: str, args: dict | None = None) -> dict:
+    args = args if isinstance(args, dict) else {}
+    tools = _load_mcp_tools_from_env()
+    selected = next((t for t in tools if t.get("name") == name), None)
+    if not selected:
+        return {"ok": False, "error": "mcp_tool_not_found", "available": [t.get("name") for t in tools]}
+
+    method = selected.get("method", "POST")
+    url = selected.get("url", "")
+    payload = None
+    if method == "GET" and args:
+        query = _urlparse.urlencode({k: str(v) for k, v in args.items()})
+        url = url + ("&" if "?" in url else "?") + query
+    elif args:
+        payload = {"arguments": args}
+
+    resp = _http_json_request(
+        method=method,
+        url=url,
+        payload=payload,
+        headers=selected.get("headers") or {},
+        timeout=int(selected.get("timeout_s", 15)),
+    )
+    return {
+        "ok": bool(resp.get("ok")),
+        "status": resp.get("status", 0),
+        "tool": name,
+        "response": resp.get("json") if resp.get("json") else resp.get("text"),
+    }
+
+
+def _mcp_server_allowed_tools() -> set[str]:
+    from ..tools_builtin import list_tool_schemas
+
+    raw = os.getenv("MCP_SERVER_ALLOWED_TOOLS", "").strip()
+    all_tools = set(list_tool_schemas().keys())
+    high_risk = {
+        "run_command",
+        "write_file",
+        "delete_file",
+        "commit_push",
+        "create_repo",
+        "git_checkout",
+        "git_pull",
+    }
+    if raw:
+        return {part.strip() for part in raw.split(",") if part.strip()}
+    if _is_truthy_env("MCP_SERVER_ALLOW_HIGH_RISK", default=False):
+        return all_tools
+    return all_tools - high_risk
+
+
+def _mcp_jsonrpc_success(req_id, result: dict):
+    return {"jsonrpc": "2.0", "id": req_id, "result": result}
+
+
+def _mcp_jsonrpc_error(req_id, code: int, message: str, data=None):
+    payload = {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
+    if data is not None:
+        payload["error"]["data"] = data
+    return payload
+
+
+@router.get("/mcp/server/status")
+def mcp_server_status():
+    return {
+        "enabled": _is_truthy_env("MCP_SERVER_MODE", default=False),
+        "allow_high_risk": _is_truthy_env("MCP_SERVER_ALLOW_HIGH_RISK", default=False),
+        "allowed_tools": sorted(_mcp_server_allowed_tools()),
+    }
+
+
+@router.post("/mcp/server")
+async def mcp_server_rpc(request: Request):
+    if not _is_truthy_env("MCP_SERVER_MODE", default=False):
+        return _api_error("MCP server mode is disabled", "not_found", 404)
+
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _mcp_jsonrpc_error(None, -32700, str(exc.detail))
+
+    req_id = body.get("id")
+    method = str(body.get("method") or "").strip()
+    params = body.get("params") if isinstance(body.get("params"), dict) else {}
+
+    from ..tools_builtin import dispatch_builtin, list_tool_schemas, validate_tool_args
+
+    if method == "tools/list":
+        schemas = list_tool_schemas()
+        allowed = _mcp_server_allowed_tools()
+        tools = []
+        for name, schema in schemas.items():
+            if name not in allowed:
+                continue
+            tools.append(
+                {
+                    "name": name,
+                    "description": str(schema.get("description") or ""),
+                    "inputSchema": dict(schema),
+                }
+            )
+        return _mcp_jsonrpc_success(req_id, {"tools": tools})
+
+    if method == "tools/call":
+        name = str(params.get("name") or "").strip()
+        arguments = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+        if not name:
+            return _mcp_jsonrpc_error(req_id, -32602, "tool name is required")
+        if name not in _mcp_server_allowed_tools():
+            return _mcp_jsonrpc_error(req_id, -32001, "tool is not allowed", {"tool": name})
+
+        action = {"action": name, **arguments}
+        arg_err = validate_tool_args(action)
+        if arg_err:
+            return _mcp_jsonrpc_error(req_id, -32602, arg_err)
+
+        trace = dispatch_builtin(action, session_id=f"mcp_{req_id or 'call'}")
+        if not trace:
+            return _mcp_jsonrpc_error(req_id, -32601, "unknown tool")
+
+        return _mcp_jsonrpc_success(
+            req_id,
+            {
+                "content": [{"type": "text", "text": str(trace.get("result", ""))}],
+                "metadata": trace.get("metadata", {}),
+                "status": trace.get("status", "done"),
+            },
+        )
+
+    return _mcp_jsonrpc_error(req_id, -32601, "method not found")
+
+
+@router.get("/mcp/tools")
+def mcp_tools_list():
+    tools = _load_mcp_tools_from_env()
+    return {
+        "tools": [
+            {
+                "name": t.get("name"),
+                "url": t.get("url"),
+                "method": t.get("method"),
+                "timeout_s": t.get("timeout_s"),
+            }
+            for t in tools
+        ],
+        "count": len(tools),
+    }
+
+
+@router.post("/mcp/tools/call")
+async def mcp_tools_call(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    name = str(body.get("name") or "").strip()
+    args = body.get("args") if isinstance(body.get("args"), dict) else {}
+    if not name:
+        return _api_error("name is required", "validation_error", 422)
+
+    result = _call_mcp_tool(name, args)
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=404 if result.get("error") == "mcp_tool_not_found" else 502)
+    return result
+
 @router.get("/health")
 def health(): return {"status":"healthy","provider":get_config()["provider"]}
 
@@ -1625,13 +2188,14 @@ async def generation_video(request: Request):
     try:
         from ..generation import generate_video
 
+        backend_name = str(body.get("backend") or "auto")
         video_bytes = generate_video(
             prompt=prompt,
             duration_seconds=float(body.get("duration_seconds") or 4.0),
             fps=int(body.get("fps") or 8),
             width=int(body.get("width") or 512),
             height=int(body.get("height") or 512),
-            backend=str(body.get("backend") or "wan_local"),
+            backend=backend_name,
         )
     except ValueError as exc:
         return _api_error(str(exc), "validation_error", 422)
@@ -1640,9 +2204,54 @@ async def generation_video(request: Request):
 
     return {
         "mime_type": "video/mp4",
+        "backend": backend_name,
+        "model": "sd3" if "sd3" in backend_name else "flux",
         "duration_seconds": float(body.get("duration_seconds") or 4.0),
         "video_b64": base64.b64encode(video_bytes).decode("ascii"),
     }
+
+
+@router.post("/generation/video/stream")
+async def generation_video_stream(request: Request):
+    """Generate video with realtime SSE progress events and final payload."""
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    prompt = (body.get("prompt") or "").strip()
+    if not prompt:
+        return _api_error("prompt is required", "validation_error", 422)
+
+    duration_seconds = float(body.get("duration_seconds") or 4.0)
+    fps = int(body.get("fps") or 8)
+    width = int(body.get("width") or 512)
+    height = int(body.get("height") or 512)
+    backend_name = str(body.get("backend") or "auto")
+
+    from ..generation import generate_video_stream as _generate_video_stream
+
+    async def _gen():
+        for event in _generate_video_stream(
+            prompt=prompt,
+            duration_seconds=duration_seconds,
+            fps=fps,
+            width=width,
+            height=height,
+            backend=backend_name,
+            include_frame_payload=False,
+        ):
+            payload = dict(event)
+            if payload.get("type") == "done" and payload.get("video_bytes"):
+                payload["video_b64"] = base64.b64encode(bytes(payload.pop("video_bytes"))).decode("ascii")
+            yield f"data: {json.dumps(payload)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/vision/understand")
@@ -1817,6 +2426,20 @@ async def collab_leave(room_id: str, request: Request):
     from ..collab import leave_room
     room_empty = leave_room(room_id=room_id, username=username)
     return {"ok": True, "room_empty": room_empty}
+
+
+@router.get("/collab/rooms/{room_id}/events")
+def collab_room_events(room_id: str, limit: int = 100):
+    from ..collab import get_room_events
+    events = get_room_events(room_id=room_id, limit=limit)
+    return {"events": events, "count": len(events)}
+
+
+@router.post("/collab/rooms/reload")
+def collab_reload_rooms_cache():
+    from ..collab import reload_rooms_from_store
+    loaded = reload_rooms_from_store()
+    return {"ok": True, "loaded": loaded}
 
 
 @router.delete("/collab/rooms/{room_id}")
@@ -2532,6 +3155,10 @@ def get_safety_audit(
         ]
 
     events = events_with_severity[-limit:]
+    from ..db import verify_safety_audit_entries
+    integrity = {"ok": None, "checked": 0, "broken_at": None, "head_hash": None}
+    if not (session_id or event_type or severity):
+        integrity = verify_safety_audit_entries(limit=5000)
     return {
         "events": events,
         "total": len(events_with_severity),
@@ -2539,6 +3166,7 @@ def get_safety_audit(
         "event_type": event_type or None,
         "severity": severity or None,
         "filtered": bool(session_id or event_type or severity),
+        "integrity": integrity,
     }
 
 @router.get("/personas/legacy")
@@ -2621,60 +3249,14 @@ _BENCHMARK_PROBES = [
 
 @router.post("/benchmark/run")
 async def benchmark_run(request: Request):
-    """Run a lightweight probe suite against all available providers and store results.
-
-    Returns per-provider latency and response length for each probe.
-    POST body is optional; set ``providers`` (list) to limit which providers to benchmark.
-    """
-    import time as _t
-    from ..db import save_benchmark_result
-    from ..agent import _call_single, _has_key, PROVIDERS, _is_rate_limited
-
+    """Run a lightweight probe suite against all available providers and store results."""
+    from ..benchmark import run_benchmark_probes
     body = {}
     try:
         body = await request.json()
     except Exception:
         pass
-
-    requested_providers = body.get("providers") or []
-    available = [
-        pid for pid, cfg in PROVIDERS.items()
-        if _has_key(cfg) and not _is_rate_limited(pid)
-    ]
-    target_providers = [p for p in requested_providers if p in available] or available
-
-    results = []
-    for pid in target_providers:
-        cfg = PROVIDERS.get(pid, {})
-        model_id = str(cfg.get("model") or "").strip()
-        for probe_name, probe_text in _BENCHMARK_PROBES:
-            t0 = _t.time()
-            try:
-                resp = _call_single(pid, [{"role": "user", "content": probe_text}])
-                latency_ms = (_t.time() - t0) * 1000
-                text = resp.get("content") or str(resp)
-                save_benchmark_result(
-                    pid,
-                    probe_name,
-                    latency_ms,
-                    len(text),
-                    model=model_id,
-                    task_type=probe_name,
-                )
-                results.append({
-                    "provider": pid, "probe": probe_name,
-                    "model": model_id,
-                    "latency_ms": round(latency_ms, 1), "response_len": len(text),
-                    "ok": True,
-                })
-            except Exception as exc:
-                results.append({
-                    "provider": pid, "probe": probe_name,
-                    "model": model_id,
-                    "latency_ms": None, "response_len": 0,
-                    "ok": False, "error": str(exc)[:120],
-                })
-    return {"results": results}
+    return run_benchmark_probes(requested_providers=body.get("providers") or [])
 
 
 @router.get("/benchmark/results")
@@ -2687,75 +3269,22 @@ def benchmark_results():
 @router.get("/benchmark/history")
 def benchmark_history(provider: str = "", model: str = "", task_type: str = "", limit: int = 500):
     """Return benchmark history with optional provider/model/task filters."""
-    from ..db import load_benchmark_results
-
-    rows = load_benchmark_results(limit=max(1, min(int(limit or 500), 5000)))
-    provider_q = provider.strip().lower()
-    model_q = model.strip().lower()
-    task_q = task_type.strip().lower()
-
-    filtered = []
-    for row in rows:
-        p = str(row.get("provider") or "").strip().lower()
-        m = str(row.get("model") or "").strip().lower()
-        t = str(row.get("task_type") or row.get("probe") or "chat").strip().lower()
-        if provider_q and p != provider_q:
-            continue
-        if model_q and m != model_q:
-            continue
-        if task_q and t != task_q:
-            continue
-        filtered.append(row)
-
-    latency_values = [float(r.get("latency_ms") or 0.0) for r in filtered if float(r.get("latency_ms") or 0.0) > 0.0]
-    avg_latency = (sum(latency_values) / len(latency_values)) if latency_values else 0.0
-    trend = "stable"
-    if len(latency_values) >= 2:
-        half = max(1, len(latency_values) // 2)
-        recent = latency_values[:half]
-        older = latency_values[half:]
-        if older:
-            delta = (sum(recent) / len(recent)) - (sum(older) / len(older))
-            if delta < -10:
-                trend = "improving"
-            elif delta > 10:
-                trend = "degrading"
-
-    return {
-        "results": filtered,
-        "summary": {
-            "count": len(filtered),
-            "avg_latency_ms": round(avg_latency, 2),
-            "trend": trend,
-        },
-    }
+    from ..benchmark import get_benchmark_history
+    return get_benchmark_history(provider=provider, model=model, task_type=task_type, limit=limit)
 
 
 @router.get("/benchmark/leaderboard")
 def benchmark_leaderboard(sort_by: str = "task_type", limit: int = 20, provider: str = ""):
     """Return ranked benchmark leaderboard entries."""
-    from ..leaderboard import get_leaderboard
+    from ..benchmark import get_benchmark_leaderboard
+    return get_benchmark_leaderboard(sort_by=sort_by, limit=limit, provider=provider)
 
-    entries = get_leaderboard(sort_by=sort_by, limit=limit, provider_filter=provider or None)
-    return {
-        "entries": [
-            {
-                "model": e.model,
-                "provider": e.provider,
-                "task_type": e.task_type,
-                "quality_score": e.quality_score,
-                "approval_rate": e.approval_rate,
-                "avg_latency_ms": e.avg_latency_ms,
-                "p95_latency_ms": e.p95_latency_ms,
-                "cost_per_1k_tokens": e.cost_per_1k_tokens,
-                "safety_pass_rate": e.safety_pass_rate,
-                "total_requests": e.total_requests,
-                "last_updated": e.last_updated,
-            }
-            for e in entries
-        ],
-        "sort_by": sort_by,
-    }
+
+@router.get("/benchmark/tradeoff")
+def benchmark_tradeoff(days: int = 14, limit: int = 2000):
+    """Return per-model cost-quality-latency tradeoff aggregates for dashboard visualization."""
+    from ..benchmark import get_benchmark_tradeoff
+    return get_benchmark_tradeoff(days=days, limit=limit)
 
 
 # ── Consensus reasoning endpoint ──────────────────────────────────────────────
@@ -5793,6 +6322,69 @@ def _feedback_rows_to_sharegpt(rows: list[dict]) -> list[dict]:
     return out
 
 
+def _derive_test_tags(prompt: str, response: str) -> list[str]:
+    text = f"{prompt} {response}".lower()
+    tags: list[str] = []
+    if any(k in text for k in ("code", "python", "bug", "refactor", "function")):
+        tags.append("coding")
+    if any(k in text for k in ("reason", "logic", "why", "explain", "math")):
+        tags.append("reasoning")
+    if any(k in text for k in ("policy", "safe", "guardrail", "compliance")):
+        tags.append("safety")
+    if any(k in text for k in ("rag", "retrieve", "document", "source")):
+        tags.append("retrieval")
+    return tags or ["general"]
+
+
+def _keywords_from_response(response: str, limit: int = 6) -> list[str]:
+    counts: dict[str, int] = {}
+    for token in str(response or "").lower().replace("\n", " ").split(" "):
+        clean = "".join(ch for ch in token if ch.isalnum())
+        if len(clean) < 4:
+            continue
+        counts[clean] = counts.get(clean, 0) + 1
+    ranked = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)
+    return [word for word, _ in ranked[: max(1, limit)]]
+
+
+def _build_auto_test_cases(rows: list[dict], max_cases: int = 100) -> list[dict]:
+    cases: list[dict] = []
+    seen: set[str] = set()
+    for row in rows:
+        prompt = str(row.get("prompt") or "").strip()
+        response = str(row.get("response") or "").strip()
+        if len(prompt) < 12 or len(response) < 12:
+            continue
+        key = f"{prompt[:160]}::{response[:160]}"
+        if key in seen:
+            continue
+        seen.add(key)
+        expected_keywords = _keywords_from_response(response, limit=5)
+        case_id = f"atc_{uuid.uuid4().hex[:10]}"
+        cases.append(
+            {
+                "id": case_id,
+                "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "prompt": prompt[:2000],
+                "expected_keywords": expected_keywords,
+                "tags": _derive_test_tags(prompt, response),
+                "source": {
+                    "trace_id": row.get("id"),
+                    "chat_id": row.get("chat_id"),
+                    "message_idx": row.get("message_idx"),
+                    "provider": row.get("provider"),
+                    "model": row.get("model"),
+                },
+            }
+        )
+        if len(cases) >= max_cases:
+            break
+    return cases
+
+
+_AUTO_TEST_CASES_KEY = "auto_generated_test_cases"
+
+
 @router.get("/debug/profile-pack")
 def debug_profile_pack(persona: str = "", sid: str = "", use_session_dir: bool = False):
     """Debug view for runtime-resolved profile layers and precedence."""
@@ -5936,6 +6528,101 @@ def feedback_stats():
     return stats
 
 
+@router.post("/agent/test-cases/generate")
+async def generate_test_cases_from_production(request: Request):
+    """Generate reusable test cases from opt-in production traces/feedback."""
+    body = await _read_json_body(request, "invalid JSON body")
+    max_cases = max(1, min(int(body.get("max_cases") or 100), 1000))
+    source_limit = max(1, min(int(body.get("source_limit") or 2000), 10000))
+    include_reaction_only = bool(body.get("include_reaction_only", True))
+
+    trace_rows = _load_feedback_trace_events(limit=source_limit)
+    if not trace_rows and include_reaction_only:
+        from ..db import load_feedback_export
+        for item in load_feedback_export(limit=source_limit):
+            trace_rows.append(
+                {
+                    "id": f"feedback_{item.get('chat_id')}:{item.get('message_idx')}",
+                    "chat_id": item.get("chat_id"),
+                    "message_idx": item.get("message_idx"),
+                    "prompt": f"Message reaction context for chat {item.get('chat_id')}",
+                    "response": str(item.get("reaction") or ""),
+                    "provider": item.get("provider"),
+                    "model": item.get("model"),
+                }
+            )
+
+    cases = _build_auto_test_cases(trace_rows, max_cases=max_cases)
+    db_save_pref(_AUTO_TEST_CASES_KEY, json.dumps(cases))
+    return {
+        "generated": len(cases),
+        "source_rows": len(trace_rows),
+        "stored_key": _AUTO_TEST_CASES_KEY,
+        "cases": cases,
+    }
+
+
+@router.get("/agent/test-cases")
+def list_generated_test_cases(limit: int = 200):
+    raw = db_load_pref(_AUTO_TEST_CASES_KEY, "[]")
+    try:
+        rows = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+    except Exception:
+        rows = []
+    safe_limit = max(1, min(int(limit or 200), 2000))
+    return {"cases": rows[:safe_limit], "total": len(rows)}
+
+
+@router.post("/agent/test-cases/run")
+async def run_generated_test_cases(request: Request):
+    body = await _read_json_body(request, "invalid JSON body")
+    limit = max(1, min(int(body.get("limit") or 20), 200))
+
+    raw = db_load_pref(_AUTO_TEST_CASES_KEY, "[]")
+    try:
+        cases = json.loads(raw) if isinstance(raw, str) else list(raw or [])
+    except Exception:
+        cases = []
+    cases = cases[:limit]
+
+    if not cases:
+        return {"total": 0, "passed": 0, "failed": 0, "results": []}
+
+    results: list[dict] = []
+    for case in cases:
+        prompt = str(case.get("prompt") or "").strip()
+        expected_keywords = [str(k).lower() for k in (case.get("expected_keywords") or []) if str(k).strip()]
+        if not prompt:
+            continue
+        try:
+            run = run_agent_task(prompt, history=[])
+            answer = str(run.get("result") or "")
+            answer_l = answer.lower()
+            hits = [kw for kw in expected_keywords if kw in answer_l]
+            pass_ratio = (len(hits) / len(expected_keywords)) if expected_keywords else 0.0
+            passed = pass_ratio >= 0.4
+            results.append(
+                {
+                    "id": case.get("id"),
+                    "passed": passed,
+                    "match_ratio": round(pass_ratio, 3),
+                    "hits": hits,
+                    "missing": [kw for kw in expected_keywords if kw not in hits],
+                }
+            )
+        except Exception as exc:
+            results.append({"id": case.get("id"), "passed": False, "error": str(exc)[:240]})
+
+    passed = sum(1 for r in results if r.get("passed"))
+    return {
+        "total": len(results),
+        "passed": passed,
+        "failed": len(results) - passed,
+        "pass_pct": round((passed / max(1, len(results))) * 100.0, 2),
+        "results": results,
+    }
+
+
 # ── Sprint F: Specialist Agent Library ───────────────────────────────────────
 
 @router.get("/agents")
@@ -6009,6 +6696,56 @@ def get_architecture_blueprint(name: str, version: int = 0):
     if not data:
         return _api_error(f"architecture blueprint '{name}' not found", "not_found", 404)
     return data
+
+
+@router.get("/architecture/blueprints/{name}/versions")
+def list_architecture_blueprint_versions(name: str, limit: int = 100):
+    from ..db import list_architecture_blueprints as db_list_architecture_blueprints
+
+    rows = db_list_architecture_blueprints(name=name, limit=max(1, min(int(limit), 500)))
+    versions = [r for r in rows if str(r.get("name") or "") == name]
+    versions.sort(key=lambda r: int(r.get("version") or 0), reverse=True)
+    return {
+        "name": name,
+        "versions": versions,
+        "latest_version": versions[0].get("version") if versions else None,
+        "total": len(versions),
+    }
+
+
+@router.post("/architecture/blueprints/{name}/activate")
+async def activate_architecture_blueprint_version(name: str, request: Request):
+    from ..db import load_architecture_blueprint, save_pref as _save_pref
+
+    body = await _read_json_body(request, "invalid JSON body")
+    version = int(body.get("version") or 0)
+    if version <= 0:
+        return _api_error("version must be a positive integer", "validation_error", 422)
+
+    bp = load_architecture_blueprint(name=name, version=version)
+    if not bp:
+        return _api_error(f"architecture blueprint '{name}' version {version} not found", "not_found", 404)
+
+    marker = {
+        "name": name,
+        "version": version,
+        "activated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "activated_by": str(body.get("actor") or body.get("username") or "system"),
+    }
+    _save_pref(f"arch_bp:{name}:active", json.dumps(marker))
+    return {"ok": True, "active": marker, "blueprint": bp}
+
+
+@router.get("/architecture/blueprints/{name}/active")
+def get_architecture_blueprint_active(name: str):
+    raw = db_load_pref(f"arch_bp:{name}:active", "")
+    if not raw:
+        return {"name": name, "active": None}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = None
+    return {"name": name, "active": parsed}
 
 
 @router.get("/architecture/registry/{name}")
@@ -7779,6 +8516,11 @@ async def v1_audio_transcriptions(request: Request):
     file_field = form.get("file")
     language = str(form.get("language", "")) or None
     response_format = str(form.get("response_format", "json"))
+    include_diarization = str(form.get("include_diarization", "false")).lower() == "true"
+    include_speaker_labels = str(form.get("include_speaker_labels", "false")).lower() == "true"
+    include_analysis = str(form.get("include_analysis", "false")).lower() == "true"
+    voice_profile_field = form.get("voice_profile")
+    voice_profile_b64 = form.get("voice_profile_base64")
 
     if file_field is None:
         return _v1_error("file is required", "invalid_request_error", 422)
@@ -7787,7 +8529,7 @@ async def v1_audio_transcriptions(request: Request):
     mime_type = getattr(file_field, "content_type", None) or "audio/wav"
 
     try:
-        from ..audio import AudioProviderError, transcribe_audio
+        from ..audio import AudioProviderError, analyse_audio, diarize_audio, identify_speaker, transcribe_audio
 
         result = transcribe_audio(audio_bytes, mime_type=mime_type, language=language, backend="auto")
     except AudioProviderError as exc:
@@ -7799,13 +8541,42 @@ async def v1_audio_transcriptions(request: Request):
 
     if response_format == "text":
         return result.get("text", "")
-    return {
+
+    profile_bytes = None
+    try:
+        if voice_profile_field is not None and hasattr(voice_profile_field, "read"):
+            profile_bytes = await voice_profile_field.read()  # type: ignore[union-attr]
+        elif voice_profile_b64:
+            profile_bytes = base64.b64decode(str(voice_profile_b64))
+    except Exception:
+        return _v1_error("invalid voice profile", "invalid_request_error", 422)
+
+    payload = {
         "text": result.get("text", ""),
         "language": result.get("language", language or "en"),
         "duration": result.get("duration_seconds", 0.0),
         "segments": result.get("segments", []),
         "backend": result.get("backend", "unknown"),
     }
+
+    diarization = None
+    if include_diarization or include_speaker_labels:
+        diarization = diarize_audio(audio_bytes)
+        payload["diarization"] = diarization
+        if diarization.get("ok"):
+            payload["transcript_with_speakers"] = "\n".join(
+                f"{segment.get('speaker', 'SPEAKER_01')}: {str(segment.get('text', '') or '').strip()}"
+                for segment in diarization.get("segments", [])
+                if str(segment.get("text", "") or "").strip()
+            )
+
+    if profile_bytes is not None or include_speaker_labels:
+        payload["speaker_identification"] = identify_speaker(audio_bytes, voice_profile_bytes=profile_bytes)
+
+    if include_analysis:
+        payload["analysis"] = analyse_audio(audio_bytes, voice_profile_bytes=profile_bytes)
+
+    return payload
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -9618,57 +10389,20 @@ async def ollama_benchmark(request: Request):
     """Run a latency benchmark against one or more local Ollama models.
     POST body: {"models": ["llama3.2:3b"], "prompt": "Say hello.", "runs": 3}
     """
-    import requests as _req, time as _t
+    from ..benchmark import run_ollama_benchmark
     try:
         body = await request.json()
     except Exception:
         return _api_error("invalid JSON body", "validation_error", 400)
-
-    models = body.get("models") or []
-    if not models:
-        # Default: benchmark all locally available models
-        try:
-            r = _req.get(f"{_ollama_base()}/v1/models", timeout=5)
-            if r.status_code == 200:
-                models = [m["id"] for m in r.json().get("data", [])]
-        except Exception:
-            pass
-    if not models:
-        return _api_error("no models specified and no local models found", "validation_error", 422)
-
-    prompt = str(body.get("prompt", "Say hello in one sentence."))
-    runs = max(1, min(int(body.get("runs", 3)), 10))
-    base = _ollama_base()
-
-    results = []
-    for model_name in models[:10]:  # cap at 10 models
-        latencies = []
-        error = None
-        for _ in range(runs):
-            t0 = _t.time()
-            try:
-                r = _req.post(
-                    f"{base}/v1/chat/completions",
-                    json={"model": model_name,
-                          "messages": [{"role": "user", "content": prompt}],
-                          "max_tokens": 64, "stream": False},
-                    timeout=60,
-                )
-                r.raise_for_status()
-                latencies.append(round((_t.time() - t0) * 1000))
-            except Exception as exc:
-                error = str(exc)
-                break
-        results.append({
-            "model": model_name,
-            "runs": len(latencies),
-            "avg_ms": round(sum(latencies) / len(latencies)) if latencies else None,
-            "min_ms": min(latencies, default=None),
-            "max_ms": max(latencies, default=None),
-            "error": error,
-        })
-
-    return {"object": "benchmark_results", "models": results, "prompt": prompt}
+    result = run_ollama_benchmark(
+        models=body.get("models") or None,
+        prompt=str(body.get("prompt", "Say hello in one sentence.")),
+        runs=int(body.get("runs", 3)),
+        ollama_base=_ollama_base(),
+    )
+    if "error" in result and "models" not in result:
+        return _api_error(result["error"], "validation_error", 422)
+    return result
 
 
 # ── GGUF model file management ────────────────────────────────────────────────
@@ -11783,3 +12517,1769 @@ async def import_architecture_blueprint(request: Request):
     return {"blueprint": created, "status": "imported"}
 
 
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  NEW ROUTES — Sections 17-25 feature implementations
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── S3/R2 Backup (Section 17.2) ───────────────────────────────────────────────
+
+@router.post("/backup/s3/configure")
+async def api_backup_s3_configure(request: Request):
+    from ..object_storage import configure_s3
+    body = await request.json()
+    result = configure_s3(body)
+    if not result["ok"]:
+        return _api_error(result.get("error", "S3 config failed"), status_code=400)
+    return result
+
+
+@router.post("/backup/s3/push")
+async def api_backup_s3_push():
+    from ..object_storage import push_db_to_s3
+    result = push_db_to_s3()
+    if not result["ok"]:
+        return _api_error(result.get("error", "S3 push failed"), status_code=500)
+    return result
+
+
+@router.post("/backup/s3/restore")
+async def api_backup_s3_restore(request: Request):
+    from ..object_storage import restore_db_from_s3
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    result = restore_db_from_s3(key=body.get("key"))
+    if not result["ok"]:
+        return _api_error(result.get("error", "S3 restore failed"), status_code=500)
+    return result
+
+
+@router.get("/backup/s3/backups")
+async def api_backup_s3_list(limit: int = 20):
+    from ..object_storage import list_s3_backups
+    return {"backups": list_s3_backups(limit=limit)}
+
+
+# ── Notion / Obsidian Export (Section 17.3) ───────────────────────────────────
+
+@router.post("/export/notion/{conversation_id}")
+async def api_export_notion(conversation_id: str, request: Request):
+    from ..object_storage import export_chat_to_notion
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    chat = body.get("chat") or db_load_chat(conversation_id) or {}
+    result = export_chat_to_notion(chat)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "Notion export failed"), status_code=500)
+    return result
+
+
+@router.post("/export/obsidian/{conversation_id}")
+async def api_export_obsidian(conversation_id: str, request: Request):
+    from ..object_storage import export_chat_to_obsidian
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    chat = body.get("chat") or db_load_chat(conversation_id) or {}
+    result = export_chat_to_obsidian(chat)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "Obsidian export failed"), status_code=500)
+    return result
+
+
+@router.post("/export/obsidian/workspace")
+async def api_export_obsidian_workspace(request: Request):
+    from ..object_storage import export_workspace_to_obsidian
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    chats = body.get("chats") or db_load_chats()
+    result = export_workspace_to_obsidian(chats)
+    return result
+
+
+# ── Nexus Hub — multi-instance management (Section 18.1) ─────────────────────
+
+@router.post("/hub/instances")
+async def api_hub_register(request: Request):
+    from ..nexus_hub import register_instance
+    body = await request.json()
+    result = register_instance(**body)
+    return result
+
+
+@router.get("/hub/instances")
+async def api_hub_list(include_offline: bool = True):
+    from ..nexus_hub import list_instances
+    return {"instances": list_instances(include_offline=include_offline)}
+
+
+@router.get("/hub/instances/{instance_id}")
+async def api_hub_get(instance_id: str):
+    from ..nexus_hub import get_instance
+    inst = get_instance(instance_id)
+    if not inst:
+        return _api_error("Instance not found", status_code=404)
+    return inst
+
+
+@router.delete("/hub/instances/{instance_id}")
+async def api_hub_deregister(instance_id: str):
+    from ..nexus_hub import deregister_instance
+    ok = deregister_instance(instance_id)
+    return {"ok": ok}
+
+
+@router.post("/hub/instances/{instance_id}/ping")
+async def api_hub_ping(instance_id: str):
+    from ..nexus_hub import ping_instance
+    return await ping_instance(instance_id)
+
+
+@router.post("/hub/instances/{instance_id}/passthrough")
+async def api_hub_passthrough(instance_id: str, request: Request):
+    from ..nexus_hub import passthrough_request
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    method  = body.get("method", "GET")
+    path    = body.get("path", "/v1/health")
+    payload = body.get("body")
+    headers = body.get("headers", {})
+    result  = await passthrough_request(instance_id, method, path, payload, headers)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "Passthrough failed"), status_code=502)
+    return result
+
+
+# ── Nexus Systems passthrough (Section 25.3) ──────────────────────────────────
+
+@router.post("/nexus/passthrough")
+async def api_nexus_systems_passthrough(request: Request):
+    from ..nexus_hub import nexus_systems_passthrough
+    body = await request.json()
+    method   = body.get("method", "GET")
+    endpoint = body.get("endpoint", "/")
+    payload  = body.get("body")
+    result   = await nexus_systems_passthrough(method, endpoint, payload)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "Nexus Systems passthrough failed"), status_code=502)
+    return result
+
+
+# ── Federated learning (Section 18.3) ─────────────────────────────────────────
+
+@router.post("/federated/round")
+async def api_federated_round(request: Request):
+    from ..federated import compute_and_submit_update
+    body = await request.json()
+    samples = body.get("samples", [])
+    try:
+        global_round = int(body.get("global_round", 0))
+    except Exception:
+        return _api_error("global_round must be an integer", "validation_error", 422)
+
+    result = compute_and_submit_update(samples, global_round)
+    payload = result.to_dict()
+    status = str(payload.get("status") or "")
+    if status == "disabled":
+        return JSONResponse(payload, status_code=503)
+    if status == "failed":
+        return JSONResponse(payload, status_code=400)
+    return payload
+
+
+@router.get("/federated/status")
+async def api_federated_status():
+    from ..federated import get_federation_status
+    return get_federation_status()
+
+
+@router.get("/federated/rounds")
+async def api_federated_rounds(limit: int = 20):
+    from ..federated import list_rounds
+    return {"rounds": list_rounds(limit=limit)}
+
+
+# ── Drift detection (Sections 19.3, 20.2) ────────────────────────────────────
+
+@router.get("/admin/drift")
+async def api_drift_summary():
+    from ..drift_detector import get_drift_summary
+    return get_drift_summary()
+
+
+@router.get("/admin/drift/events")
+async def api_drift_events(plane: str = "all", severity: str = "all", limit: int = 50):
+    from ..drift_detector import list_drift_events
+    return {"events": list_drift_events(plane=plane, severity=severity, limit=limit)}
+
+
+@router.post("/admin/drift/baseline/quality")
+async def api_drift_baseline_quality(request: Request):
+    from ..drift_detector import set_quality_baseline
+    body = await request.json()
+    set_quality_baseline(body)
+    return {"ok": True, "message": "Quality baseline updated"}
+
+
+@router.post("/admin/drift/baseline/safety")
+async def api_drift_baseline_safety(request: Request):
+    from ..drift_detector import update_safety_baseline
+    body = await request.json()
+    update_safety_baseline(body)
+    return {"ok": True, "message": "Safety baseline updated"}
+
+
+@router.post("/admin/drift/check/architecture")
+async def api_drift_check_arch():
+    from ..drift_detector import check_architecture_drift
+    result = check_architecture_drift()
+    return result
+
+
+@router.get("/admin/drift/weekly")
+async def api_drift_weekly_results():
+    from ..drift_detector import get_weekly_results
+    return {"results": get_weekly_results()}
+
+
+@router.post("/admin/drift/weekly/run")
+async def api_drift_weekly_run():
+    from ..drift_detector import run_weekly_quality_benchmark
+    result = run_weekly_quality_benchmark()
+    return result
+
+
+# ── MoE routing + reasoning modes (Section 20.1) ─────────────────────────────
+
+@router.post("/routing/moe")
+async def api_moe_route(request: Request):
+    from ..moe_router import route_to_expert
+    body = await request.json()
+    prompt     = str(body.get("prompt", ""))
+    persona    = body.get("persona", "nexus")
+    complexity = int(body.get("complexity", 5))
+    return route_to_expert(prompt, persona=persona, complexity=complexity)
+
+
+@router.post("/agent/hypothesis")
+async def api_hypothesis(request: Request):
+    from ..moe_router import build_hypothesis_prompt
+    from ..agent import call_llm_with_fallback
+    body     = await request.json()
+    question = str(body.get("question", ""))
+    context  = str(body.get("context", ""))
+    prompt   = build_hypothesis_prompt(question, context)
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": prompt}], task="hypothesis"
+    )
+    return {"reasoning": resp.get("content", ""), "provider": provider}
+
+
+@router.post("/agent/socratic")
+async def api_socratic(request: Request):
+    from ..moe_router import build_socratic_prompt
+    from ..agent import call_llm_with_fallback
+    body  = await request.json()
+    topic = str(body.get("topic", ""))
+    depth = int(body.get("depth", 3))
+    prompt = build_socratic_prompt(topic, depth=depth)
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": prompt}], task="socratic"
+    )
+    return {"reasoning": resp.get("content", ""), "provider": provider}
+
+
+@router.post("/agent/verify")
+async def api_formal_proof(request: Request):
+    from ..moe_router import build_formal_proof_prompt
+    from ..agent import call_llm_with_fallback
+    body       = await request.json()
+    statement  = str(body.get("statement", ""))
+    proof_type = str(body.get("proof_type", "direct"))
+    prompt     = build_formal_proof_prompt(statement, proof_type=proof_type)
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": prompt}], task="formal_proof"
+    )
+    return {"proof": resp.get("content", ""), "provider": provider}
+
+
+@router.get("/reasoning/sessions")
+async def api_reasoning_sessions(limit: int = 50):
+    from ..moe_router import list_reasoning_sessions
+    return {"sessions": list_reasoning_sessions(limit=limit)}
+
+
+# ── Team policies + RBAC + compliance (Sections 21.1, 21.2) ──────────────────
+
+@router.post("/admin/team-policies")
+async def api_create_policy(request: Request):
+    from ..team_policies import create_policy
+    body    = await request.json()
+    team_id = str(body.pop("team_id", "default"))
+    name    = str(body.pop("name", "Unnamed Policy"))
+    result  = create_policy(team_id, name, **body)
+    return result
+
+
+@router.get("/admin/team-policies")
+async def api_list_policies(team_id: str = "default"):
+    from ..team_policies import list_policies
+    return {"policies": list_policies(team_id=team_id)}
+
+
+@router.get("/admin/team-policies/{policy_id}")
+async def api_get_policy(policy_id: str):
+    from ..team_policies import get_policy
+    p = get_policy(policy_id)
+    if not p:
+        return _api_error("Policy not found", status_code=404)
+    return p
+
+
+@router.put("/admin/team-policies/{policy_id}")
+async def api_update_policy(policy_id: str, request: Request):
+    from ..team_policies import update_policy
+    body   = await request.json()
+    result = update_policy(policy_id, updates=body)
+    if not result:
+        return _api_error("Policy not found", status_code=404)
+    return result
+
+
+@router.delete("/admin/team-policies/{policy_id}")
+async def api_delete_policy(policy_id: str):
+    from ..team_policies import delete_policy
+    ok = delete_policy(policy_id)
+    return {"ok": ok}
+
+
+@router.post("/admin/team-policies/evaluate")
+async def api_evaluate_policy(request: Request):
+    from ..team_policies import evaluate_policy
+    body = await request.json()
+    team_id = str(body.get("team_id", "default"))
+    tool_action = str(body.get("tool_action", ""))
+    username = str(body.get("user") or body.get("username") or "")
+    role = str(body.get("role", "user"))
+    context = body.get("context", {}) or {}
+    model = str(body.get("model") or context.get("model") or "").strip() or None
+    region = str(body.get("region") or context.get("region") or "").strip() or None
+    return evaluate_policy(
+        team_id=team_id,
+        tool_action=tool_action,
+        model=model,
+        region=region,
+        username=username,
+        role=role,
+        context=context,
+    )
+
+
+@router.get("/admin/roles")
+async def api_list_roles():
+    from ..team_policies import ROLE_HIERARCHY
+    return {"roles": list(ROLE_HIERARCHY.keys())}
+
+
+@router.post("/admin/roles/check")
+async def api_check_role(request: Request):
+    from ..team_policies import role_can
+    body          = await request.json()
+    actor_role    = str(body.get("actor_role", "user"))
+    required_role = str(body.get("required_role", "admin"))
+    return {"can": role_can(actor_role, required_role)}
+
+
+@router.get("/admin/compliance")
+async def api_get_compliance():
+    from ..team_policies import get_compliance_config
+    return get_compliance_config()
+
+
+@router.put("/admin/compliance")
+async def api_update_compliance(request: Request):
+    from ..team_policies import update_compliance_config
+    body = await request.json()
+    try:
+        return update_compliance_config(body)
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.get("/admin/compliance/connectors/{connector}")
+async def api_get_compliance_connector(connector: str):
+    from ..team_policies import get_managed_connector_config
+    try:
+        return get_managed_connector_config(connector)
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.put("/admin/compliance/connectors/{connector}")
+async def api_update_compliance_connector(connector: str, request: Request):
+    from ..team_policies import update_managed_connector_config
+    body = await request.json()
+    try:
+        return update_managed_connector_config(
+            connector=connector,
+            enabled=body.get("enabled") if "enabled" in body else None,
+            providers=body.get("providers") if isinstance(body.get("providers"), list) else None,
+        )
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.post("/admin/compliance/connectors/{connector}/test")
+async def api_test_compliance_connector(connector: str, request: Request):
+    from ..team_policies import test_managed_connector
+    body = await request.json()
+    return test_managed_connector(
+        connector=connector,
+        provider=str(body.get("provider", "")),
+        region=str(body.get("region", "")),
+    )
+
+
+@router.get("/admin/deployment-profile")
+async def api_get_deployment_profile():
+    """Return the active deployment profile and its key settings."""
+    from ..deployment_profiles import get_profile_summary
+    return get_profile_summary()
+
+
+@router.get("/admin/deployment-profiles")
+async def api_list_deployment_profiles():
+    """List all built-in deployment profiles."""
+    from ..deployment_profiles import list_profiles
+    return {"profiles": list_profiles()}
+
+
+@router.post("/admin/quota/departments")
+async def api_set_dept_quota(request: Request):
+    from ..team_policies import set_department_quota
+    body = await request.json()
+    dept = str(body.get("department", ""))
+    return set_department_quota(
+        department=dept,
+        daily_tokens=int(body.get("daily_tokens", 100000)),
+        monthly_cost_usd=float(body.get("monthly_cost_usd", 500.0)),
+        max_users=int(body.get("max_users", 50)),
+    )
+
+
+@router.get("/admin/quota/departments")
+async def api_list_dept_quotas():
+    from ..team_policies import list_department_quotas
+    return {"quotas": list_department_quotas()}
+
+
+@router.get("/admin/quota/departments/{department}")
+async def api_get_dept_quota(department: str):
+    from ..team_policies import get_department_quota
+    q = get_department_quota(department)
+    if not q:
+        return _api_error("Department not found", status_code=404)
+    return q
+
+
+@router.get("/admin/policy-violations")
+async def api_list_violations(team_id: str | None = None, limit: int = 100):
+    from ..team_policies import list_violations, list_policy_alerts
+    return {
+        "violations": list_violations(team_id=team_id, limit=limit),
+        "alerts": list_policy_alerts(team_id=team_id, status="open", limit=limit),
+    }
+
+
+@router.post("/admin/approval-workflows")
+async def api_create_workflow(request: Request):
+    from ..team_policies import create_approval_workflow
+    body      = await request.json()
+    action    = str(body.get("action", ""))
+    requestor = str(body.get("requestor", ""))
+    tiers     = body.get("custom_tiers")
+    return create_approval_workflow(action, requestor, custom_tiers=tiers)
+
+
+@router.get("/admin/approval-workflows")
+async def api_list_workflows(status: str | None = None, limit: int = 50):
+    from ..team_policies import list_workflows
+    return {"workflows": list_workflows(status=status, limit=limit)}
+
+
+@router.post("/admin/approval-workflows/{workflow_id}/advance")
+async def api_advance_workflow(workflow_id: str, request: Request):
+    from ..team_policies import advance_workflow
+    body = await request.json()
+    approver = str(body.get("approver", ""))
+    approver_role = str(body.get("approver_role", "admin"))
+    decision = str(body.get("decision", "approve"))
+    comment = str(body.get("comment", ""))
+    result = advance_workflow(workflow_id, approver, approver_role, decision, reason=comment)
+    if result.get("error") == "workflow not found":
+        return _api_error("Workflow not found", status_code=404)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "Workflow advance failed"), status_code=400)
+    return result
+
+
+@router.get("/admin/audit-log/export")
+async def api_audit_export(fmt: str = "json", limit: int = 500):
+    from ..db import verify_safety_audit_entries
+    from ..team_policies import build_audit_export
+    entries = db_load_safety_audit_entries(limit=limit)
+    content_bytes, content_type = build_audit_export(entries, fmt=fmt)
+    integrity = verify_safety_audit_entries(limit=limit)
+    if fmt == "csv":
+        from fastapi.responses import Response
+        return Response(
+            content=content_bytes,
+            media_type=content_type,
+            headers={
+                "Content-Disposition": "attachment; filename=audit.csv",
+                "X-Audit-Integrity": "ok" if integrity.get("ok") else "failed",
+            },
+        )
+    return {
+        "entries": entries,
+        "export": content_bytes.decode("utf-8"),
+        "format": fmt,
+        "content_type": content_type,
+        "integrity": integrity,
+    }
+
+
+# ── Browser automation (Section 23.1) ─────────────────────────────────────────
+
+@router.post("/browser/sessions")
+async def api_browser_create(request: Request):
+    from ..browser_agent import create_session
+    body = await request.json()
+    result = create_session(
+        start_url=str(body.get("start_url", "https://example.com")),
+        hitl_checkpoints=body.get("hitl_checkpoints", []),
+    )
+    return result
+
+
+@router.get("/browser/sessions")
+async def api_browser_list():
+    from ..browser_agent import list_sessions
+    return {"sessions": list_sessions()}
+
+
+@router.get("/browser/sessions/{session_id}")
+async def api_browser_get(session_id: str):
+    from ..browser_agent import get_session
+    s = get_session(session_id)
+    if not s:
+        return _api_error("Session not found", status_code=404)
+    return s
+
+
+@router.post("/browser/sessions/{session_id}/step")
+async def api_browser_step(session_id: str, request: Request):
+    from ..browser_agent import execute_step
+    body   = await request.json()
+    action = str(body.get("action", "navigate"))
+    params = body.get("params", {})
+    result = await execute_step(session_id, action, params)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "Step failed"), status_code=400)
+    return result
+
+
+@router.post("/browser/sessions/{session_id}/confirm")
+async def api_browser_confirm(session_id: str, request: Request):
+    from ..browser_agent import confirm_pending_step
+    body = await request.json()
+    approve = bool(body.get("approve", False))
+    actor = str(body.get("actor") or body.get("username") or "")
+    result = await confirm_pending_step(session_id=session_id, approve=approve, actor=actor)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "confirmation failed"), status_code=400)
+    return result
+
+
+@router.post("/browser/sessions/{session_id}/pause")
+async def api_browser_pause(session_id: str, request: Request):
+    from ..browser_agent import pause_session
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = str(body.get("reason") or "manual_pause")
+    result = pause_session(session_id=session_id, reason=reason)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "pause failed"), status_code=404)
+    return result
+
+
+@router.post("/browser/sessions/{session_id}/resume")
+async def api_browser_resume(session_id: str, request: Request):
+    from ..browser_agent import resume_session
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    replay_navigation = bool(body.get("replay_navigation", False))
+    result = resume_session(session_id=session_id, replay_navigation=replay_navigation)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "resume failed"), status_code=404)
+    return result
+
+
+@router.get("/browser/sessions/{session_id}/history")
+async def api_browser_history(session_id: str):
+    from ..browser_agent import get_navigation_history
+    history = get_navigation_history(session_id)
+    return {"history": history}
+
+
+@router.post("/browser/sessions/{session_id}/visual-elements")
+async def api_browser_visual_elements(session_id: str, request: Request):
+    from ..browser_agent import execute_step
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    params = {
+        "url": body.get("url"),
+        "max_elements": body.get("max_elements", 40),
+    }
+    result = await execute_step(session_id=session_id, action="detect_elements", params=params)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "visual element detection failed"), status_code=400)
+    return result
+
+
+@router.post("/browser/sessions/{session_id}/form-plan")
+async def api_browser_form_plan(session_id: str, request: Request):
+    from ..browser_agent import execute_step
+    body = await request.json()
+    result = await execute_step(
+        session_id=session_id,
+        action="queue_form_fill",
+        params={
+            "fields": body.get("fields") if isinstance(body.get("fields"), dict) else {},
+            "submit_selector": body.get("submit_selector"),
+            "form_selector": body.get("form_selector"),
+        },
+    )
+    if not result.get("ok"):
+        return _api_error(result.get("error", "form plan creation failed"), status_code=400)
+    return result
+
+
+@router.post("/browser/sessions/{session_id}/form-plan/{plan_id}/execute")
+async def api_browser_execute_form_plan(session_id: str, plan_id: str):
+    from ..browser_agent import execute_step
+    result = await execute_step(
+        session_id=session_id,
+        action="execute_form_plan",
+        params={"plan_id": plan_id},
+    )
+    if not result.get("ok"):
+        return _api_error(result.get("error", "form plan execution failed"), status_code=400)
+    return result
+
+
+# ── SLO dashboard (Section 24.1) ──────────────────────────────────────────────
+
+@router.get("/slo/dashboard")
+async def api_slo_dashboard():
+    from ..slo import get_slo_dashboard
+    return get_slo_dashboard()
+
+
+@router.post("/slo/latency")
+async def api_slo_record_latency(request: Request):
+    from ..slo import record_latency
+    body     = await request.json()
+    endpoint = str(body.get("endpoint", "unknown"))
+    latency  = float(body.get("latency_ms", 0))
+    success  = bool(body.get("success", True))
+    record_latency(endpoint, latency, success)
+    return {"ok": True}
+
+
+@router.get("/slo/hotspots")
+async def api_slo_hotspots(threshold_ms: float = 2000.0):
+    from ..slo import detect_latency_hotspots
+    return {"hotspots": detect_latency_hotspots(threshold_ms=threshold_ms)}
+
+
+@router.get("/slo/hardware-hint")
+async def api_slo_hardware_hint():
+    from ..slo import get_hardware_routing_hint
+    return get_hardware_routing_hint()
+
+
+# ── Team budgets + cost attribution (Sections 24.2, 24.3) ────────────────────
+
+@router.post("/billing/teams/{team_id}/budget")
+async def api_set_team_budget(team_id: str, request: Request):
+    from ..slo import set_team_budget
+    body = await request.json()
+    return set_team_budget(
+        team_id=team_id,
+        monthly_limit_usd=float(body.get("monthly_limit_usd", 100.0)),
+        daily_limit_usd=float(body.get("daily_limit_usd", 0.0)),
+        alert_threshold_pct=float(body.get("alert_threshold_pct", body.get("alert_at_pct", 80.0))),
+    )
+
+
+@router.get("/billing/teams/{team_id}/budget")
+async def api_get_team_budget(team_id: str):
+    from ..slo import get_team_budget
+    b = get_team_budget(team_id)
+    if not b:
+        return _api_error("Team budget not found", status_code=404)
+    return b
+
+
+@router.get("/billing/teams")
+async def api_list_team_budgets():
+    from ..slo import list_team_budgets
+    return {"budgets": list_team_budgets()}
+
+
+@router.get("/billing/alerts")
+async def api_list_budget_alerts():
+    from ..slo import list_budget_alerts
+    return {"alerts": list_budget_alerts()}
+
+
+@router.post("/billing/attribution")
+async def api_record_attribution(request: Request):
+    from ..slo import record_attribution
+    body = await request.json()
+    record_attribution(
+        team_id=str(body.get("team_id", "")),
+        department=str(body.get("department", "")),
+        user=str(body.get("user", "")),
+        cost_usd=float(body.get("cost_usd", 0.0)),
+        tokens=int(body.get("tokens", 0)),
+        model=str(body.get("model", "")),
+        endpoint=str(body.get("endpoint", "")),
+    )
+    return {"ok": True}
+
+
+@router.get("/billing/attribution/report")
+async def api_attribution_report(team_id: str | None = None,
+                                   department: str | None = None):
+    from ..slo import get_attribution_report
+    return get_attribution_report(team_id=team_id, department=department)
+
+
+@router.put("/billing/teams/{team_id}/capacity")
+async def api_set_reserved_capacity(team_id: str, request: Request):
+    from ..slo import set_reserved_capacity
+    body = await request.json()
+    return set_reserved_capacity(
+        team_id=team_id,
+        reserved_rps=float(body.get("reserved_rps", 0.0)),
+        max_concurrency=int(body.get("max_concurrency", 0)),
+        guarantee_tier=str(body.get("guarantee_tier", "standard")),
+        expires_at=str(body.get("expires_at", "")),
+    )
+
+
+@router.get("/billing/teams/{team_id}/capacity")
+async def api_get_reserved_capacity(team_id: str):
+    from ..slo import get_reserved_capacity
+    row = get_reserved_capacity(team_id)
+    if not row:
+        return _api_error("Reserved capacity not found", status_code=404)
+    return row
+
+
+@router.get("/billing/capacity")
+async def api_list_reserved_capacity():
+    from ..slo import list_reserved_capacity
+    return {"capacity": list_reserved_capacity()}
+
+
+@router.post("/billing/teams/{team_id}/capacity/check")
+async def api_check_rate_guarantee(team_id: str, request: Request):
+    from ..slo import check_rate_guarantee
+    body = await request.json()
+    return check_rate_guarantee(
+        team_id=team_id,
+        requested_rps=float(body.get("requested_rps", 0.0)),
+        requested_concurrency=int(body.get("requested_concurrency", 0)),
+    )
+
+
+@router.put("/billing/teams/{team_id}/spot")
+async def api_set_spot_policy(team_id: str, request: Request):
+    from ..slo import set_spot_policy
+    body = await request.json()
+    return set_spot_policy(
+        team_id=team_id,
+        enabled=bool(body.get("enabled", False)),
+        max_discount_pct=float(body.get("max_discount_pct", 50.0)),
+        fallback_on_preempt=bool(body.get("fallback_on_preempt", True)),
+        max_preemptions_per_hour=int(body.get("max_preemptions_per_hour", 2)),
+    )
+
+
+@router.get("/billing/teams/{team_id}/spot")
+async def api_get_spot_policy(team_id: str):
+    from ..slo import get_spot_policy
+    row = get_spot_policy(team_id)
+    if not row:
+        return _api_error("Spot policy not found", status_code=404)
+    return row
+
+
+@router.post("/billing/teams/{team_id}/spot/events")
+async def api_record_spot_event(team_id: str, request: Request):
+    from ..slo import record_spot_event
+    body = await request.json()
+    return record_spot_event(
+        team_id=team_id,
+        event_type=str(body.get("event_type", "preempted")),
+        details=body.get("details") if isinstance(body.get("details"), dict) else {},
+    )
+
+
+# ── Custom tool registry (Section 25.1) ───────────────────────────────────────
+
+@router.post("/tools/registry")
+async def api_tools_register(request: Request):
+    from ..marketplace_registry import register_tool
+    body = await request.json()
+    result = register_tool(**body)
+    return result
+
+
+@router.get("/tools/registry")
+async def api_tools_list(category: str | None = None):
+    from ..marketplace_registry import list_tools
+    return {"tools": list_tools(tag=category)}
+
+
+@router.get("/tools/registry/{tool_id}")
+async def api_tools_get(tool_id: str):
+    from ..marketplace_registry import get_tool
+    t = get_tool(tool_id)
+    if not t:
+        return _api_error("Tool not found", status_code=404)
+    return t
+
+
+@router.post("/tools/registry/{tool_id}/invoke")
+async def api_tools_invoke(tool_id: str, request: Request):
+    from ..marketplace_registry import invoke_custom_tool
+    body   = await request.json()
+    params = body.get("params", {})
+    result = await invoke_custom_tool(tool_id, params)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "Tool invocation failed"), status_code=400)
+    return result
+
+
+@router.delete("/tools/registry/{tool_id}")
+async def api_tools_delete(tool_id: str):
+    from ..marketplace_registry import deactivate_tool
+    ok = deactivate_tool(tool_id)
+    return {"ok": ok}
+
+
+# ── Marketplace connectors (Section 25.2) ─────────────────────────────────────
+
+@router.get("/marketplace/connectors")
+async def api_connectors_list(installed_only: bool = False):
+    from ..marketplace_registry import list_connectors
+    return {"connectors": list_connectors(installed_only=installed_only)}
+
+
+@router.get("/marketplace/connectors/{connector_id}")
+async def api_connectors_get(connector_id: str):
+    from ..marketplace_registry import get_connector
+    c = get_connector(connector_id)
+    if not c:
+        return _api_error("Connector not found", status_code=404)
+    return c
+
+
+@router.post("/marketplace/connectors/{connector_id}/install")
+async def api_connectors_install(connector_id: str, request: Request):
+    from ..marketplace_registry import install_connector
+    body   = await request.json()
+    config = body.get("config", {})
+    result = install_connector(connector_id, config=config)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "Install failed"), status_code=400)
+    return result
+
+
+@router.delete("/marketplace/connectors/{connector_id}/install")
+async def api_connectors_uninstall(connector_id: str):
+    from ..marketplace_registry import uninstall_connector
+    result = uninstall_connector(connector_id)
+    return result
+
+
+# ── Agent templates (Section 25.2) ───────────────────────────────────────────
+
+@router.post("/marketplace/templates")
+async def api_templates_publish(request: Request):
+    from ..marketplace_registry import publish_template
+    body   = await request.json()
+    result = publish_template(**body)
+    return result
+
+
+@router.get("/marketplace/templates")
+async def api_templates_list(category: str | None = None, tags: str | None = None):
+    from ..marketplace_registry import list_templates
+    tags_list = tags.split(",") if tags else None
+    return {"templates": list_templates(tag=category)}
+
+
+@router.get("/marketplace/templates/{template_id}")
+async def api_templates_get(template_id: str):
+    from ..marketplace_registry import get_template
+    t = get_template(template_id)
+    if not t:
+        return _api_error("Template not found", status_code=404)
+    return t
+
+
+@router.post("/marketplace/templates/{template_id}/deploy")
+async def api_templates_deploy(template_id: str, request: Request):
+    from ..marketplace_registry import deploy_template
+    body      = await request.json()
+    overrides = body.get("overrides", {})
+    result    = deploy_template(template_id)
+    if not result.get("ok"):
+        return _api_error(result.get("error", "Deploy failed"), status_code=400)
+    return result
+
+
+# ── Community personas (Section 25.2) ────────────────────────────────────────
+
+@router.post("/marketplace/personas")
+async def api_community_persona_publish(request: Request):
+    from ..marketplace_registry import publish_persona
+    body   = await request.json()
+    result = publish_persona(**body)
+    return result
+
+
+@router.get("/marketplace/personas")
+async def api_community_personas_list(tags: str | None = None):
+    from ..marketplace_registry import list_community_personas
+    tags_list = tags.split(",") if tags else None
+    return {"personas": list_community_personas(tag=tags_list[0] if tags_list else None)}
+
+
+@router.get("/marketplace/personas/{persona_id}")
+async def api_community_persona_get(persona_id: str):
+    from ..marketplace_registry import get_community_persona
+    p = get_community_persona(persona_id)
+    if not p:
+        return _api_error("Persona not found", status_code=404)
+    return p
+
+
+# ── Provider plugins (Section 25.2) ──────────────────────────────────────────
+
+@router.post("/providers/plugins")
+async def api_providers_plugin_register(request: Request):
+    from ..marketplace_registry import register_provider_plugin
+    body   = await request.json()
+    result = register_provider_plugin(**body)
+    return result
+
+
+@router.get("/providers/plugins")
+async def api_providers_plugins_list(active_only: bool = False):
+    from ..marketplace_registry import list_provider_plugins
+    return {"plugins": list_provider_plugins(active_only=active_only)}
+
+
+@router.post("/providers/plugins/{plugin_id}/activate")
+async def api_providers_plugin_activate(plugin_id: str, request: Request):
+    from ..marketplace_registry import activate_provider_plugin
+    body   = await request.json()
+    active = bool(body.get("active", True))
+    if not active:
+        from ..marketplace_registry import list_provider_plugins
+        # deactivation not yet implemented, return current state
+        return {"ok": False, "note": "Deactivation not yet implemented"}
+    result = activate_provider_plugin(plugin_id)
+    if not result:
+        return _api_error("Plugin not found", status_code=404)
+    return result
+
+
+# ── Vision extras — chart extraction + document understanding (Section 22) ────
+
+@router.post("/vision/extract-charts")
+async def api_vision_extract_charts(request: Request):
+    from ..vision import extract_charts_and_tables
+    import base64
+    body      = await request.json()
+    image_b64 = str(body.get("image_base64", ""))
+    mime_type = str(body.get("mime_type", "image/png"))
+    if not image_b64:
+        return _api_error("image_base64 required", status_code=422)
+    try:
+        image_bytes = base64.b64decode(image_b64)
+    except Exception:
+        return _api_error("Invalid base64 image", status_code=422)
+    return extract_charts_and_tables(image_bytes, mime_type=mime_type)
+
+
+@router.post("/documents/understand")
+async def api_documents_understand(request: Request):
+    from ..vision import understand_pdf, understand_office_doc
+    import base64
+    body      = await request.json()
+    file_b64  = str(body.get("file_base64", ""))
+    filename  = str(body.get("filename", "document.pdf"))
+    mime_type = str(body.get("mime_type", "application/pdf"))
+    if not file_b64:
+        return _api_error("file_base64 required", status_code=422)
+    try:
+        file_bytes = base64.b64decode(file_b64)
+    except Exception:
+        return _api_error("Invalid base64 file", status_code=422)
+    if "pdf" in mime_type or filename.lower().endswith(".pdf"):
+        return understand_pdf(file_bytes)
+    return understand_office_doc(file_bytes, filename=filename)
+
+
+@router.post("/documents/diff")
+async def api_documents_diff(request: Request):
+    from ..vision import diff_documents
+    body     = await request.json()
+    text_a   = str(body.get("text_a", ""))
+    text_b   = str(body.get("text_b", ""))
+    ctx      = int(body.get("context_lines", 3))
+    return diff_documents(text_a, text_b, context_lines=ctx)
+
+
+# ── Audio extras — analysis + diarization + streaming (Section 22) ────────────
+
+@router.post("/audio/analyse")
+async def api_audio_analyse(request: Request):
+    from ..audio import AudioProviderError, analyse_audio
+    import base64
+    body = await request.json()
+    audio_b64 = str(body.get("audio_base64", ""))
+    analyses = body.get("analyses")
+    profile_b64 = body.get("voice_profile_base64")
+    if not audio_b64:
+        return _api_error("audio_base64 required", status_code=422)
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+        profile_bytes = base64.b64decode(profile_b64) if profile_b64 else None
+    except Exception:
+        return _api_error("Invalid base64 audio", status_code=422)
+    try:
+        return analyse_audio(audio_bytes, analyses=analyses, voice_profile_bytes=profile_bytes)
+    except AudioProviderError as exc:
+        return _api_error(str(exc), status_code=503)
+    except ValueError as exc:
+        return _api_error(str(exc), status_code=422)
+
+
+@router.post("/audio/diarize")
+async def api_audio_diarize(request: Request):
+    from ..audio import diarize_audio
+    import base64
+    body = await request.json()
+    audio_b64 = str(body.get("audio_base64", ""))
+    num_speakers = body.get("num_speakers")
+    if not audio_b64:
+        return _api_error("audio_base64 required", status_code=422)
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+    except Exception:
+        return _api_error("Invalid base64 audio", status_code=422)
+    return diarize_audio(audio_bytes, num_speakers=num_speakers)
+
+
+@router.post("/audio/identify-speaker")
+async def api_audio_identify_speaker(request: Request):
+    from ..audio import identify_speaker
+    import base64
+    body = await request.json()
+    audio_b64 = str(body.get("audio_base64", ""))
+    profile_b64 = body.get("voice_profile_base64")
+    known_profiles = body.get("known_profiles") if isinstance(body.get("known_profiles"), list) else None
+    if not audio_b64:
+        return _api_error("audio_base64 required", status_code=422)
+    try:
+        audio_bytes = base64.b64decode(audio_b64)
+        profile_bytes = base64.b64decode(profile_b64) if profile_b64 else None
+    except Exception:
+        return _api_error("Invalid base64 audio", status_code=422)
+    return identify_speaker(audio_bytes, voice_profile_bytes=profile_bytes, known_profiles=known_profiles)
+
+
+@router.post("/audio/stream-chunk")
+async def api_audio_stream_chunk(request: Request):
+    from ..audio import stream_transcribe_chunk
+    import base64
+    body = await request.json()
+    chunk_b64 = str(body.get("audio_chunk_base64", ""))
+    session_state = body.get("session_state")
+    session_id = str(body.get("session_id", ""))
+    language = str(body.get("language", "")) or None
+    finalize = bool(body.get("finalize", False))
+    diarize = bool(body.get("diarize", False))
+    identify_speaker_enabled = bool(body.get("identify_speaker", False))
+    profile_b64 = body.get("voice_profile_base64")
+    speaker_name = str(body.get("speaker_name", ""))
+    if not chunk_b64:
+        return _api_error("audio_chunk_base64 required", status_code=422)
+    try:
+        chunk_bytes = base64.b64decode(chunk_b64)
+        profile_bytes = base64.b64decode(profile_b64) if profile_b64 else None
+    except Exception:
+        return _api_error("Invalid base64 audio", status_code=422)
+    return stream_transcribe_chunk(
+        chunk_bytes,
+        session_state=session_state,
+        session_id=session_id,
+        language=language,
+        finalize=finalize,
+        diarize=diarize,
+        identify_speaker_enabled=identify_speaker_enabled,
+        voice_profile_bytes=profile_bytes,
+        speaker_name=speaker_name,
+    )
+
+
+@router.websocket("/audio/live/ws")
+async def api_audio_live_ws(websocket: WebSocket):
+    """Realtime voice-agent socket.
+
+    Client messages (JSON):
+    - {"type":"chunk","audio_chunk_base64":"...","session_id":"..."}
+    - {"type":"finalize","audio_chunk_base64":"...optional...","prompt":"...optional..."}
+    """
+    from ..audio import stream_transcribe_chunk
+    await websocket.accept()
+    session_id = ""
+    session_state = {}
+    last_chunk_bytes = b""
+
+    try:
+        while True:
+            payload = await websocket.receive_json()
+            msg_type = str(payload.get("type") or "chunk").strip().lower()
+            session_id = str(payload.get("session_id") or session_id or "")
+            language = str(payload.get("language") or "") or None
+            diarize = bool(payload.get("diarize", False))
+            identify_speaker = bool(payload.get("identify_speaker", False))
+            prompt = str(payload.get("prompt") or "").strip()
+
+            chunk_b64 = str(payload.get("audio_chunk_base64") or "")
+            chunk_bytes = b""
+            if chunk_b64:
+                try:
+                    chunk_bytes = base64.b64decode(chunk_b64)
+                    last_chunk_bytes = chunk_bytes
+                except Exception:
+                    await websocket.send_json({"type": "error", "error": "invalid base64 chunk"})
+                    continue
+
+            if msg_type == "chunk":
+                if not chunk_bytes:
+                    await websocket.send_json({"type": "error", "error": "audio_chunk_base64 required"})
+                    continue
+                result = stream_transcribe_chunk(
+                    chunk_bytes,
+                    session_state=session_state,
+                    session_id=session_id,
+                    language=language,
+                    finalize=False,
+                    diarize=diarize,
+                    identify_speaker_enabled=identify_speaker,
+                )
+                session_state = dict(result.get("session_state") or session_state)
+                session_id = str(result.get("session_id") or session_id)
+                await websocket.send_json({"type": "partial", **result})
+                continue
+
+            if msg_type == "finalize":
+                final_chunk = chunk_bytes or last_chunk_bytes
+                if not final_chunk:
+                    await websocket.send_json({"type": "error", "error": "no audio available to finalize"})
+                    continue
+                result = stream_transcribe_chunk(
+                    final_chunk,
+                    session_state=session_state,
+                    session_id=session_id,
+                    language=language,
+                    finalize=True,
+                    diarize=diarize,
+                    identify_speaker_enabled=identify_speaker,
+                )
+                session_state = dict(result.get("session_state") or session_state)
+                session_id = str(result.get("session_id") or session_id)
+                await websocket.send_json({"type": "final", **result})
+
+                final_text = str(result.get("final_transcript") or result.get("partial") or "").strip()
+                if final_text:
+                    agent_task = prompt or final_text
+                    agent_out = run_agent_task(agent_task, history=[], files=[], sid=session_id)
+                    await websocket.send_json({
+                        "type": "agent_response",
+                        "session_id": session_id,
+                        "task": agent_task,
+                        "agent": agent_out,
+                    })
+                continue
+
+            await websocket.send_json({"type": "error", "error": f"unsupported message type: {msg_type}"})
+    except WebSocketDisconnect:
+        return
+
+
+# ── Video extras — transcription + chapters + editing (Section 22) ───────────
+
+@router.post("/video/transcribe")
+async def api_video_transcribe(request: Request):
+    from ..generation import video_to_text
+    import base64
+    body           = await request.json()
+    video_b64      = str(body.get("video_base64", ""))
+    frame_interval = float(body.get("frame_interval_s", 5.0))
+    max_frames     = int(body.get("max_frames", 20))
+    if not video_b64:
+        return _api_error("video_base64 required", status_code=422)
+    video_bytes = base64.b64decode(video_b64)
+    return video_to_text(video_bytes, frame_interval_s=frame_interval, max_frames=max_frames)
+
+
+@router.post("/video/chapters")
+async def api_video_chapters(request: Request):
+    from ..generation import detect_video_chapters_from_transcript
+    import base64
+    body      = await request.json()
+    video_b64 = body.get("video_base64")
+    video_url = body.get("video_url")
+    if video_b64:
+        video_bytes = base64.b64decode(video_b64)
+        chapters    = detect_video_chapters_from_transcript(video_bytes)
+    elif video_url:
+        from ..generation import detect_video_chapters
+        chapters = detect_video_chapters(video_url)
+    else:
+        return _api_error("video_base64 or video_url required", status_code=422)
+    return {"chapters": chapters}
+
+
+@router.post("/video/edit")
+async def api_video_edit(request: Request):
+    from ..generation import edit_video
+    import base64
+    body        = await request.json()
+    video_b64   = str(body.get("video_base64", ""))
+    operations  = body.get("operations", [])
+    if not video_b64:
+        return _api_error("video_base64 required", status_code=422)
+    video_bytes = base64.b64decode(video_b64)
+    result      = edit_video(video_bytes, operations)
+    if result.get("output_bytes"):
+        output_b64         = base64.b64encode(result["output_bytes"]).decode()
+        result["output_bytes"] = None
+        result["output_base64"] = output_b64
+    return result
+
+
+# ── WebSocket collab room (Section 22 / collab upgrade) ───────────────────────
+
+@router.websocket("/collab/rooms/{room_id}/ws")
+async def api_collab_ws(room_id: str, websocket: WebSocket):
+    from ..collab import ws_manager, get_room, create_room
+    # Ensure room exists
+    if not get_room(room_id):
+        create_room(owner="ws-join", name=f"Room {room_id}")
+    await ws_manager.connect(room_id, websocket)
+    try:
+        while True:
+            data = await websocket.receive_json()
+            # Broadcast to all others in room
+            await ws_manager.broadcast(room_id, {
+                "type":    "message",
+                "room_id": room_id,
+                "data":    data,
+            })
+    except WebSocketDisconnect:
+        ws_manager.disconnect(room_id, websocket)
+    except Exception:
+        ws_manager.disconnect(room_id, websocket)
+
+
+# ── SIEM integration config (Section 21) ──────────────────────────────────────
+
+@router.get("/admin/siem/config")
+async def api_siem_get():
+    from ..db import load_pref as _lp
+    config = _lp("siem_config") or {}
+    return {"config": config}
+
+
+@router.post("/admin/siem/config")
+async def api_siem_set(request: Request):
+    from ..db import save_pref as _sp
+    body = await request.json()
+    # Validate required fields
+    endpoint = str(body.get("endpoint", "")).strip()
+    if not endpoint:
+        return _api_error("endpoint required", status_code=422)
+    config = {
+        "endpoint":   endpoint,
+        "format":     str(body.get("format", "json")),
+        "auth_token": str(body.get("auth_token", "")),
+        "enabled":    bool(body.get("enabled", True)),
+        "events":     list(body.get("events", ["safety_violation", "auth_failure"])),
+    }
+    _sp("siem_config", config)
+    return {"ok": True, "config": config}
+
+
+@router.post("/admin/siem/test")
+async def api_siem_test():
+    from ..db import load_pref as _lp
+    import httpx
+    config = _lp("siem_config") or {}
+    endpoint = config.get("endpoint", "")
+    if not endpoint:
+        return _api_error("No SIEM endpoint configured", status_code=400)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(
+                endpoint,
+                json={"type": "test", "source": "nexus-ai", "message": "SIEM integration test"},
+                headers={"Authorization": f"Bearer {config.get('auth_token', '')}"},
+            )
+            return {"ok": True, "status_code": resp.status_code}
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+
+
+# ── Developer tooling — code review + bug fix + migration (Section 18) ────────
+
+_BUG_FIX_CHECKPOINTS_KEY = "agent_bug_fix_checkpoints_v1"
+
+
+def _load_bug_fix_checkpoints() -> list[dict[str, Any]]:
+    raw = db_load_pref(_BUG_FIX_CHECKPOINTS_KEY, "[]")
+    if isinstance(raw, list):
+        return [row for row in raw if isinstance(row, dict)]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw) if raw.strip() else []
+            if isinstance(parsed, list):
+                return [row for row in parsed if isinstance(row, dict)]
+        except Exception:
+            return []
+    return []
+
+
+def _save_bug_fix_checkpoints(rows: list[dict[str, Any]]) -> None:
+    db_save_pref(_BUG_FIX_CHECKPOINTS_KEY, json.dumps(rows[-1000:], separators=(",", ":")))
+
+@router.post("/agent/code-review")
+async def api_code_review(request: Request):
+    from ..agent import call_llm_with_fallback
+    body     = await request.json()
+    code     = str(body.get("code", ""))
+    language = str(body.get("language", "python"))
+    focus    = str(body.get("focus", "security, bugs, style"))
+    if not code:
+        return _api_error("code required", status_code=422)
+    prompt = (
+        f"Review this {language} code for: {focus}.\n\n"
+        f"```{language}\n{code}\n```\n\n"
+        "Return JSON: {\"issues\": [{\"line\": int|null, \"severity\": \"error|warning|info\", "
+        "\"message\": str, \"suggestion\": str}], \"summary\": str, \"score\": 0-10}"
+    )
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": prompt}], task="code_review"
+    )
+    import json, re
+    text = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+    m    = re.search(r"\{.*\}", text, re.DOTALL)
+    result = json.loads(m.group(0)) if m else {"raw": text}
+    result["provider"] = provider
+    return result
+
+
+@router.post("/agent/bug-fix")
+async def api_bug_fix(request: Request):
+    from ..agent import call_llm_with_fallback
+    body       = await request.json()
+    code       = str(body.get("code", ""))
+    error_msg  = str(body.get("error", ""))
+    language   = str(body.get("language", "python"))
+    test_command = str(body.get("test_command", "")).strip()
+    if not code:
+        return _api_error("code required", status_code=422)
+
+    checkpoint_id = "bf_" + secrets.token_hex(6)
+    checkpoints = _load_bug_fix_checkpoints()
+    checkpoint = {
+        "checkpoint_id": checkpoint_id,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "language": language,
+        "error": error_msg,
+        "original_code": code,
+        "test_command": test_command,
+        "status": "created",
+    }
+    checkpoints.append(checkpoint)
+    _save_bug_fix_checkpoints(checkpoints)
+
+    prompt = (
+        f"Fix this {language} code.\nError: {error_msg}\n\n"
+        f"```{language}\n{code}\n```\n\n"
+        "Return JSON: {\"fixed_code\": str, \"explanation\": str, \"changes\": [str], "
+        "\"confidence\": 0.0-1.0, \"risk\": \"low|medium|high\"}"
+    )
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": prompt}], task="bug_fix"
+    )
+    import json, re
+    text   = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+    m      = re.search(r"\{.*\}", text, re.DOTALL)
+    result = json.loads(m.group(0)) if m else {"raw": text}
+    if not isinstance(result, dict):
+        result = {"raw": text}
+
+    fixed_code = str(result.get("fixed_code") or "").strip()
+    checkpoint["status"] = "fixed" if fixed_code else "review_required"
+    checkpoint["provider"] = provider
+    checkpoint["updated_at"] = datetime.now(timezone.utc).isoformat()
+    checkpoint["fixed_code"] = fixed_code
+    checkpoint["confidence"] = result.get("confidence")
+    checkpoint["risk"] = result.get("risk")
+    _save_bug_fix_checkpoints(checkpoints)
+
+    result["provider"] = provider
+    result["checkpoint_id"] = checkpoint_id
+    result["rollback_available"] = True
+    return result
+
+
+@router.get("/agent/bug-fix/checkpoints")
+async def api_bug_fix_checkpoints(limit: int = 50):
+    rows = _load_bug_fix_checkpoints()
+    rows = sorted(rows, key=lambda item: str(item.get("created_at", "")), reverse=True)
+    capped = rows[: max(1, min(int(limit), 200))]
+    return {"checkpoints": capped, "total": len(rows)}
+
+
+@router.get("/agent/bug-fix/checkpoints/{checkpoint_id}")
+async def api_bug_fix_checkpoint_get(checkpoint_id: str):
+    rows = _load_bug_fix_checkpoints()
+    for row in rows:
+        if str(row.get("checkpoint_id") or "") == checkpoint_id:
+            return row
+    return _api_error("Checkpoint not found", status_code=404)
+
+
+@router.post("/agent/bug-fix/checkpoints/{checkpoint_id}/rollback")
+async def api_bug_fix_checkpoint_rollback(checkpoint_id: str):
+    rows = _load_bug_fix_checkpoints()
+    for row in rows:
+        if str(row.get("checkpoint_id") or "") != checkpoint_id:
+            continue
+        row["status"] = "rolled_back"
+        row["rolled_back_at"] = datetime.now(timezone.utc).isoformat()
+        _save_bug_fix_checkpoints(rows)
+        return {
+            "ok": True,
+            "checkpoint_id": checkpoint_id,
+            "language": row.get("language", "python"),
+            "restored_code": row.get("original_code", ""),
+            "error": row.get("error", ""),
+        }
+    return _api_error("Checkpoint not found", status_code=404)
+
+
+@router.post("/agent/self-correct")
+async def api_agent_self_correct(request: Request):
+    from ..agent import call_llm_with_fallback
+    from ..thinking import build_critique_prompt, parse_critique_response
+
+    body = await request.json()
+    question = str(body.get("question", "") or body.get("task", "")).strip()
+    answer = str(body.get("answer", "") or body.get("content", "")).strip()
+    try:
+        confidence = float(body.get("confidence", 0.0) or 0.0)
+    except Exception:
+        confidence = 0.0
+    threshold = float(body.get("threshold", 0.75) or 0.75)
+
+    if not answer:
+        return _api_error("answer is required", status_code=422)
+    if confidence >= threshold:
+        return {
+            "corrected": False,
+            "reason": "confidence_above_threshold",
+            "threshold": threshold,
+            "confidence": confidence,
+            "answer": answer,
+        }
+
+    critique_prompt = build_critique_prompt(answer, question or "Provide a better version of this answer")
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": critique_prompt}],
+        task="self_correction",
+    )
+    raw = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+    parsed = parse_critique_response(raw)
+    revised = str(parsed.get("revised") or "").strip() or answer
+    critique = str(parsed.get("critique") or "").strip()
+    revised_confidence = float(parsed.get("confidence", confidence) or confidence)
+
+    db_save_self_review(
+        review_id="self_correct_" + secrets.token_hex(6),
+        traces_analyzed=0,
+        insights=[{"type": "self_correction", "critique": critique}],
+        suggestions=[revised],
+        provider=provider,
+    )
+
+    return {
+        "corrected": revised != answer,
+        "provider": provider,
+        "original_confidence": confidence,
+        "threshold": threshold,
+        "revised_confidence": revised_confidence,
+        "critique": critique,
+        "answer": revised,
+    }
+
+
+@router.post("/agent/code-loop")
+async def api_agent_code_loop(request: Request):
+    from ..agent import run_repo_edit_verify_loop
+
+    body = await request.json()
+    task = str(body.get("task") or body.get("prompt") or "").strip()
+    if not task:
+        return _api_error("task is required", status_code=422)
+
+    sid = str(body.get("sid") or body.get("session_id") or "").strip()
+    verify_command = str(body.get("verify_command") or "").strip()
+    try:
+        max_loops = int(body.get("max_loops", 3) or 3)
+    except Exception:
+        max_loops = 3
+
+    history = body.get("history") if isinstance(body.get("history"), list) else []
+    files = body.get("files") if isinstance(body.get("files"), list) else []
+    usage_principal = str(body.get("usage_principal") or "").strip()
+
+    return run_repo_edit_verify_loop(
+        task=task,
+        history=history,
+        files=files,
+        sid=sid,
+        verify_command=verify_command,
+        max_loops=max(1, min(max_loops, 8)),
+        usage_principal=usage_principal,
+    )
+
+
+@router.post("/agent/migrate")
+async def api_migrate_code(request: Request):
+    from ..agent import call_llm_with_fallback
+    body       = await request.json()
+    code       = str(body.get("code", ""))
+    from_lang  = str(body.get("from_language", "python2"))
+    to_lang    = str(body.get("to_language", "python3"))
+    if not code:
+        return _api_error("code required", status_code=422)
+    prompt = (
+        f"Migrate this code from {from_lang} to {to_lang}.\n\n"
+        f"```\n{code}\n```\n\n"
+        "Return JSON: {\"migrated_code\": str, \"changes\": [str], \"warnings\": [str]}"
+    )
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": prompt}], task="code_migration"
+    )
+    import json, re
+    text   = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+    m      = re.search(r"\{.*\}", text, re.DOTALL)
+    result = json.loads(m.group(0)) if m else {"raw": text}
+    result["provider"] = provider
+    return result
+
+
+@router.post("/agent/diagnose-logs")
+async def api_diagnose_logs(request: Request):
+    from ..agent import call_llm_with_fallback
+    body     = await request.json()
+    logs     = str(body.get("logs", ""))
+    service  = str(body.get("service", ""))
+    if not logs:
+        return _api_error("logs required", status_code=422)
+    prompt = (
+        f"Diagnose these {service} logs and identify root causes.\n\n"
+        f"```\n{logs[:8000]}\n```\n\n"
+        "Return JSON: {\"issues\": [{\"severity\": str, \"message\": str, \"fix\": str}], "
+        "\"root_cause\": str, \"next_steps\": [str]}"
+    )
+    resp, provider = call_llm_with_fallback(
+        [{"role": "user", "content": prompt}], task="log_diagnosis"
+    )
+    import json, re
+    text   = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+    m      = re.search(r"\{.*\}", text, re.DOTALL)
+    result = json.loads(m.group(0)) if m else {"raw": text}
+    result["provider"] = provider
+    return result
+
+
+@router.post("/benchmark/safety")
+async def api_benchmark_safety(request: Request):
+    from ..benchmark import run_safety_benchmark
+    body = await request.json()
+    return run_safety_benchmark(test_cases=body.get("test_cases") or None)
+
+
+@router.get("/benchmark/safety/results")
+async def api_benchmark_safety_results():
+    from ..benchmark import load_safety_benchmark_results, evaluate_safety_release_gate
+    results = load_safety_benchmark_results(limit=500)
+    return {"results": results, "release_gate": evaluate_safety_release_gate(results)}
+
+
+@router.get("/benchmark/safety/gate")
+async def api_benchmark_safety_gate():
+    from ..benchmark import load_safety_gate_config, load_safety_benchmark_results, evaluate_safety_release_gate
+    cfg = load_safety_gate_config()
+    return {"config": cfg, "status": evaluate_safety_release_gate(load_safety_benchmark_results(limit=500), cfg)}
+
+
+@router.post("/benchmark/safety/gate")
+async def api_benchmark_safety_gate_config(request: Request):
+    from ..benchmark import update_safety_gate_config
+    body = await _read_json_body(request, "invalid JSON body")
+    return update_safety_gate_config(body)
+
+
+# ── Benchmark regression (Section 19.3) ──────────────────────────────────────
+
+@router.get("/benchmark/regression")
+async def api_benchmark_regression():
+    from ..benchmark import get_regression_report
+    return get_regression_report()
+
+
+@router.post("/benchmark/regression/baseline")
+async def api_benchmark_regression_baseline(request: Request):
+    from ..benchmark import set_regression_baseline
+    body = await request.json()
+    return set_regression_baseline(body)
+
+
+# ── Concurrent task management extras (Section 23) ───────────────────────────
+
+@router.post("/tasks/queue/{task_id}/cancel")
+async def api_task_cancel(task_id: str):
+    from ..task_queue import cancel_task, get_task_runtime_status
+    ok = cancel_task(task_id)
+    if not ok:
+        return _api_error("Task not found or already terminal", status_code=404)
+    return {
+        "ok": True,
+        "task_id": task_id,
+        "status": get_task_runtime_status(task_id),
+    }
+
+
+@router.get("/tasks/queue/{task_id}/status")
+async def api_task_status(task_id: str):
+    from ..task_queue import get_task_runtime_status
+    status = get_task_runtime_status(task_id)
+    if status is None:
+        return _api_error("Task not found", status_code=404)
+    return status
+
+
+@router.post("/tasks/sessions")
+@router.post("/tasks/queue/sessions")
+@router.post("/task-sessions")
+async def api_task_session_create(request: Request):
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    session_id = str(body.get("session_id") or f"ts_{secrets.token_hex(6)}")
+    label = str(body.get("label") or "")
+    created_by = str(body.get("created_by") or "")
+    return {
+        "session_id": session_id,
+        "label": label,
+        "created_by": created_by,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/tasks/sessions")
+@router.get("/tasks/queue/sessions")
+@router.get("/task-sessions")
+async def api_task_sessions(limit: int = 200):
+    from ..task_queue import list_task_sessions
+    return {"sessions": list_task_sessions(limit=max(1, min(int(limit), 1000)))}
+
+
+@router.get("/tasks/sessions/{session_id}")
+@router.get("/tasks/queue/sessions/{session_id}")
+@router.get("/task-sessions/{session_id}")
+async def api_task_session_detail(session_id: str, status: str = "", limit: int = 200):
+    from ..task_queue import get_session_tasks
+    tasks = get_session_tasks(session_id=session_id, status=status, limit=max(1, min(int(limit), 1000)))
+    if not tasks:
+        return _api_error("Task session not found", status_code=404)
+    return {"session_id": session_id, "tasks": tasks, "total": len(tasks)}
+
+
+@router.post("/tasks/sessions/{session_id}/cancel")
+@router.post("/tasks/queue/sessions/{session_id}/cancel")
+@router.post("/task-sessions/{session_id}/cancel")
+async def api_task_session_cancel(session_id: str, request: Request):
+    from ..task_queue import cancel_session_tasks
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    include_running = bool(body.get("include_running", True))
+    result = cancel_session_tasks(session_id=session_id, include_running=include_running)
+    if result.get("cancelled", 0) == 0:
+        return _api_error("No cancellable tasks found for session", status_code=404)
+    return result

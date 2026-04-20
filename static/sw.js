@@ -1,5 +1,16 @@
-const CACHE = 'nexus-ai-v3';
-const PRECACHE = ['/', '/static/manifest.json'];
+const CACHE = 'nexus-ai-v4';
+const PRECACHE = [
+  '/',
+  '/static/manifest.json',
+  '/static/css/base.css',
+  '/static/css/panels.css',
+  '/static/js/api.js',
+  '/static/js/utilities/ui-helpers.js',
+  '/static/js/utilities/device-utils.js',
+  '/static/js/utilities/settings.js',
+  '/static/js/utilities/providers.js',
+  '/static/js/panels/benchmark-leaderboard.js',
+];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(PRECACHE)));
@@ -14,20 +25,40 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  // Network-first for API calls AND HTML pages — always get fresh UI
-  if (e.request.url.includes('/agent') || e.request.url.includes('/session') ||
-      e.request.url.includes('/chats') || e.request.url.includes('/providers') ||
-      e.request.headers.get('accept')?.includes('text/html')) {
+  const req = e.request;
+  const accept = req.headers.get('accept') || '';
+
+  // Always network for API calls.
+  if (req.url.includes('/agent') || req.url.includes('/session') ||
+      req.url.includes('/chats') || req.url.includes('/providers') ||
+      req.url.includes('/api/') || req.url.includes('/v1/')) {
     return;
   }
-  // Cache-first only for static assets (JS libs, icons, manifest)
+
+  // HTML documents: network-first, but serve cached shell when offline.
+  if (accept.includes('text/html')) {
+    e.respondWith(
+      fetch(req)
+        .then(resp => {
+          if (resp.ok) {
+            const clone = resp.clone();
+            caches.open(CACHE).then(c => c.put(req, clone));
+          }
+          return resp;
+        })
+        .catch(() => caches.match(req).then(cached => cached || caches.match('/')))
+    );
+    return;
+  }
+
+  // Static assets: cache-first.
   e.respondWith(
-    caches.match(e.request).then(cached => {
+    caches.match(req).then(cached => {
       if (cached) return cached;
-      return fetch(e.request).then(resp => {
-        if (resp.ok && e.request.method === 'GET') {
+      return fetch(req).then(resp => {
+        if (resp.ok && req.method === 'GET') {
           const clone = resp.clone();
-          caches.open(CACHE).then(c => c.put(e.request, clone));
+          caches.open(CACHE).then(c => c.put(req, clone));
         }
         return resp;
       });

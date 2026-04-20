@@ -1,0 +1,32 @@
+# docker-compose.prod.yml — production overrides
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+services:
+  nexus-ai:
+    image: ghcr.io/the-no-hands-company/nexus-ai:latest
+    restart: always
+    environment:
+      - NEXUS_PROFILE=prod
+    deploy:
+      resources:
+        limits:
+          cpus: "4"
+          memory: 8g
+        reservations:
+          cpus: "2"
+          memory: 4g
+
+  redis:
+    image: redis:7-alpine
+    container_name: nexus-ai-redis
+    restart: always
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  redis-data:

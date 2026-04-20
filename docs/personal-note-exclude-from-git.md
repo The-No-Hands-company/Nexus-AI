@@ -131,3 +131,7 @@ This avoids a disruptive rewrite later by introducing the hierarchy boundary ear
 3. Add capability-level matching (agent requires model capability set).
 4. Add execution policy contracts (cost, latency, risk) per workflow edge.
 5. Add simulation/sandbox mode to test new hierarchy graphs before enabling in production.
+
+----
+
+

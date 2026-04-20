@@ -65,6 +65,7 @@ coverage.xml
 logs/
 *.bak
 *.orig
+docs/personal-note-exclude-from-git.md
 
 # Database
 *.db

@@ -10,11 +10,18 @@ import os
 import shutil
 import subprocess
 import tempfile
-from typing import Optional
+from typing import Iterator, Optional
 
 
 IMAGE_BACKENDS = ["auto", "pollinations", "ollama_flux", "comfyui", "stability_api"]
-VIDEO_BACKENDS = ["auto", "wan_local", "cogvideo_local", "runway_api"]
+VIDEO_BACKENDS = [
+    "auto",
+    "wan_local",
+    "cogvideo_local",
+    "runway_api",
+    "ollama_flux",
+    "ollama_sd3",
+]
 
 
 def _validate_dimensions(width: int, height: int, max_dim: int = 2048) -> None:
@@ -363,14 +370,85 @@ def generate_video(
         raise ValueError("fps must be between 0 and 60")
     _validate_dimensions(width, height, max_dim=1024)
 
+    stream = generate_video_stream(
+        prompt=prompt,
+        duration_seconds=duration_seconds,
+        fps=fps,
+        width=width,
+        height=height,
+        backend=backend,
+        include_frame_payload=False,
+    )
+    for event in stream:
+        if event.get("type") == "done" and event.get("video_bytes"):
+            return bytes(event["video_bytes"])
+
+    raise RuntimeError("Video generation requires an ffmpeg binary available in PATH")
+
+
+def _normalize_video_backend(backend: str) -> str:
+    value = str(backend or "auto").strip().lower()
+    if value not in VIDEO_BACKENDS:
+        return "auto"
+    return value
+
+
+def generate_video_stream(
+    prompt: str,
+    duration_seconds: float = 4.0,
+    fps: int = 8,
+    width: int = 512,
+    height: int = 512,
+    backend: str = "auto",
+    include_frame_payload: bool = False,
+) -> Iterator[dict[str, object]]:
+    """Yield progressive video-generation events and final encoded bytes.
+
+    Event types:
+    - ``start``: metadata and backend choice
+    - ``progress``: frame generation progress
+    - ``done``: includes ``video_bytes`` on success
+    - ``error``: terminal failure payload
+    """
+    if not prompt or not isinstance(prompt, str):
+        yield {"type": "error", "error": "prompt must be a non-empty string"}
+        return
+    if duration_seconds <= 0 or duration_seconds > 60:
+        yield {"type": "error", "error": "duration_seconds must be between 0 and 60"}
+        return
+    if fps <= 0 or fps > 60:
+        yield {"type": "error", "error": "fps must be between 0 and 60"}
+        return
+    try:
+        _validate_dimensions(width, height, max_dim=1024)
+    except Exception as exc:
+        yield {"type": "error", "error": str(exc)}
+        return
+
+    backend_name = _normalize_video_backend(backend)
+    if backend_name == "auto":
+        backend_name = "ollama_flux"
+
+    model_flavor = "flux" if backend_name in {"wan_local", "ollama_flux"} else "sd3"
+    styled_prompt = f"[{model_flavor}] {prompt.strip()}"
+    steps = 18 if model_flavor == "flux" else 24
+
     frame_count = max(1, int(duration_seconds * fps))
+    yield {
+        "type": "start",
+        "backend": backend_name,
+        "model": model_flavor,
+        "frame_count": frame_count,
+        "fps": fps,
+    }
+
     with tempfile.TemporaryDirectory(prefix="nexus_video_") as tmpdir:
         for index in range(frame_count):
             frame_bytes = _render_prompt_art(
-                prompt,
+                styled_prompt,
                 width,
                 height,
-                steps=18,
+                steps=steps,
                 frame_index=index,
                 total_frames=frame_count,
             )
@@ -378,11 +456,37 @@ def generate_video(
             with open(frame_path, "wb") as f:
                 f.write(frame_bytes)
 
-        encoded = _encode_frames_to_mp4(tmpdir, fps)
-        if encoded is not None:
-            return encoded
+            event: dict[str, object] = {
+                "type": "progress",
+                "backend": backend_name,
+                "model": model_flavor,
+                "frame_index": index,
+                "frame_count": frame_count,
+                "progress": round((index + 1) / frame_count, 4),
+            }
+            if include_frame_payload:
+                event["frame_png_bytes"] = frame_bytes
+            yield event
 
-    raise RuntimeError("Video generation requires an ffmpeg binary available in PATH")
+        encoded = _encode_frames_to_mp4(tmpdir, fps)
+        if encoded is None:
+            yield {
+                "type": "error",
+                "backend": backend_name,
+                "model": model_flavor,
+                "error": "Video generation requires an ffmpeg binary available in PATH",
+            }
+            return
+
+        yield {
+            "type": "done",
+            "backend": backend_name,
+            "model": model_flavor,
+            "video_bytes": encoded,
+            "mime_type": "video/mp4",
+            "duration_seconds": duration_seconds,
+            "fps": fps,
+        }
 
 
 def video_to_text(
@@ -416,3 +520,183 @@ def detect_video_chapters(video_url: str) -> list[dict]:
         })
         start += length
     return chapters
+
+
+# ── Video-to-text (frame sampling + vision description) ───────────────────────
+
+def video_to_text(video_bytes: bytes, frame_interval_s: float = 5.0,
+                  max_frames: int = 20, prompt: str = "Describe this video frame.") -> dict:
+    """Extract frames from a video and describe them with a vision model."""
+    frame_descriptions: list[dict] = []
+
+    try:
+        import cv2  # type: ignore
+        import io as _io
+        from PIL import Image  # type: ignore
+        from .vision import describe_image
+
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp.write(video_bytes)
+            tmp_path = tmp.name
+        try:
+            cap = cv2.VideoCapture(tmp_path)
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            total_fc = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = total_fc / fps
+            timestamps = []
+            t = 0.0
+            while t < duration and len(timestamps) < max_frames:
+                timestamps.append(t)
+                t += frame_interval_s
+            for ts in timestamps:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, int(ts * fps))
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                import cv2 as _cv2
+                rgb = _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(rgb)
+                buf = _io.BytesIO()
+                img.save(buf, format="JPEG", quality=70)
+                desc = describe_image(buf.getvalue(), mime_type="image/jpeg", prompt=prompt)
+                frame_descriptions.append({"timestamp_s": round(ts, 2), "description": desc})
+            cap.release()
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
+
+        from .agent import call_llm_with_fallback
+        seg_text = "\n".join(f"[{f['timestamp_s']}s] {f['description'][:200]}"
+                             for f in frame_descriptions)
+        try:
+            resp, _ = call_llm_with_fallback(
+                [{"role": "user", "content": f"Summarize this video:\n{seg_text}"}],
+                task="video_summary",
+            )
+            summary = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+        except Exception:
+            summary = seg_text[:500]
+        return {"ok": True, "frames": frame_descriptions, "summary": summary,
+                "backend": "opencv", "duration_s": duration}
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    return {"ok": False, "frames": [], "backend": "unavailable",
+            "summary": f"Video ({len(video_bytes)} bytes). Install opencv-python + Pillow."}
+
+
+# ── Video chapter detection from transcript ───────────────────────────────────
+
+def detect_video_chapters_from_transcript(video_bytes: bytes) -> list[dict]:
+    """Detect chapters by transcribing the audio and asking an LLM for breaks."""
+    import json, re
+    try:
+        from .audio import transcribe_audio
+        result = transcribe_audio(video_bytes)
+        segments = result.get("segments", [])
+        if not segments:
+            raise RuntimeError("no segments")
+        from .agent import call_llm_with_fallback
+        seg_text = "\n".join(f"[{s['start']:.1f}-{s['end']:.1f}s] {s.get('text','')}"
+                             for s in segments[:100])
+        resp, _ = call_llm_with_fallback(
+            [{"role": "user", "content":
+              "Identify chapter boundaries. Return JSON array [{start, end, title}].\n" + seg_text}],
+            task="chapter_detection",
+        )
+        text = resp.get("content", "") if isinstance(resp, dict) else str(resp)
+        m = re.search(r"\[.*\]", text, re.DOTALL)
+        if m:
+            return json.loads(m.group(0))
+    except Exception:
+        pass
+    return [{"start": 0.0, "end": 0.0, "title": "Full video", "note": "Detection unavailable"}]
+
+
+# ── Video editing orchestration ───────────────────────────────────────────────
+
+def edit_video(video_bytes: bytes, operations: list[dict]) -> dict:
+    """Apply ffmpeg editing operations to a video.
+
+    Supported ops: trim, speed, fade_in, fade_out, add_text
+    """
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        return {"ok": False, "error": "ffmpeg not found in PATH",
+                "applied_ops": [], "backend": "unavailable"}
+
+    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as inp:
+        inp.write(video_bytes)
+        current = inp.name
+
+    applied: list[str] = []
+    tmp_files = [current]
+
+    try:
+        for op_def in operations:
+            op = op_def.get("op", "")
+            tmp_out = current.replace(".mp4", f"__{op}.mp4")
+            cmd: list[str] | None = None
+
+            if op == "trim":
+                start = op_def.get("start_s", 0)
+                end_t = op_def.get("end_s")
+                cmd = [ffmpeg_bin, "-y", "-i", current, "-ss", str(start)]
+                if end_t is not None:
+                    cmd += ["-to", str(end_t)]
+                cmd += ["-c", "copy", tmp_out]
+
+            elif op == "speed":
+                factor = float(op_def.get("factor", 1.0))
+                vf = f"setpts={1/factor}*PTS"
+                af = f"atempo={min(2.0, max(0.5, factor))}"
+                cmd = [ffmpeg_bin, "-y", "-i", current, "-vf", vf, "-af", af, tmp_out]
+
+            elif op == "fade_in":
+                d = float(op_def.get("duration_s", 1.0))
+                cmd = [ffmpeg_bin, "-y", "-i", current, "-vf", f"fade=t=in:st=0:d={d}", tmp_out]
+
+            elif op == "fade_out":
+                import re as _re
+                d = float(op_def.get("duration_s", 1.0))
+                probe = subprocess.run([ffmpeg_bin, "-i", current, "-f", "null", "-"],
+                                       capture_output=True, text=True)
+                dur_m = _re.search(r"Duration:\s*([\d:.]+)", probe.stderr)
+                dur = 10.0
+                if dur_m:
+                    pts = dur_m.group(1).split(":")
+                    dur = float(pts[0]) * 3600 + float(pts[1]) * 60 + float(pts[2])
+                cmd = [ffmpeg_bin, "-y", "-i", current,
+                       "-vf", f"fade=t=out:st={max(0.0, dur - d)}:d={d}", tmp_out]
+
+            elif op == "add_text":
+                text_val = op_def.get("text", "").replace("'", r"\'")
+                x = op_def.get("x", 10)
+                y = op_def.get("y", 10)
+                dur = op_def.get("duration_s", 5.0)
+                cmd = [ffmpeg_bin, "-y", "-i", current,
+                       "-vf", f"drawtext=text='{text_val}':x={x}:y={y}:enable='between(t,0,{dur})'",
+                       tmp_out]
+
+            if cmd:
+                res = subprocess.run(cmd, capture_output=True, timeout=120)
+                if res.returncode == 0 and os.path.exists(tmp_out):
+                    current = tmp_out
+                    tmp_files.append(tmp_out)
+                    applied.append(op)
+
+        output_bytes = open(current, "rb").read()
+        return {"ok": True, "output_bytes": output_bytes, "applied_ops": applied,
+                "backend": "ffmpeg", "output_size": len(output_bytes)}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "applied_ops": applied, "backend": "ffmpeg"}
+    finally:
+        for p in tmp_files:
+            try:
+                os.unlink(p)
+            except Exception:
+                pass

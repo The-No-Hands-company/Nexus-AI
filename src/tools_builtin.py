@@ -734,6 +734,45 @@ def dispatch_builtin(action: dict, session_id: str = "") -> dict | None:
     if schema_err:
         return _tool_trace(action, schema_err, status="error", error="schema_validation")
 
+    if kind in {"delete_file", "run_command"}:
+        try:
+            from .team_policies import evaluate_policy
+            policy_result = evaluate_policy(
+                team_id=str(action.get("team_id") or os.getenv("TEAM_POLICY_DEFAULT_TEAM", "default")),
+                tool_action=kind,
+                model=str(action.get("model") or "").strip() or None,
+                region=str(action.get("region") or os.getenv("DEPLOYMENT_REGION", "global")).strip() or None,
+                username=str(action.get("username") or action.get("user") or ""),
+                role=str(action.get("role") or "user"),
+                context={
+                    "path": action.get("path", ""),
+                    "command": action.get("command") or action.get("cmd") or "",
+                    "policy_workflow_id": action.get("policy_workflow_id", ""),
+                },
+            )
+        except Exception as exc:
+            return _tool_trace(action, f"❌ Policy evaluation failed: {exc}", status="error", error="policy_evaluation_failed")
+
+        if not policy_result.get("allowed"):
+            remediation = str(policy_result.get("remediation") or "Policy review required before retrying this action.")
+            if policy_result.get("requires_hitl"):
+                workflow_id = str(policy_result.get("workflow_id") or "")
+                next_role = str(policy_result.get("next_approver_role") or "manager")
+                return _tool_trace(
+                    action,
+                    f"⚠️ Policy approval required for `{kind}`. workflow_id=`{workflow_id}` next_approver_role=`{next_role}`. {remediation}",
+                    metadata={"policy": policy_result},
+                    status="error",
+                    error="policy_approval_required",
+                )
+            return _tool_trace(
+                action,
+                f"❌ Policy denied `{kind}`: {policy_result.get('reason', 'denied')}. {remediation}",
+                metadata={"policy": policy_result},
+                status="error",
+                error="policy_denied",
+            )
+
     # ── Per-tool rate limiting ────────────────────────────────────────────────
     if kind and session_id:
         if not _check_tool_rate_limit(session_id, kind):
