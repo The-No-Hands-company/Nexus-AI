@@ -25,17 +25,52 @@ SENSITIVE_PATTERNS: List[str] = [
 ]
 
 INJECTION_PATTERNS: List[str] = [
+    # Instruction override / hierarchy bypass
     r"ignore previous instructions",
     r"disregard previous instructions",
     r"ignore all previous prompts",
     r"do not follow the above",
     r"override.*system instructions",
     r"ignore.*system instructions",
+    r"forget (?:all )?previous",
+    r"new instructions(?: now)?",
+    r"act as if (?:there are )?no rules",
+    # Safety bypass / policy bypass
     r"bypass.*safety",
     r"remove.*restrictions",
-    r"try to.*escape",
+    r"disable.*guardrails",
+    r"turn off.*safety",
+    r"safety.*is off",
     r"jailbreak",
     r"prompt injection",
+    # DAN / developer mode / unrestricted persona
+    r"dan\b",
+    r"do anything now",
+    r"developer mode",
+    r"unrestricted mode",
+    r"god mode",
+    r"evil mode",
+    # System prompt extraction / exfiltration
+    r"reveal (?:your )?system prompt",
+    r"show (?:your )?hidden instructions",
+    r"print (?:the )?initial prompt",
+    r"leak (?:the )?system message",
+    # Persona hijack / role confusion
+    r"you are now (?:my )?(?:tool|assistant|agent)",
+    r"from now on you (?:must|will)",
+    r"pretend to be",
+    r"roleplay as",
+    # Delimiter / context boundary attacks
+    r"```(?:system|assistant|developer)",
+    r"<\s*system\s*>",
+    r"</\s*system\s*>",
+    r"---\s*BEGIN\s*SYSTEM\s*PROMPT\s*---",
+    r"END\s*SYSTEM\s*PROMPT",
+    # Encoding relay / obfuscation attacks
+    r"base64(?:\s+decode)?",
+    r"rot13",
+    r"hex(?:\s+decode)?",
+    r"unicode escape",
 ]
 
 DESTRUCTIVE_PATTERNS: List[str] = [
@@ -213,6 +248,46 @@ def _finalize_verdict(stage: str, issues: List[SafetySignal], masked_text: Optio
     )
 
 
+def _classifier_backend() -> str:
+    backend = (os.getenv("SAFETY_CLASSIFIER_BACKEND", "auto") or "auto").strip().lower()
+    return backend or "auto"
+
+
+def _toxicity_signal(text: str, stage: str) -> Optional[SafetySignal]:
+    try:
+        # Lazy import avoids package init cycles between src/safety.py and src/safety/__init__.py.
+        from .safety.classifier import classify as _classify
+
+        classification = _classify(text, backend=_classifier_backend())
+    except Exception:
+        return None
+
+    if not classification.flagged:
+        return None
+
+    high_risk_categories = {
+        "violence",
+        "hate_speech",
+        "self_harm",
+        "sexual_explicit",
+        "dangerous_instructions",
+    }
+    threat = ThreatLevel.HIGH if classification.worst_category in high_risk_categories else ThreatLevel.MEDIUM
+    action = SafetyAction.BLOCK if threat == ThreatLevel.HIGH else SafetyAction.WARN
+    return SafetySignal(
+        code="toxicity_detected",
+        reason="Potentially harmful or toxic content detected by moderation classifier.",
+        detail=(
+            f"Classifier backend '{classification.model_used}' flagged category "
+            f"'{classification.worst_category}' with score {classification.worst_score:.2f}."
+        ),
+        category=ContentCategory.HIGH_STAKES,
+        threat=threat,
+        action=action,
+        pattern=classification.worst_category,
+    )
+
+
 def screen_input(text: str, allow_destructive: bool = False, policy_profile: Optional[str] = None) -> SafetyVerdict:
     source = text or ""
     policy = get_safety_policy(policy_profile)
@@ -261,6 +336,10 @@ def screen_input(text: str, allow_destructive: bool = False, policy_profile: Opt
                 pattern=injection_match,
             )
         )
+
+    toxicity_issue = _toxicity_signal(source, stage="input")
+    if toxicity_issue is not None:
+        issues.append(toxicity_issue)
 
     high_stakes_match = None
     if policy.get("deny_high_stakes", True):
@@ -326,6 +405,10 @@ def screen_output(text: str) -> SafetyVerdict:
                 action=SafetyAction.REDACT,
             )
         )
+
+    toxicity_issue = _toxicity_signal(source, stage="output")
+    if toxicity_issue is not None:
+        issues.append(toxicity_issue)
 
     return _finalize_verdict("output", issues, masked if masked != source else None, pii_matches)
 

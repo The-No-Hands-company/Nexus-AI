@@ -172,11 +172,16 @@ class SafetyPipelineMiddleware:
                     body = json.dumps(sanitized_payload).encode("utf-8")
                     _set_scope_content_length(scope, len(body))
 
+            replayed_once = False
+
             async def replay_receive():
-                nonlocal body
-                current = body
-                body = b""
-                return {"type": "http.request", "body": current, "more_body": False}
+                nonlocal body, replayed_once
+                if not replayed_once:
+                    replayed_once = True
+                    current = body
+                    body = b""
+                    return {"type": "http.request", "body": current, "more_body": False}
+                return {"type": "http.disconnect"}
 
             receive_to_use = replay_receive
 

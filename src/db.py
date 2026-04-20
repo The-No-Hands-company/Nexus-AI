@@ -5,6 +5,7 @@ Supports SQLite (default) and PostgreSQL (via DATABASE_URL).
 import os
 import json
 import time
+import uuid
 import threading
 import sqlite3
 import contextlib
@@ -1410,7 +1411,8 @@ def get_usage_stats(days=7): return _backend.get_usage_stats(days)
 def create_user(u, p, d="", role="user"): return _backend.create_user(u, p, d, role)
 def get_user(u): return _backend.get_user(u)
 def user_exists(u): return _backend.user_exists(u)
-def save_feedback(cid, mi, r, p="", m=""): _backend.save_feedback(cid, mi, r, p, m)
+def save_feedback(chat_id, message_idx, reaction, provider="", model=""):
+    _backend.save_feedback(chat_id, message_idx, reaction, provider, model)
 def list_users(): return _backend.list_users()
 def update_user_role(username, role): return _backend.update_user_role(username, role)
 def count_users(): return _backend.count_users()
@@ -1638,6 +1640,10 @@ def add_safety_audit_entry(entry: dict):
     _save_json_pref("safety_audit_log", events[-5000:])
 
 
+def clear_safety_audit_entries():
+    _save_json_pref("safety_audit_log", [])
+
+
 def save_benchmark_result(provider: str, probe_name: str, latency_ms: float, response_len: int):
     rows = _load_json_pref("benchmark_results", [])
     rows.append(
@@ -1672,6 +1678,65 @@ def load_feedback_export(limit: int = 5000) -> list[dict]:
             (safe_limit,),
         )
     return rows
+
+
+# ── Durable scheduler persistence helpers ───────────────────────────────────
+
+def _normalize_scheduled_job_row(row: dict) -> dict:
+    out = dict(row or {})
+    logs = out.get("logs", [])
+    if isinstance(logs, str):
+        try:
+            logs = json.loads(logs)
+        except Exception:
+            logs = []
+    if not isinstance(logs, list):
+        logs = []
+    out["logs"] = logs
+    out["id"] = str(out.get("id") or "").strip()
+    return out
+
+
+def load_scheduled_jobs() -> list[dict]:
+    rows = _load_json_pref("scheduled_jobs", [])
+    if not isinstance(rows, list):
+        return []
+    return [_normalize_scheduled_job_row(r) for r in rows if isinstance(r, dict) and str(r.get("id") or "").strip()]
+
+
+def upsert_scheduled_job(job: dict) -> None:
+    item = _normalize_scheduled_job_row(job)
+    if not item.get("id"):
+        return
+    rows = load_scheduled_jobs()
+    updated = False
+    for idx, row in enumerate(rows):
+        if row.get("id") == item["id"]:
+            rows[idx] = item
+            updated = True
+            break
+    if not updated:
+        rows.append(item)
+    _save_json_pref("scheduled_jobs", rows)
+
+
+def delete_scheduled_job(job_id: str) -> None:
+    target = str(job_id or "").strip()
+    if not target:
+        return
+    rows = [r for r in load_scheduled_jobs() if r.get("id") != target]
+    _save_json_pref("scheduled_jobs", rows)
+
+
+def clear_scheduled_jobs() -> None:
+    _save_json_pref("scheduled_jobs", [])
+
+
+def clear_scheduled_job(job_id: str | None = None) -> None:
+    if job_id:
+        delete_scheduled_job(job_id)
+        return
+    clear_scheduled_jobs()
 
 
 # ── Fine-tuning jobs persistence ────────────────────────────────────────────
@@ -2131,6 +2196,461 @@ def list_ft_training_samples(limit: int = 100, min_quality: float = 0.0) -> list
         d["lessons"] = json.loads(d.get("lessons") or "[]")
         result.append(d)
     return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fine-tuning adapter/version registry + dataset provenance + RLHF/DPO jobs
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def _ft_adapters_key() -> str:
+    return "ft.adapters.v1"
+
+
+def _ft_adapter_active_key() -> str:
+    return "ft.adapters.active.v1"
+
+
+def _ft_dataset_versions_key() -> str:
+    return "ft.dataset_versions.v1"
+
+
+def _ft_rlhf_dpo_jobs_key() -> str:
+    return "ft.rlhf_dpo_jobs.v1"
+
+
+def _ft_distill_jobs_key() -> str:
+    return "ft.distill_jobs.v1"
+
+
+def _ft_multitask_adapter_map_key() -> str:
+    return "ft.multitask_adapter_map.v1"
+
+
+def _ft_sample_curation_key() -> str:
+    return "ft.sample_curation.v1"
+
+
+def _ft_synthetic_batches_key() -> str:
+    return "ft.synthetic_batches.v1"
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def save_lora_adapter_version(
+    adapter_id: str,
+    version: str,
+    base_model: str,
+    checkpoint_uri: str,
+    metrics: dict | None = None,
+    provenance: dict | None = None,
+    tags: list | None = None,
+    status: str = "ready",
+) -> dict:
+    adapters = _load_json_pref(_ft_adapters_key(), [])
+    rec = {
+        "adapter_id": str(adapter_id).strip(),
+        "version": str(version).strip(),
+        "base_model": str(base_model).strip(),
+        "checkpoint_uri": str(checkpoint_uri).strip(),
+        "metrics": dict(metrics or {}),
+        "provenance": dict(provenance or {}),
+        "tags": [str(t) for t in (tags or [])],
+        "status": str(status or "ready"),
+        "created_at": _now_iso(),
+    }
+    adapters = [
+        a
+        for a in adapters
+        if not (
+            str(a.get("adapter_id") or "") == rec["adapter_id"]
+            and str(a.get("version") or "") == rec["version"]
+        )
+    ]
+    adapters.append(rec)
+    _save_json_pref(_ft_adapters_key(), adapters[-5000:])
+    return rec
+
+
+def list_lora_adapter_versions(adapter_id: str = "") -> list[dict]:
+    adapters = _load_json_pref(_ft_adapters_key(), [])
+    if adapter_id:
+        adapters = [a for a in adapters if str(a.get("adapter_id") or "") == str(adapter_id)]
+    adapters.sort(key=lambda a: str(a.get("created_at") or ""), reverse=True)
+    return adapters
+
+
+def get_lora_adapter_version(adapter_id: str, version: str = "") -> dict | None:
+    rows = list_lora_adapter_versions(adapter_id=adapter_id)
+    if not rows:
+        return None
+    if not version:
+        return rows[0]
+    for row in rows:
+        if str(row.get("version") or "") == str(version):
+            return row
+    return None
+
+
+def compare_lora_adapter_versions(adapter_id: str, left_version: str, right_version: str) -> dict | None:
+    left = get_lora_adapter_version(adapter_id, left_version)
+    right = get_lora_adapter_version(adapter_id, right_version)
+    if left is None or right is None:
+        return None
+
+    left_metrics = left.get("metrics") if isinstance(left.get("metrics"), dict) else {}
+    right_metrics = right.get("metrics") if isinstance(right.get("metrics"), dict) else {}
+    keys = sorted(set(left_metrics.keys()) | set(right_metrics.keys()))
+    deltas = {}
+    for key in keys:
+        lv = left_metrics.get(key)
+        rv = right_metrics.get(key)
+        if isinstance(lv, (int, float)) and isinstance(rv, (int, float)):
+            deltas[key] = round(float(rv) - float(lv), 6)
+
+    return {
+        "adapter_id": adapter_id,
+        "left": left,
+        "right": right,
+        "metric_delta": deltas,
+    }
+
+
+def set_active_lora_adapter(adapter_id: str, version: str, target_model: str = "") -> dict:
+    active = {
+        "adapter_id": str(adapter_id).strip(),
+        "version": str(version).strip(),
+        "target_model": str(target_model or "").strip(),
+        "activated_at": _now_iso(),
+    }
+    _save_json_pref(_ft_adapter_active_key(), active)
+    return active
+
+
+def get_active_lora_adapter() -> dict:
+    active = _load_json_pref(_ft_adapter_active_key(), {})
+    if not isinstance(active, dict):
+        return {}
+    return active
+
+
+def save_ft_dataset_version(
+    dataset_id: str,
+    source: str,
+    fmt: str,
+    row_count: int,
+    provenance: dict | None = None,
+    checksum: str = "",
+) -> dict:
+    versions = _load_json_pref(_ft_dataset_versions_key(), [])
+    rec = {
+        "dataset_id": str(dataset_id).strip(),
+        "source": str(source or "feedback").strip(),
+        "format": str(fmt or "jsonl").strip(),
+        "row_count": int(row_count),
+        "provenance": dict(provenance or {}),
+        "checksum": str(checksum or ""),
+        "created_at": _now_iso(),
+    }
+    versions = [v for v in versions if str(v.get("dataset_id") or "") != rec["dataset_id"]]
+    versions.append(rec)
+    _save_json_pref(_ft_dataset_versions_key(), versions[-5000:])
+    return rec
+
+
+def list_ft_dataset_versions(limit: int = 100) -> list[dict]:
+    rows = _load_json_pref(_ft_dataset_versions_key(), [])
+    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return rows[: max(1, int(limit))]
+
+
+def get_ft_dataset_version(dataset_id: str) -> dict | None:
+    for row in list_ft_dataset_versions(limit=10000):
+        if str(row.get("dataset_id") or "") == str(dataset_id):
+            return row
+    return None
+
+
+def create_rlhf_dpo_job(
+    method: str,
+    base_model: str,
+    dataset_version_id: str,
+    config: dict | None = None,
+) -> dict:
+    import uuid as _uuid
+
+    jobs = _load_json_pref(_ft_rlhf_dpo_jobs_key(), [])
+    job = {
+        "id": f"rdj-{_uuid.uuid4().hex[:12]}",
+        "method": str(method or "dpo").lower(),
+        "base_model": str(base_model or "nexus-prime-base").strip(),
+        "dataset_version_id": str(dataset_version_id or "").strip(),
+        "config": dict(config or {}),
+        "status": "queued",
+        "events": [],
+        "result": {},
+        "error": None,
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    jobs.append(job)
+    _save_json_pref(_ft_rlhf_dpo_jobs_key(), jobs[-5000:])
+    return job
+
+
+def list_rlhf_dpo_jobs(limit: int = 100) -> list[dict]:
+    rows = _load_json_pref(_ft_rlhf_dpo_jobs_key(), [])
+    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return rows[: max(1, int(limit))]
+
+
+def get_rlhf_dpo_job(job_id: str) -> dict | None:
+    rows = _load_json_pref(_ft_rlhf_dpo_jobs_key(), [])
+    for row in rows:
+        if str(row.get("id") or "") == str(job_id):
+            return row
+    return None
+
+
+def update_rlhf_dpo_job(job_id: str, **fields) -> dict | None:
+    jobs = _load_json_pref(_ft_rlhf_dpo_jobs_key(), [])
+    updated = None
+    for idx, row in enumerate(jobs):
+        if str(row.get("id") or "") != str(job_id):
+            continue
+        merged = dict(row)
+        for key, value in fields.items():
+            merged[key] = value
+        merged["updated_at"] = _now_iso()
+        jobs[idx] = merged
+        updated = merged
+        break
+    if updated is None:
+        return None
+    _save_json_pref(_ft_rlhf_dpo_jobs_key(), jobs[-5000:])
+    return updated
+
+
+def append_rlhf_dpo_job_event(
+    job_id: str,
+    message: str,
+    level: str = "info",
+    data: dict | None = None,
+) -> dict | None:
+    jobs = _load_json_pref(_ft_rlhf_dpo_jobs_key(), [])
+    updated = None
+    for idx, row in enumerate(jobs):
+        if str(row.get("id") or "") != str(job_id):
+            continue
+        merged = dict(row)
+        events = merged.get("events") if isinstance(merged.get("events"), list) else []
+        events.append(
+            {
+                "id": f"rde-{uuid.uuid4().hex[:10]}",
+                "created_at": _now_iso(),
+                "level": str(level or "info"),
+                "message": str(message or ""),
+                "data": dict(data or {}),
+            }
+        )
+        merged["events"] = events[-500:]
+        merged["updated_at"] = _now_iso()
+        jobs[idx] = merged
+        updated = merged
+        break
+    if updated is None:
+        return None
+    _save_json_pref(_ft_rlhf_dpo_jobs_key(), jobs[-5000:])
+    return updated
+
+
+def create_distill_job(
+    teacher_model: str,
+    student_model: str,
+    provider: str,
+    config: dict | None = None,
+) -> dict:
+    jobs = _load_json_pref(_ft_distill_jobs_key(), [])
+    job = {
+        "id": f"dsj-{uuid.uuid4().hex[:12]}",
+        "teacher_model": str(teacher_model or "").strip(),
+        "student_model": str(student_model or "").strip(),
+        "provider": str(provider or "auto").strip(),
+        "config": dict(config or {}),
+        "status": "queued",
+        "events": [],
+        "result": {},
+        "error": None,
+        "created_at": _now_iso(),
+        "updated_at": _now_iso(),
+    }
+    jobs.append(job)
+    _save_json_pref(_ft_distill_jobs_key(), jobs[-5000:])
+    return job
+
+
+def list_distill_jobs(limit: int = 100) -> list[dict]:
+    rows = _load_json_pref(_ft_distill_jobs_key(), [])
+    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return rows[: max(1, int(limit))]
+
+
+def get_distill_job(job_id: str) -> dict | None:
+    for row in _load_json_pref(_ft_distill_jobs_key(), []):
+        if str(row.get("id") or "") == str(job_id):
+            return row
+    return None
+
+
+def update_distill_job(job_id: str, **fields) -> dict | None:
+    jobs = _load_json_pref(_ft_distill_jobs_key(), [])
+    updated = None
+    for idx, row in enumerate(jobs):
+        if str(row.get("id") or "") != str(job_id):
+            continue
+        merged = dict(row)
+        for key, value in fields.items():
+            merged[key] = value
+        merged["updated_at"] = _now_iso()
+        jobs[idx] = merged
+        updated = merged
+        break
+    if updated is None:
+        return None
+    _save_json_pref(_ft_distill_jobs_key(), jobs[-5000:])
+    return updated
+
+
+def append_distill_job_event(
+    job_id: str,
+    message: str,
+    level: str = "info",
+    data: dict | None = None,
+) -> dict | None:
+    jobs = _load_json_pref(_ft_distill_jobs_key(), [])
+    updated = None
+    for idx, row in enumerate(jobs):
+        if str(row.get("id") or "") != str(job_id):
+            continue
+        merged = dict(row)
+        events = merged.get("events") if isinstance(merged.get("events"), list) else []
+        events.append(
+            {
+                "id": f"dse-{uuid.uuid4().hex[:10]}",
+                "created_at": _now_iso(),
+                "level": str(level or "info"),
+                "message": str(message or ""),
+                "data": dict(data or {}),
+            }
+        )
+        merged["events"] = events[-500:]
+        merged["updated_at"] = _now_iso()
+        jobs[idx] = merged
+        updated = merged
+        break
+    if updated is None:
+        return None
+    _save_json_pref(_ft_distill_jobs_key(), jobs[-5000:])
+    return updated
+
+
+def save_multitask_adapter_map(mapping: dict[str, dict]) -> dict:
+    normalized: dict[str, dict] = {}
+    for task_name, rec in (mapping or {}).items():
+        key = str(task_name or "").strip().lower()
+        if not key:
+            continue
+        row = rec if isinstance(rec, dict) else {}
+        normalized[key] = {
+            "adapter_id": str(row.get("adapter_id") or "").strip(),
+            "version": str(row.get("version") or "").strip(),
+            "target_model": str(row.get("target_model") or "").strip(),
+            "updated_at": _now_iso(),
+        }
+    payload = {"mapping": normalized, "updated_at": _now_iso()}
+    _save_json_pref(_ft_multitask_adapter_map_key(), payload)
+    return payload
+
+
+def get_multitask_adapter_map() -> dict:
+    row = _load_json_pref(_ft_multitask_adapter_map_key(), {})
+    if not isinstance(row, dict):
+        return {"mapping": {}, "updated_at": ""}
+    mapping = row.get("mapping") if isinstance(row.get("mapping"), dict) else {}
+    return {"mapping": mapping, "updated_at": str(row.get("updated_at") or "")}
+
+
+def upsert_ft_sample_curation(
+    sample_id: str,
+    approved: bool | None = None,
+    label: str = "",
+    notes: str = "",
+    reviewer: str = "system",
+) -> dict:
+    data = _load_json_pref(_ft_sample_curation_key(), {})
+    if not isinstance(data, dict):
+        data = {}
+    row = data.get(sample_id) if isinstance(data.get(sample_id), dict) else {}
+    rec = dict(row)
+    rec["sample_id"] = str(sample_id or "").strip()
+    if approved is not None:
+        rec["approved"] = bool(approved)
+    if label.strip():
+        rec["label"] = label.strip()
+    if notes.strip():
+        rec["notes"] = notes.strip()
+    rec["reviewer"] = str(reviewer or "system")
+    rec["updated_at"] = _now_iso()
+    data[rec["sample_id"]] = rec
+    _save_json_pref(_ft_sample_curation_key(), data)
+    return rec
+
+
+def get_ft_sample_curation(sample_id: str) -> dict | None:
+    data = _load_json_pref(_ft_sample_curation_key(), {})
+    if not isinstance(data, dict):
+        return None
+    row = data.get(sample_id)
+    return row if isinstance(row, dict) else None
+
+
+def list_ft_sample_curation() -> dict[str, dict]:
+    data = _load_json_pref(_ft_sample_curation_key(), {})
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): v for k, v in data.items() if isinstance(v, dict)}
+
+
+def save_synthetic_batch(
+    batch_id: str,
+    topic: str,
+    row_count: int,
+    params: dict | None = None,
+    dataset_id: str = "",
+    source: str = "agent_swarm",
+) -> dict:
+    rows = _load_json_pref(_ft_synthetic_batches_key(), [])
+    rec = {
+        "batch_id": str(batch_id or "").strip(),
+        "topic": str(topic or "").strip(),
+        "row_count": int(row_count),
+        "source": str(source or "agent_swarm").strip(),
+        "dataset_id": str(dataset_id or "").strip(),
+        "params": dict(params or {}),
+        "created_at": _now_iso(),
+    }
+    rows = [r for r in rows if str(r.get("batch_id") or "") != rec["batch_id"]]
+    rows.append(rec)
+    _save_json_pref(_ft_synthetic_batches_key(), rows[-2000:])
+    return rec
+
+
+def list_synthetic_batches(limit: int = 100) -> list[dict]:
+    rows = _load_json_pref(_ft_synthetic_batches_key(), [])
+    rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    return rows[: max(1, int(limit))]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3247,4 +3767,251 @@ def ingest_rag_for_org(text: str, org_id: str, source: str = "", metadata: dict 
         return True
     except Exception:
         return False
+
+
+# ── Marketplace agents ────────────────────────────────────────────────────────
+
+def _mkt_index_key() -> str:
+    return "mkt_agents:index"
+
+
+def save_marketplace_agent(
+    agent_id: str,
+    name: str,
+    icon: str,
+    description: str,
+    system_prompt: str,
+    keywords: list,
+    preferred_providers: list,
+    temperature: float,
+    tier: str,
+    source: str = "imported",
+    org_id: str = "",
+    version: int = 1,
+) -> None:
+    """Persist a marketplace agent.  Overwrites existing record with same id."""
+    record = {
+        "id":                  agent_id,
+        "name":                name,
+        "icon":                icon,
+        "description":         description,
+        "system_prompt":       system_prompt,
+        "keywords":            keywords,
+        "preferred_providers": preferred_providers,
+        "temperature":         temperature,
+        "tier":                tier,
+        "source":              source,
+        "org_id":              org_id,
+        "version":             version,
+        "created_at":          time.time(),
+    }
+    save_pref(f"mkt_agent:{agent_id}", json.dumps(record))
+    # update index
+    raw = load_pref(_mkt_index_key(), "[]")
+    try:
+        index: list = json.loads(raw)
+    except Exception:
+        index = []
+    if agent_id not in index:
+        index.append(agent_id)
+    save_pref(_mkt_index_key(), json.dumps(index))
+
+
+def load_marketplace_agents(source: str | None = None, org_id: str | None = None) -> list[dict]:
+    """Return all marketplace agents, optionally filtered by source or org_id."""
+    raw = load_pref(_mkt_index_key(), "[]")
+    try:
+        index: list = json.loads(raw)
+    except Exception:
+        return []
+    agents = []
+    for aid in index:
+        raw_agent = load_pref(f"mkt_agent:{aid}", "")
+        if not raw_agent:
+            continue
+        try:
+            rec = json.loads(raw_agent)
+        except Exception:
+            continue
+        if source is not None and rec.get("source") != source:
+            continue
+        if org_id is not None and rec.get("org_id") != org_id:
+            continue
+        agents.append(rec)
+    return agents
+
+
+def delete_marketplace_agent(agent_id: str) -> bool:
+    """Remove a marketplace agent by id. Returns True if it existed."""
+    raw = load_pref(f"mkt_agent:{agent_id}", "")
+    if not raw:
+        return False
+    save_pref(f"mkt_agent:{agent_id}", "")
+    # remove from index
+    raw_idx = load_pref(_mkt_index_key(), "[]")
+    try:
+        index: list = json.loads(raw_idx)
+    except Exception:
+        index = []
+    index = [i for i in index if i != agent_id]
+    save_pref(_mkt_index_key(), json.dumps(index))
+    return True
+
+
+def save_marketplace_agent_review(
+    agent_id: str,
+    username: str,
+    rating: int,
+    comment: str,
+) -> dict:
+    """Save a review for a marketplace agent (one review per username/agent pair)."""
+    review_key = f"mkt_reviews:{agent_id}"
+    raw = load_pref(review_key, "{}")
+    try:
+        reviews: dict = json.loads(raw)
+    except Exception:
+        reviews = {}
+    reviews[username] = {
+        "username": username,
+        "rating":   max(1, min(5, int(rating))),
+        "comment":  str(comment)[:1000],
+        "ts":       time.time(),
+    }
+    save_pref(review_key, json.dumps(reviews))
+    return reviews[username]
+
+
+def list_marketplace_agent_reviews(agent_id: str) -> list[dict]:
+    """Return all reviews for a marketplace agent, sorted newest first."""
+    raw = load_pref(f"mkt_reviews:{agent_id}", "{}")
+    try:
+        reviews: dict = json.loads(raw)
+    except Exception:
+        return []
+    return sorted(reviews.values(), key=lambda r: r.get("ts", 0), reverse=True)
+
+
+def list_marketplace_agent_versions(agent_id: str) -> list[dict]:
+    """Return version history for a marketplace agent (simplified — current + archived)."""
+    raw_versions = load_pref(f"mkt_agent_versions:{agent_id}", "[]")
+    try:
+        versions: list = json.loads(raw_versions)
+    except Exception:
+        versions = []
+    # Include current record as the latest version entry
+    raw_current = load_pref(f"mkt_agent:{agent_id}", "")
+    if raw_current:
+        try:
+            current = json.loads(raw_current)
+            entry = {
+                "version":    current.get("version", 1),
+                "name":       current.get("name", ""),
+                "saved_at":   current.get("created_at", 0),
+                "is_current": True,
+            }
+            # de-duplicate
+            versions = [v for v in versions if v.get("version") != entry["version"]]
+            versions.append(entry)
+            versions.sort(key=lambda v: v.get("version", 0), reverse=True)
+        except Exception:
+            pass
+    return versions
+
+
+# ── Architecture blueprints ───────────────────────────────────────────────────
+
+def _bp_index_key() -> str:
+    return "arch_blueprints:index"
+
+
+def save_architecture_blueprint(name: str, snapshot: dict, notes: str = "") -> dict:
+    """Save a named blueprint snapshot. Each save increments the version counter."""
+    # load current version counter
+    raw_current = load_pref(f"arch_bp:{name}:latest", "")
+    current_version = 0
+    if raw_current:
+        try:
+            current_version = json.loads(raw_current).get("version", 0)
+        except Exception:
+            pass
+    new_version = current_version + 1
+    record = {
+        "name":       name,
+        "version":    new_version,
+        "snapshot":   snapshot,
+        "notes":      notes,
+        "saved_at":   time.time(),
+    }
+    save_pref(f"arch_bp:{name}:v{new_version}", json.dumps(record))
+    save_pref(f"arch_bp:{name}:latest",          json.dumps(record))
+    # update index
+    raw_idx = load_pref(_bp_index_key(), "[]")
+    try:
+        index: list = json.loads(raw_idx)
+    except Exception:
+        index = []
+    if name not in index:
+        index.append(name)
+    save_pref(_bp_index_key(), json.dumps(index))
+    return record
+
+
+def load_architecture_blueprint(name: str, version: int | None = None) -> dict | None:
+    """Load a named blueprint (latest, or a specific version)."""
+    if version is not None:
+        raw = load_pref(f"arch_bp:{name}:v{version}", "")
+    else:
+        raw = load_pref(f"arch_bp:{name}:latest", "")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def list_architecture_blueprints(name: str = "", limit: int = 50) -> list[dict]:
+    """List saved blueprints, including historical versions for each name."""
+    raw_idx = load_pref(_bp_index_key(), "[]")
+    try:
+        index: list = json.loads(raw_idx)
+    except Exception:
+        return []
+    results = []
+    for bp_name in index:
+        if name and not bp_name.startswith(name):
+            continue
+        latest_raw = load_pref(f"arch_bp:{bp_name}:latest", "")
+        if not latest_raw:
+            continue
+        try:
+            latest_rec = json.loads(latest_raw)
+            latest_version = int(latest_rec.get("version", 0) or 0)
+        except Exception:
+            latest_version = 0
+        if latest_version <= 0:
+            continue
+
+        for ver in range(1, latest_version + 1):
+            raw = load_pref(f"arch_bp:{bp_name}:v{ver}", "")
+            if not raw:
+                continue
+            try:
+                rec = json.loads(raw)
+                results.append({
+                    "name": rec["name"],
+                    "version": rec["version"],
+                    "notes": rec.get("notes", ""),
+                    "saved_at": rec.get("saved_at", 0),
+                })
+            except Exception:
+                continue
+
+    results.sort(key=lambda r: r.get("saved_at", 0), reverse=True)
+    return results[:limit]
+
+
+def load_architecture_registry(name: str, version: int | None = None) -> dict | None:
+    """Load a registry entry (alias for load_architecture_blueprint for now)."""
+    return load_architecture_blueprint(name, version)
 

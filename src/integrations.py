@@ -1,9 +1,4 @@
-"""Nexus ecosystem integrations with local state-backed behavior.
-
-This module provides a fully functional local integration layer for Tunnel,
-Guardian, and Edge flows while leaving transport details pluggable for future
-remote backends.
-"""
+"""Nexus ecosystem integrations with remote-first behavior and local fallback."""
 
 from __future__ import annotations
 
@@ -51,6 +46,7 @@ _tunnel_state = {
     "error": None,
     "connected_at": None,
     "endpoint": None,
+    "mode": "local",
 }
 
 _guardian_state = {
@@ -61,6 +57,8 @@ _guardian_state = {
     "registered_at": None,
     "events": [],
     "event_seq": 0,
+    "api_key": None,
+    "mode": "local",
 }
 
 _edge_state = {
@@ -70,77 +68,143 @@ _edge_state = {
     "registered_at": None,
     "model_ids": [],
     "max_concurrent_requests": 0,
+    "mode": "local",
 }
 
 
+def _post_json(url: str, payload: dict, headers: dict | None = None, timeout: int = 30) -> dict | None:
+    try:
+        import requests
+        resp = requests.post(url, json=payload, headers=headers or {}, timeout=timeout)
+        resp.raise_for_status()
+        if resp.headers.get("content-type", "").startswith("application/json"):
+            return resp.json()
+    except Exception:
+        return None
+    return None
+
+
+def _get_json(url: str, headers: dict | None = None, timeout: int = 15) -> dict | None:
+    try:
+        import requests
+        resp = requests.get(url, headers=headers or {}, timeout=timeout)
+        resp.raise_for_status()
+        if resp.headers.get("content-type", "").startswith("application/json"):
+            return resp.json()
+    except Exception:
+        return None
+    return None
+
+
 def connect_tunnel(config: NexusTunnelConfig) -> str:
-    """Establish a local tunnel session and return the generated public URL."""
     if not config.endpoint or not config.auth_token:
         raise ValueError("Tunnel config requires 'endpoint' and 'auth_token'")
 
-    instance_hash = hashlib.sha256(
-        f"{config.endpoint}|{config.auth_token}".encode("utf-8")
-    ).hexdigest()[:8]
-    public_url = f"https://tunnel-{instance_hash}.nexus.local"
+    remote = _post_json(
+        config.endpoint.rstrip("/") + "/connect",
+        {
+            "local_port": config.local_port,
+            "subdomain": config.subdomain,
+            "auto_reconnect": config.auto_reconnect,
+        },
+        headers={"Authorization": f"Bearer {config.auth_token}"},
+        timeout=30,
+    )
+    public_url = remote.get("public_url") if remote else None
+    mode = "remote" if public_url else "local"
+    if not public_url:
+        instance_hash = hashlib.sha256(
+            f"{config.endpoint}|{config.auth_token}|{config.local_port}|{config.subdomain}".encode("utf-8")
+        ).hexdigest()[:8]
+        public_url = f"https://tunnel-{instance_hash}.nexus.local"
 
     with _state_lock:
-        _tunnel_state["connected"] = True
-        _tunnel_state["url"] = public_url
-        _tunnel_state["error"] = None
-        _tunnel_state["connected_at"] = datetime.now(timezone.utc).isoformat()
-        _tunnel_state["endpoint"] = config.endpoint
+        _tunnel_state.update({
+            "connected": True,
+            "url": public_url,
+            "error": None,
+            "connected_at": datetime.now(timezone.utc).isoformat(),
+            "endpoint": config.endpoint,
+            "mode": mode,
+        })
 
     return public_url
 
 
 def disconnect_tunnel() -> None:
-    """Close any active Nexus Tunnel connection."""
     with _state_lock:
         _tunnel_state["connected"] = False
         _tunnel_state["url"] = None
         _tunnel_state["error"] = None
         _tunnel_state["connected_at"] = None
         _tunnel_state["endpoint"] = None
+        _tunnel_state["mode"] = "local"
 
 
 def get_tunnel_status() -> dict:
-    """Return current tunnel connection status."""
     with _state_lock:
         return dict(_tunnel_state)
 
 
 def register_with_guardian(config: GuardianConfig) -> str:
-    """Register this instance with Guardian and return the instance ID."""
     if not config.endpoint or not config.api_key or not config.organisation_id:
-        raise ValueError(
-            "Guardian config requires 'endpoint', 'api_key', and 'organisation_id'"
-        )
+        raise ValueError("Guardian config requires 'endpoint', 'api_key', and 'organisation_id'")
 
-    instance_id = hashlib.sha256(
-        f"{config.organisation_id}|{config.endpoint}".encode("utf-8")
-    ).hexdigest()[:12]
+    remote = _post_json(
+        config.endpoint.rstrip("/") + "/register",
+        {
+            "organisation_id": config.organisation_id,
+            "enforce_policies": config.enforce_policies,
+        },
+        headers={"Authorization": f"Bearer {config.api_key}"},
+        timeout=30,
+    )
+    instance_id = (remote or {}).get("instance_id")
+    mode = "remote" if instance_id else "local"
+    if not instance_id:
+        instance_id = hashlib.sha256(
+            f"{config.organisation_id}|{config.endpoint}".encode("utf-8")
+        ).hexdigest()[:12]
 
     with _state_lock:
-        _guardian_state["registered"] = True
-        _guardian_state["instance_id"] = instance_id
-        _guardian_state["organisation_id"] = config.organisation_id
-        _guardian_state["endpoint"] = config.endpoint
-        _guardian_state["registered_at"] = datetime.now(timezone.utc).isoformat()
+        _guardian_state.update({
+            "registered": True,
+            "instance_id": instance_id,
+            "organisation_id": config.organisation_id,
+            "endpoint": config.endpoint,
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+            "api_key": config.api_key,
+            "mode": mode,
+        })
 
     return instance_id
 
 
 def push_audit_event_to_guardian(event: dict) -> dict:
-    """Store an audit event in Guardian local queue and return a receipt."""
     with _state_lock:
         if not _guardian_state.get("registered"):
             raise ValueError("Guardian is not registered")
+        endpoint = _guardian_state.get("endpoint")
+        api_key = _guardian_state.get("api_key")
+        mode = _guardian_state.get("mode", "local")
 
+    if endpoint and api_key and mode == "remote":
+        remote = _post_json(
+            str(endpoint).rstrip("/") + "/events",
+            {"event": dict(event or {})},
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        )
+        if remote:
+            return remote
+
+    with _state_lock:
         _guardian_state["event_seq"] += 1
         receipt = {
             "event_id": f"evt-{_guardian_state['event_seq']:06d}",
             "received_at": datetime.now(timezone.utc).isoformat(),
             "event": dict(event or {}),
+            "mode": "local",
         }
         _guardian_state["events"].append(receipt)
         _guardian_state["events"] = _guardian_state["events"][-500:]
@@ -148,7 +212,6 @@ def push_audit_event_to_guardian(event: dict) -> dict:
 
 
 def pull_policy_update() -> dict:
-    """Return active Guardian policy bundle for this instance."""
     with _state_lock:
         if not _guardian_state.get("registered"):
             return {
@@ -158,33 +221,49 @@ def pull_policy_update() -> dict:
                 "next_sync": None,
                 "registered": False,
             }
+        endpoint = _guardian_state.get("endpoint")
+        api_key = _guardian_state.get("api_key")
+        mode = _guardian_state.get("mode", "local")
+        organisation_id = _guardian_state.get("organisation_id")
 
-        now = datetime.now(timezone.utc).isoformat()
-        return {
-            "policies": [
-                {
-                    "id": "default-deny-unsafe-shell",
-                    "severity": "high",
-                    "enabled": True,
-                    "scope": "tool_actions",
-                },
-                {
-                    "id": "mask-sensitive-outputs",
-                    "severity": "medium",
-                    "enabled": True,
-                    "scope": "output",
-                },
-            ],
-            "version": "1.0.0",
-            "last_updated": now,
-            "next_sync": now,
-            "registered": True,
-            "organisation_id": _guardian_state.get("organisation_id"),
-        }
+    if endpoint and api_key and mode == "remote":
+        remote = _get_json(
+            str(endpoint).rstrip("/") + "/policies",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        )
+        if remote:
+            remote.setdefault("registered", True)
+            remote.setdefault("organisation_id", organisation_id)
+            remote.setdefault("mode", "remote")
+            return remote
+
+    now = datetime.now(timezone.utc).isoformat()
+    return {
+        "policies": [
+            {
+                "id": "default-deny-unsafe-shell",
+                "severity": "high",
+                "enabled": True,
+                "scope": "tool_actions",
+            },
+            {
+                "id": "mask-sensitive-outputs",
+                "severity": "medium",
+                "enabled": True,
+                "scope": "output",
+            },
+        ],
+        "version": "1.0.0",
+        "last_updated": now,
+        "next_sync": now,
+        "registered": True,
+        "organisation_id": organisation_id,
+        "mode": "local",
+    }
 
 
 def get_guardian_status() -> dict:
-    """Return current Guardian registration and queue status."""
     with _state_lock:
         return {
             "registered": bool(_guardian_state.get("registered")),
@@ -193,31 +272,46 @@ def get_guardian_status() -> dict:
             "endpoint": _guardian_state.get("endpoint"),
             "registered_at": _guardian_state.get("registered_at"),
             "queued_events": len(_guardian_state.get("events") or []),
+            "mode": _guardian_state.get("mode", "local"),
         }
 
 
 def register_edge_node(config: EdgeNodeConfig) -> str:
-    """Register this machine as an edge node and return node ID."""
     if not config.orchestrator_url:
         raise ValueError("Edge config requires 'orchestrator_url'")
 
-    node_id = (config.node_id or "").strip()
+    remote = _post_json(
+        config.orchestrator_url.rstrip("/") + "/edge/register",
+        {
+            "node_id": config.node_id,
+            "model_ids": list(config.model_ids or []),
+            "heartbeat_interval_s": int(config.heartbeat_interval_s),
+            "max_concurrent_requests": int(config.max_concurrent_requests),
+        },
+        headers={"Authorization": f"Bearer {config.api_key}"} if config.api_key else None,
+        timeout=30,
+    )
+
+    node_id = (remote or {}).get("node_id") or (config.node_id or "").strip()
+    mode = "remote" if remote else "local"
     if not node_id:
         node_id = hashlib.sha256(config.orchestrator_url.encode("utf-8")).hexdigest()[:12]
 
     with _state_lock:
-        _edge_state["registered"] = True
-        _edge_state["node_id"] = node_id
-        _edge_state["orchestrator_url"] = config.orchestrator_url
-        _edge_state["registered_at"] = datetime.now(timezone.utc).isoformat()
-        _edge_state["model_ids"] = list(config.model_ids or [])
-        _edge_state["max_concurrent_requests"] = int(config.max_concurrent_requests)
+        _edge_state.update({
+            "registered": True,
+            "node_id": node_id,
+            "orchestrator_url": config.orchestrator_url,
+            "registered_at": datetime.now(timezone.utc).isoformat(),
+            "model_ids": list(config.model_ids or []),
+            "max_concurrent_requests": int(config.max_concurrent_requests),
+            "mode": mode,
+        })
 
     return node_id
 
 
 def deregister_edge_node() -> None:
-    """Gracefully deregister this edge node."""
     with _state_lock:
         _edge_state["registered"] = False
         _edge_state["node_id"] = None
@@ -225,9 +319,9 @@ def deregister_edge_node() -> None:
         _edge_state["registered_at"] = None
         _edge_state["model_ids"] = []
         _edge_state["max_concurrent_requests"] = 0
+        _edge_state["mode"] = "local"
 
 
 def get_edge_status() -> dict:
-    """Return current edge node registration state."""
     with _state_lock:
         return dict(_edge_state)

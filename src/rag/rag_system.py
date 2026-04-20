@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
-from .chunker import DocumentChunker, ChunkerConfig
+from .chunker import DocumentChunker, ChunkerConfig, Chunk
 from .embeddings import EmbeddingModel, EmbeddingConfig
 from .vector_store import VectorStore, VectorStoreConfig, VectorStoreType
 
@@ -146,7 +146,19 @@ class RAGSystem:
         meta = dict(metadata or {})
         chunks = self.chunker.split(text, metadata=meta)
         if not chunks:
-            return 0
+            # Ensure very short documents are still retrievable.
+            normalized = (text or "").strip()
+            if not normalized:
+                return 0
+            chunks = [
+                Chunk(
+                    text=normalized,
+                    index=0,
+                    start_char=0,
+                    end_char=len(normalized),
+                    metadata={**meta, "chunk_index": 0, "chunk_size": len(normalized)},
+                )
+            ]
 
         source = str(meta.get("source") or doc_id_prefix or "").strip()
         incremental = bool(meta.get("incremental", False))

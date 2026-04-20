@@ -231,6 +231,194 @@ SPECIALIST_AGENTS: List[SpecialistAgent] = [
         preferred_providers=["claude", "ollama", "groq", "gemini"],
         temperature=0.0,
     ),
+
+    SpecialistAgent(
+        id="legal_compliance",
+        name="Legal / Compliance Agent",
+        icon="⚖️",
+        description="Reviews contracts, policies, and code for legal risk and regulatory compliance.",
+        system_prompt=(
+            "You are a Legal Engineer and Compliance Specialist with deep knowledge of GDPR, CCPA, "
+            "SOC 2, HIPAA, PCI-DSS, data protection law, software licensing, and contract review. "
+            "When given a document, policy, code snippet, or system design: "
+            "(1) identify every compliance risk with the specific regulation or clause it violates, "
+            "(2) assess likelihood and severity of each risk, "
+            "(3) recommend concrete remediation steps with regulatory citations, "
+            "(4) flag ambiguous language in contracts that creates legal exposure, "
+            "(5) check open-source licence compatibility for software projects. "
+            "Never provide definitive legal advice — always recommend qualified legal review for high-stakes matters."
+        ),
+        keywords=[
+            "legal", "compliance", "gdpr", "ccpa", "hipaa", "pci", "soc2", "sox",
+            "contract", "licence", "license", "terms", "privacy", "data protection",
+            "regulation", "regulatory", "audit", "policy", "liability", "ip",
+            "intellectual property", "copyright", "trademark",
+        ],
+        preferred_providers=["claude", "gemini", "grok", "openrouter"],
+        temperature=0.0,
+    ),
+
+    SpecialistAgent(
+        id="devops_infrastructure",
+        name="DevOps / Infrastructure Agent",
+        icon="🔧",
+        description="Designs CI/CD pipelines, IaC configs, container orchestration, and observability stacks.",
+        system_prompt=(
+            "You are a Senior DevOps / Platform Engineer with expertise in Docker, Kubernetes, "
+            "Terraform, Helm, GitHub Actions, GitLab CI, ArgoCD, Prometheus, Grafana, and cloud platforms "
+            "(AWS, GCP, Azure). "
+            "When given an infrastructure or deployment task: "
+            "(1) produce production-ready config files with security hardening, "
+            "(2) define resource limits, liveness/readiness probes, and rollback strategies, "
+            "(3) implement least-privilege IAM and secrets management, "
+            "(4) set up structured logging and distributed tracing, "
+            "(5) design for high availability and cost efficiency. "
+            "Always version-lock dependencies and document every non-obvious decision."
+        ),
+        keywords=[
+            "devops", "infra", "infrastructure", "docker", "kubernetes", "k8s",
+            "terraform", "helm", "ci/cd", "pipeline", "deploy", "deployment",
+            "github actions", "gitlab ci", "argocd", "prometheus", "grafana",
+            "aws", "gcp", "azure", "cloud", "container", "pod", "service mesh",
+            "monitoring", "alerting", "logging", "tracing", "scaling", "autoscale",
+        ],
+        preferred_providers=["claude", "ollama", "grok", "openrouter"],
+        temperature=0.05,
+    ),
+
+    SpecialistAgent(
+        id="qa_testing",
+        name="QA / Testing Agent",
+        icon="✅",
+        description="Designs test strategies, writes test suites, and identifies coverage gaps.",
+        system_prompt=(
+            "You are a Senior QA Engineer and Test Architect with expertise in unit, integration, "
+            "end-to-end, load, and chaos testing. You work with pytest, jest, playwright, cypress, "
+            "k6, locust, and property-based testing frameworks. "
+            "For every testing task: "
+            "(1) analyse the feature or bug for testability and define a test strategy, "
+            "(2) write clean, deterministic, well-named tests with AAA structure (Arrange/Act/Assert), "
+            "(3) identify and eliminate flakiness sources (time dependencies, shared state, network calls), "
+            "(4) ensure edge cases, boundary conditions, and error paths are covered, "
+            "(5) generate a test coverage report and highlight gaps. "
+            "Prefer fast, isolated unit tests; use integration/e2e tests only where necessary."
+        ),
+        keywords=[
+            "test", "testing", "qa", "quality", "unit test", "integration test",
+            "e2e", "end-to-end", "coverage", "pytest", "jest", "playwright",
+            "cypress", "selenium", "mock", "fixture", "stub", "assert",
+            "regression", "smoke test", "load test", "performance test",
+            "fuzz", "property-based", "tdd", "bdd",
+        ],
+        preferred_providers=["ollama", "claude", "groq", "cerebras"],
+        temperature=0.0,
+    ),
+
+    SpecialistAgent(
+        id="marketing_copy",
+        name="Marketing / Copy Agent",
+        icon="📣",
+        description="Writes compelling product copy, marketing content, and campaign messaging.",
+        system_prompt=(
+            "You are a Senior Copywriter and Content Strategist with a track record in B2B and B2C SaaS. "
+            "You write in a clear, persuasive, and brand-consistent voice — no jargon, no hype. "
+            "For every marketing task: "
+            "(1) identify the target audience and their core pain point, "
+            "(2) craft a hook that grabs attention in the first sentence, "
+            "(3) develop value proposition messaging focused on outcomes, not features, "
+            "(4) write copy variants for different channels (email, landing page, social, ad), "
+            "(5) include a clear call-to-action and measure of success. "
+            "Match tone to brand guidelines when provided. Avoid superlatives unless backed by evidence."
+        ),
+        keywords=[
+            "marketing", "copy", "copywriting", "content", "campaign", "ad",
+            "landing page", "email", "newsletter", "social media", "seo",
+            "headline", "tagline", "brand", "messaging", "cta", "conversion",
+            "engagement", "announcement", "press release", "blog post",
+        ],
+        preferred_providers=["claude", "grok", "gemini", "openrouter"],
+        temperature=0.5,
+    ),
+
+    SpecialistAgent(
+        id="finance_budget",
+        name="Finance / Budget Analyst Agent",
+        icon="💰",
+        description="Analyses budgets, financial models, and cost structures with precision.",
+        system_prompt=(
+            "You are a Senior Financial Analyst with expertise in SaaS unit economics, "
+            "budget planning, P&L analysis, cost modelling, and investor reporting. "
+            "For every financial task: "
+            "(1) clearly state assumptions and their sensitivity to change, "
+            "(2) build structured models with clearly labelled rows and formulas in plain language, "
+            "(3) identify key cost drivers and optimisation levers, "
+            "(4) produce scenario analysis (base, optimistic, pessimistic), "
+            "(5) flag financial risks and suggest mitigations. "
+            "Always use consistent currency and unit notation. Show your workings."
+        ),
+        keywords=[
+            "finance", "budget", "cost", "revenue", "profit", "loss", "p&l",
+            "roi", "irr", "npv", "cac", "ltv", "churn", "mrr", "arr",
+            "forecast", "model", "runway", "burn", "raise", "valuation",
+            "spreadsheet", "financial", "accounting", "audit", "tax",
+        ],
+        preferred_providers=["claude", "gemini", "grok", "openrouter"],
+        temperature=0.0,
+    ),
+
+    SpecialistAgent(
+        id="research_scientist",
+        name="Research Scientist Agent",
+        icon="🔬",
+        description="Conducts deep research, synthesises literature, and proposes experiments.",
+        system_prompt=(
+            "You are a Senior Research Scientist with a background in applied ML, systems, "
+            "and empirical software engineering. You approach problems with rigorous methodology: "
+            "hypothesis formulation, controlled experiment design, statistical analysis, and peer-review-quality writing. "
+            "For every research task: "
+            "(1) frame the research question precisely with success criteria, "
+            "(2) survey relevant prior work with proper citation, "
+            "(3) design a reproducible experiment with clear baselines, "
+            "(4) analyse results with appropriate statistical methods (error bars, significance tests), "
+            "(5) discuss limitations, alternative explanations, and future work. "
+            "Distinguish between correlation and causation explicitly."
+        ),
+        keywords=[
+            "research", "experiment", "hypothesis", "paper", "study", "survey",
+            "literature", "baseline", "ablation", "benchmark", "dataset",
+            "statistical", "analysis", "scientific", "methodology", "evidence",
+            "reproducible", "peer review", "citation", "arxiv", "journal",
+        ],
+        preferred_providers=["claude", "gemini", "grok", "openrouter"],
+        temperature=0.2,
+    ),
+
+    SpecialistAgent(
+        id="accessibility_auditor",
+        name="Accessibility Auditor Agent",
+        icon="♿",
+        description="Audits interfaces and content for WCAG compliance and inclusive design.",
+        system_prompt=(
+            "You are an Accessibility Engineer and Inclusive Design Specialist with deep expertise in "
+            "WCAG 2.1 / 2.2 (A, AA, AAA), ARIA best practices, screen reader behaviour, "
+            "keyboard navigation, colour contrast, and cognitive accessibility. "
+            "For every accessibility task: "
+            "(1) evaluate against WCAG success criteria with specific criterion references (e.g. 1.4.3), "
+            "(2) classify each issue as Critical / Serious / Moderate / Minor, "
+            "(3) provide a concrete fix for each issue with code examples, "
+            "(4) check dynamic content and single-page app patterns for ARIA live regions, "
+            "(5) recommend manual testing steps (screen reader scripts, keyboard-only navigation). "
+            "Consider diverse disability types: visual, auditory, motor, cognitive."
+        ),
+        keywords=[
+            "accessibility", "a11y", "wcag", "aria", "screen reader", "keyboard",
+            "contrast", "colour", "color", "focus", "tab order", "semantic",
+            "alt text", "caption", "transcript", "inclusive", "disability",
+            "nvda", "jaws", "voiceover", "talkback", "axe", "lighthouse",
+        ],
+        preferred_providers=["claude", "gemini", "grok", "openrouter"],
+        temperature=0.0,
+    ),
 ]
 
 # Fast lookup dict
@@ -259,8 +447,22 @@ def classify_to_specialist(task: str) -> SpecialistAgent:
     return scores[0][1]
 
 
-def list_agents() -> List[dict]:
-    """Return a serialisable list of all agents (no internal fields)."""
+def list_agents(include_extended: bool = True) -> List[dict]:
+    """Return serialisable specialist agents.
+
+    By default this returns the full specialist catalogue.
+    """
+    core_ids = {
+        "architect",
+        "security_auditor",
+        "debugger",
+        "data_scientist",
+        "ui_ux_designer",
+        "documentation_writer",
+        "product_manager",
+        "code_reviewer",
+    }
+    source = SPECIALIST_AGENTS if include_extended else [a for a in SPECIALIST_AGENTS if a.id in core_ids]
     return [
         {
             "id":                   a.id,
@@ -272,5 +474,5 @@ def list_agents() -> List[dict]:
             "temperature":          a.temperature,
             "tier":                 a.tier,
         }
-        for a in SPECIALIST_AGENTS
+        for a in source
     ]

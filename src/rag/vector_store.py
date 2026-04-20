@@ -276,7 +276,8 @@ class VectorStore:
 
         elif self.config.store_type == VectorStoreType.FAISS:
             qvec = query_embedding.reshape(1, -1).astype("float32")
-            distances, indices = self.index.search(qvec, k)
+            search_k = max(k, len(self.metadata_store))
+            distances, indices = self.index.search(qvec, search_k)
             out = []
             idx_to_id = {info["index"]: did for did, info in self.metadata_store.items()}
             for dist, idx in zip(distances[0], indices[0]):
@@ -294,6 +295,8 @@ class VectorStore:
                     "score": float(dist),
                     "metadata": info["metadata"],
                 })
+                if len(out) >= k:
+                    break
             return out
 
         else:
@@ -301,9 +304,9 @@ class VectorStore:
             if len(embs) == 0:
                 return []
             sims = np.dot(embs, query_embedding)
-            top_idx = np.argsort(sims)[-k:][::-1]
+            sorted_idx = np.argsort(sims)[::-1]
             out = []
-            for idx in top_idx:
+            for idx in sorted_idx:
                 if not _metadata_matches(self.store["metadata"][idx], filter_metadata):
                     continue
                 out.append({
@@ -312,6 +315,8 @@ class VectorStore:
                     "score": float(sims[idx]),
                     "metadata": self.store["metadata"][idx],
                 })
+                if len(out) >= k:
+                    break
             return out
 
     # ------------------------------------------------------------------
