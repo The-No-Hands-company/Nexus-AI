@@ -43,11 +43,51 @@ _config: Dict[str, Any] = {
     "ensemble_threshold": 0.4,
     "hitl_approval_mode": os.getenv("HITL_APPROVAL_MODE", "off").lower(),
     "safety_profile":     os.getenv("SAFETY_POLICY_PROFILE", "standard").lower(),
+    "strict_mode_profile": os.getenv("STRICT_MODE_PROFILE", "strict").lower(),
+    "strict_no_guess_mode": os.getenv("STRICT_NO_GUESS_MODE", "true").lower() in ("1", "true", "yes", "on"),
+    "strict_confidence_threshold": float(os.getenv("STRICT_CONFIDENCE_THRESHOLD", "0.95")),
+    "strict_evidence_threshold": int(os.getenv("STRICT_EVIDENCE_THRESHOLD", "1")),
 }
+
+_STRICT_MODE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "balanced": {
+        "strict_no_guess_mode": False,
+        "strict_confidence_threshold": 0.80,
+        "strict_evidence_threshold": 0,
+    },
+    "strict": {
+        "strict_no_guess_mode": True,
+        "strict_confidence_threshold": 0.95,
+        "strict_evidence_threshold": 1,
+    },
+    "paranoid": {
+        "strict_no_guess_mode": True,
+        "strict_confidence_threshold": 0.98,
+        "strict_evidence_threshold": 2,
+    },
+}
+
+
+def _apply_strict_mode_profile(profile: str) -> str:
+    selected = str(profile or "strict").lower().strip()
+    if selected not in _STRICT_MODE_PRESETS:
+        selected = "strict"
+    preset = _STRICT_MODE_PRESETS[selected]
+    _config["strict_mode_profile"] = selected
+    _config["strict_no_guess_mode"] = bool(preset["strict_no_guess_mode"])
+    _config["strict_confidence_threshold"] = float(preset["strict_confidence_threshold"])
+    _config["strict_evidence_threshold"] = int(preset["strict_evidence_threshold"])
+    return selected
+
+
+_apply_strict_mode_profile(_config.get("strict_mode_profile", "strict"))
+
 def get_config() -> Dict[str, Any]: return dict(_config)
 def update_config(provider=None, model=None, temperature=None, persona=None,
                   ensemble_mode=None, ensemble_threshold=None, hitl_approval_mode=None,
-                  safety_profile=None):
+                  safety_profile=None, strict_no_guess_mode=None,
+                  strict_confidence_threshold=None, strict_evidence_threshold=None,
+                  strict_mode_profile=None):
     if provider           is not None: _config["provider"]           = provider.lower()
     if model              is not None: _config["model"]              = model
     if temperature        is not None: _config["temperature"]        = float(temperature)
@@ -63,6 +103,30 @@ def update_config(provider=None, model=None, temperature=None, persona=None,
     if safety_profile is not None:
         profile = str(safety_profile).lower().strip()
         _config["safety_profile"] = profile if profile in SAFETY_POLICY_PROFILES else "standard"
+    if strict_mode_profile is not None:
+        _apply_strict_mode_profile(strict_mode_profile)
+    if strict_no_guess_mode is not None:
+        if isinstance(strict_no_guess_mode, bool):
+            _config["strict_no_guess_mode"] = strict_no_guess_mode
+        else:
+            _config["strict_no_guess_mode"] = str(strict_no_guess_mode).lower().strip() in ("1", "true", "yes", "on")
+    if strict_confidence_threshold is not None:
+        try:
+            value = float(strict_confidence_threshold)
+            _config["strict_confidence_threshold"] = min(1.0, max(0.0, value))
+        except Exception:
+            pass
+    if strict_evidence_threshold is not None:
+        try:
+            value = int(strict_evidence_threshold)
+            _config["strict_evidence_threshold"] = max(0, value)
+        except Exception:
+            pass
+    # Keep profile metadata coherent when direct values diverge from preset values.
+    if strict_mode_profile is None and any(
+        v is not None for v in (strict_no_guess_mode, strict_confidence_threshold, strict_evidence_threshold)
+    ):
+        _config["strict_mode_profile"] = "custom"
     return dict(_config)
 
 # ── env ───────────────────────────────────────────────────────────────────────
@@ -866,7 +930,7 @@ Reply ONLY with valid JSON — no markdown fences, no extra text.
 
 Available actions:
 
-  { "action": "clarify",    "questions": [{"id":"q1","text":"?","options":["A","B"]}] }
+    { "action": "clarify",    "questions": [{"id":"q1","text":"?","options":["A","B"]}] }
   { "action": "plan",       "title": "What I'm building", "steps": ["1. ...", "2. ..."] }
   { "action": "think",      "thought": "brief reasoning" },
   { "action": "think_deep",  "query": "complex question", "mode": "tree" }  -- Tree-of-Thought,
@@ -930,6 +994,7 @@ Available actions:
 
 Rules:
 - clarify ONLY for new project creation where architecture choices matter. 2-4 questions max.
+- In strict no-guess mode, any unresolved uncertainty must return a structured clarification card instead of executing actions.
 - plan BEFORE building 3+ files. Then execute immediately.
 - clone_repo: use the exact URL from the user's message. Never use placeholder URLs.
 - commit_push: always include repo_url so the right repo gets pushed.
@@ -1355,6 +1420,239 @@ def _try_direct(task: str) -> Optional[str]:
         return tool_currency(float(m.group(1).replace(',','')), m.group(2), m.group(3))
     return None
 
+
+_STRICT_HIGH_RISK_ACTIONS = {
+    "write_file", "delete_file", "run_command", "clone_repo", "commit_push",
+    "create_repo", "api_call", "query_db", "db_migrate", "inspect_db",
+}
+_DESTRUCTIVE_ACTIONS = {
+    "write_file", "delete_file", "run_command", "clone_repo", "commit_push",
+    "create_repo", "api_call", "db_migrate",
+}
+_STRICT_EVIDENCE_ACTIONS = {
+    "web_search", "read_page", "api_call", "query_db", "inspect_db", "rag_query", "read_file",
+}
+_ACTION_REQUIRED_FIELDS: Dict[str, List[str]] = {
+    "respond": ["content"],
+    "clarify": ["questions"],
+    "run_command": ["cmd"],
+    "write_file": ["path", "content"],
+    "read_file": ["path"],
+    "delete_file": ["path"],
+    "clone_repo": ["url"],
+    "commit_push": ["message", "repo_url"],
+    "web_search": ["query"],
+    "api_call": ["method", "url"],
+    "query_db": ["connection_string", "query"],
+}
+
+
+def _task_has_format_requirement(task: str) -> bool:
+    t = (task or "").lower()
+    hints = ("json", "yaml", "csv", "markdown", "table", "bullet", "schema", "format", "xml", "code block", "```")
+    return any(h in t for h in hints)
+
+
+def _task_has_constraints(task: str) -> bool:
+    t = (task or "").lower()
+    hints = (
+        "must", "should", "do not", "don't", "without", "avoid", "strict", "only", "never", "constraint",
+    )
+    return any(h in t for h in hints)
+
+
+def _task_has_explicit_goal(task: str) -> bool:
+    t = (task or "").strip()
+    if len(t) < 12:
+        return False
+    return bool(re.search(r"\b(build|implement|create|fix|update|add|remove|refactor|explain|summarize|analyze|review|compare|design)\b", t, re.IGNORECASE))
+
+
+def _task_has_complete_inputs(task: str) -> bool:
+    t = (task or "").strip().lower()
+    if not t:
+        return False
+    if any(token in t for token in ("tbd", "todo", "something", "whatever", "etc", "as needed", "you decide")):
+        return False
+    return True
+
+
+def _missing_required_fields(action: Dict[str, Any]) -> List[str]:
+    kind = str(action.get("action", "")).strip()
+    required = _ACTION_REQUIRED_FIELDS.get(kind, [])
+    missing: List[str] = []
+    for field in required:
+        value = action.get(field)
+        if value is None:
+            missing.append(field)
+        elif isinstance(value, str) and not value.strip():
+            missing.append(field)
+        elif isinstance(value, list) and not value:
+            missing.append(field)
+    return missing
+
+
+def _conflicting_instruction_signal(task: str, kind: str) -> bool:
+    text = (task or "").lower()
+    if not kind:
+        return False
+    deny_hints = {
+        "run_command": ("don't run", "do not run", "no shell", "no command"),
+        "write_file": ("don't edit", "do not edit", "read only", "no edits"),
+        "delete_file": ("don't delete", "do not delete", "no delete"),
+        "api_call": ("no network", "offline only", "don't call api"),
+    }
+    return any(h in text for h in deny_hints.get(kind, ()))
+
+
+def _adversarial_self_check_issues(task: str, action: Dict[str, Any]) -> List[str]:
+    issues: List[str] = []
+    kind = str(action.get("action", ""))
+    content = str(action.get("content", ""))
+    if "TODO" in content or "TBD" in content or "assume" in content.lower():
+        issues.append("unverified assumptions in draft output")
+    if kind in _STRICT_HIGH_RISK_ACTIONS and any(x in str(action).lower() for x in ("example", "placeholder", "<", "...")):
+        issues.append("high-risk action contains non-deterministic placeholder input")
+    if not _task_has_complete_inputs(task) and kind in _STRICT_HIGH_RISK_ACTIONS:
+        issues.append("high-risk action inferred missing task inputs")
+    return issues
+
+
+def _build_clarification_payload(task: str, action: Dict[str, Any], reasons: List[str], score: float) -> Dict[str, Any]:
+    readable = {
+        "missing_parameters": "Required parameters are missing for the planned action.",
+        "conflicting_instructions": "The planned action conflicts with your instructions.",
+        "weak_retrieval_evidence": "There is not enough evidence gathered to execute safely.",
+        "low_model_confidence": "Model confidence is below the strict threshold.",
+        "schema_mismatch": "Planned action payload does not match required schema.",
+        "unsafe_side_effects": "Planned action has unsafe side effects under strict mode.",
+        "execution_contract_missing_goal": "Goal is not explicit enough for deterministic execution.",
+        "execution_contract_missing_inputs": "Inputs are incomplete for deterministic execution.",
+        "execution_contract_missing_constraints": "Constraints are not explicit.",
+        "execution_contract_missing_output_format": "Expected output format is not explicit.",
+        "conflicting_tool_output": "Tool output conflicts with prior context and needs confirmation.",
+        "adversarial_self_check": "Adversarial self-check found unresolved uncertainty.",
+    }
+    unclear = [readable.get(r, r.replace("_", " ")) for r in reasons]
+    action_name = str(action.get("action", "respond") or "respond")
+    options = [
+        {
+            "id": "provide-missing-inputs",
+            "label": "Provide missing inputs",
+            "description": "Share concrete values for required fields so execution can proceed deterministically.",
+            "recommended": True,
+        },
+        {
+            "id": "adjust-constraints",
+            "label": "Adjust constraints",
+            "description": "Clarify hard constraints, risk tolerance, and whether this action is allowed.",
+            "recommended": False,
+        },
+        {
+            "id": "confirm-proceed",
+            "label": "Confirm proceed",
+            "description": "Proceed anyway with explicit confirmation of the risk and intended action.",
+            "recommended": False,
+        },
+    ]
+    questions = [
+        {
+            "id": "execution_confirmation",
+            "text": f"Action '{action_name}' is blocked by strict mode. Choose next step:",
+            "options": ["Provide missing inputs", "Adjust constraints", "Confirm proceed"],
+        },
+        {
+            "id": "required_details",
+            "text": "Provide the exact values or constraints needed to proceed.",
+            "type": "text",
+            "placeholder": "Example: target file path, command args, expected output format, evidence source...",
+        },
+    ]
+    return {
+        "type": "clarify",
+        "schema": "nexus.clarification.v1",
+        "card": {
+            "what_is_unclear": unclear,
+            "why_it_blocks_correctness": "Strict no-guess mode blocks execution when doubt is non-zero to prevent incorrect or unsafe actions.",
+            "options": options,
+            "allow_freeform": True,
+            "freeform_label": "Additional clarification",
+            "doubt_score": round(score, 3),
+            "blocked_action": action_name,
+        },
+        "questions": questions,
+        "reason_codes": reasons,
+    }
+
+
+def _strict_doubt_assessment(
+    task: str,
+    action: Dict[str, Any],
+    llm_confidence: float,
+    evidence_hits: int,
+    recent_conflict: str,
+    confidence_threshold: float,
+    evidence_threshold: int,
+) -> Dict[str, Any]:
+    reasons: List[str] = []
+    score = 0.0
+    kind = str(action.get("action", "")).strip()
+
+    missing_fields = _missing_required_fields(action)
+    if missing_fields:
+        reasons.append("missing_parameters")
+        score += 0.30
+
+    if missing_fields:
+        reasons.append("schema_mismatch")
+        score += 0.20
+
+    if _conflicting_instruction_signal(task, kind):
+        reasons.append("conflicting_instructions")
+        score += 0.25
+
+    if recent_conflict:
+        reasons.append("conflicting_tool_output")
+        score += 0.20
+
+    if kind in _STRICT_HIGH_RISK_ACTIONS and llm_confidence < confidence_threshold:
+        reasons.append("low_model_confidence")
+        score += 0.20
+
+    if kind in _STRICT_HIGH_RISK_ACTIONS and evidence_hits < evidence_threshold:
+        reasons.append("weak_retrieval_evidence")
+        score += 0.25
+
+    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_explicit_goal(task):
+        reasons.append("execution_contract_missing_goal")
+        score += 0.20
+    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_complete_inputs(task):
+        reasons.append("execution_contract_missing_inputs")
+        score += 0.20
+    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_constraints(task):
+        reasons.append("execution_contract_missing_constraints")
+        score += 0.10
+    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_format_requirement(task):
+        reasons.append("execution_contract_missing_output_format")
+        score += 0.10
+
+    adversarial_issues = _adversarial_self_check_issues(task, action)
+    if adversarial_issues:
+        reasons.append("adversarial_self_check")
+        score += 0.20
+
+    if kind in _STRICT_HIGH_RISK_ACTIONS and reasons:
+        reasons.append("unsafe_side_effects")
+        score += 0.15
+
+    deduped_reasons = list(dict.fromkeys(reasons))
+    return {
+        "score": max(0.0, score),
+        "reasons": deduped_reasons,
+        "missing_fields": missing_fields,
+        "adversarial_issues": adversarial_issues,
+    }
+
 # ── LLM callers ───────────────────────────────────────────────────────────────
 def _parse_json(raw: str) -> Dict[str, Any]:
     raw = raw.strip()
@@ -1532,7 +1830,7 @@ def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
 
 def _call_grok(messages):
     import requests, time as _t
-    secret_name = "GROK_API_KEY"
+    secret_name = "GROK_API_KEY"  # pragma: allowlist secret
     with inject_request_credentials([secret_name]) as creds:
         grok_key = str(creds.get(secret_name) or get_secret(secret_name, "") or "")
     headers = {
@@ -1573,7 +1871,7 @@ def _call_grok(messages):
 
 def _call_claude_api(messages):
     import requests
-    secret_name = "CLAUDE_API_KEY"
+    secret_name = "CLAUDE_API_KEY"  # pragma: allowlist secret
     with inject_request_credentials([secret_name]) as creds:
         claude_key = str(creds.get(secret_name) or get_secret(secret_name, "") or "")
     resp = requests.post("https://api.anthropic.com/v1/messages",
@@ -1935,7 +2233,8 @@ def is_tool_allowed_for_persona(persona_name: str, tool_name: str) -> bool:
 def stream_agent_task(task: str, history: list, files: list | None = None,
                       stop_evt=None, sid: str = "", trace_id: str = "",
                       max_tool_calls: int = 0, max_time_s: float = 0.0,
-                      budget_tokens_out: int = 0) -> Iterator[Dict[str, Any]]:
+                      budget_tokens_out: int = 0,
+                      usage_principal: str = "") -> Iterator[Dict[str, Any]]:
     def _stopped(): return stop_evt is not None and stop_evt.is_set()
 
     # Extract + store token from task; mask it before sending to LLM
@@ -2163,6 +2462,11 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     # ── per-request execution budget ─────────────────────────────────────────
     _budget_start = time.time()
     _tool_call_count = 0
+    _strict_mode = bool(_config.get("strict_no_guess_mode", True))
+    _strict_confidence_threshold = float(_config.get("strict_confidence_threshold", 0.95) or 0.95)
+    _strict_evidence_threshold = int(_config.get("strict_evidence_threshold", 1) or 1)
+    _evidence_hits = 0
+    _recent_conflict = ""
 
     def _next_action(msgs: List[Dict], task_text: str) -> tuple[Dict[str, Any], str, Dict[str, Any]]:
         def _from_fallback() -> tuple[Dict[str, Any], str, Dict[str, Any]]:
@@ -2239,6 +2543,49 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                        "chain":" → ".join(PROVIDERS[p]["label"] for p in providers_used)}
 
         kind = action.get("action")
+        llm_confidence = 1.0
+        try:
+            llm_confidence = float(action.get("confidence", _llm_meta.get("confidence", 1.0)) or 1.0)
+        except Exception:
+            llm_confidence = 1.0
+
+        enforce_strict_for_action = kind in _DESTRUCTIVE_ACTIONS
+        gate_mode_active = _strict_mode or enforce_strict_for_action
+        action_confidence_threshold = _strict_confidence_threshold
+        action_evidence_threshold = _strict_evidence_threshold
+        if enforce_strict_for_action:
+            # Destructive actions are always protected, independent of selected profile.
+            action_confidence_threshold = max(action_confidence_threshold, 0.95)
+            action_evidence_threshold = max(action_evidence_threshold, 1)
+
+        if gate_mode_active and kind not in ("clarify", "plan", "think", "think_deep"):
+            doubt = _strict_doubt_assessment(
+                task=clean_task,
+                action=action,
+                llm_confidence=llm_confidence,
+                evidence_hits=_evidence_hits,
+                recent_conflict=_recent_conflict,
+                confidence_threshold=action_confidence_threshold,
+                evidence_threshold=action_evidence_threshold,
+            )
+            if doubt.get("score", 0.0) > 0.0:
+                clarify_evt = _build_clarification_payload(
+                    task=clean_task,
+                    action=action,
+                    reasons=doubt.get("reasons", []),
+                    score=float(doubt.get("score", 0.0)),
+                )
+                yield clarify_evt
+                messages.append({"role": "assistant", "content": json.dumps(clarify_evt)})
+                cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+                yield {
+                    "type": "done",
+                    "content": "",
+                    "provider": cfg.get("label", "?"),
+                    "model": _config["model"] or cfg.get("default_model", "?"),
+                    "history": messages,
+                }
+                return
 
         if kind in ("run_command", "clone_repo"):
             _sig = _action_sig(action)
@@ -2256,10 +2603,32 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 continue
 
         if kind == "clarify":
-            yield {"type":"clarify","questions":action.get("questions",[])}
+            clarify_evt = {
+                "type": "clarify",
+                "schema": "nexus.clarification.v1",
+                "card": {
+                    "what_is_unclear": ["The task needs additional details before execution can continue."],
+                    "why_it_blocks_correctness": "Missing or ambiguous information can lead to incorrect execution.",
+                    "options": [
+                        {
+                            "id": "provide-details",
+                            "label": "Provide missing details",
+                            "description": "Share the exact values and constraints needed.",
+                            "recommended": True,
+                        }
+                    ],
+                    "allow_freeform": True,
+                    "freeform_label": "Additional clarification",
+                    "doubt_score": 1.0,
+                    "blocked_action": "clarify",
+                },
+                "questions": action.get("questions", []),
+                "reason_codes": ["explicit_model_clarification"],
+            }
+            yield clarify_evt
             # Preserve full message history — when user answers, the next
             # stream call receives this history and continues with full context
-            messages.append({"role":"assistant","content":json.dumps(action)})
+            messages.append({"role":"assistant","content":json.dumps(clarify_evt)})
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "",{})
             yield {"type":"done","content":"","provider":cfg.get("label","?"),
                    "model":_config["model"] or cfg.get("default_model","?"),
@@ -2352,6 +2721,25 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             messages.append({"role": "assistant", "content": final})
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
             output_tokens = _estimate_tokens(final)
+            provider_id = providers_used[-1] if providers_used else ""
+            model_name = _config["model"] or cfg.get("default_model", "?")
+
+            # Persist request-level usage telemetry (best effort, never user-visible on failure).
+            try:
+                est_cost_usd = (float(_PROVIDER_COST_PER_1K_TOKENS.get(provider_id, 0.0)) * float(output_tokens)) / 1000.0
+                usage_user = str(usage_principal or sid or "").strip()[:120]
+                log_usage(
+                    provider_id or cfg.get("label", "unknown"),
+                    str(model_name),
+                    int(input_token_estimate),
+                    int(output_tokens),
+                    tt="chat",
+                    username=usage_user,
+                    cost_usd=round(est_cost_usd, 8),
+                )
+            except Exception:
+                pass
+
             # ── Sprint E: live SSE signals ────────────────────────────────────
             yield {"type": "confidence", "value": round(confidence, 4)}
             if _trace_steps:
@@ -2371,12 +2759,18 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "out_tokens": output_tokens,
                 "total": input_token_estimate + output_tokens,
             }
+            # Stream response text in small chunks so UI can render word-by-word
+            # while preserving markdown formatting progressively.
+            for chunk in re.findall(r"\S+\s*|\n+", final):
+                if not chunk:
+                    continue
+                yield {"type": "token_chunk", "delta": chunk}
             # ─────────────────────────────────────────────────────────────────
             yield {
                 "type": "done",
                 "content": final,
                 "provider": cfg.get("label", "?"),
-                "model": _config["model"] or cfg.get("default_model", "?"),
+                "model": model_name,
                 "history": messages,
                 "tokens": {
                     "input": input_token_estimate,
@@ -2805,6 +3199,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
             _hard = _blocker_reason(kind, result_str)
             if _hard:
+                _recent_conflict = _hard
                 final = _single_shot_blocker_reply(_hard)
                 messages.append({"role": "assistant", "content": final})
                 cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
@@ -2821,6 +3216,12 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     },
                 }
                 return
+
+            if str(result_stat).lower() in ("error", "blocked"):
+                _recent_conflict = f"{kind}:{result_stat}"
+            elif kind in _STRICT_EVIDENCE_ACTIONS:
+                _evidence_hits += 1
+                _recent_conflict = ""
 
             messages.append({"role":"assistant","content":json.dumps(action)})
             messages.append({"role":"user","content":f"Tool result:\n{result_str}\n\nContinue."})
@@ -2976,6 +3377,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
         _hard = _blocker_reason(kind, str(result))
         if _hard:
+            _recent_conflict = _hard
             final = _single_shot_blocker_reply(_hard)
             messages.append({"role": "assistant", "content": final})
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
@@ -2993,6 +3395,12 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             }
             return
 
+        if kind in _STRICT_EVIDENCE_ACTIONS:
+            _evidence_hits += 1
+            _recent_conflict = ""
+        elif isinstance(result, str) and ("failed" in result.lower() or "error" in result.lower() or "not found" in result.lower()):
+            _recent_conflict = f"{kind}:tool_result_conflict"
+
         messages.append({"role":"assistant","content":json.dumps(action)})
         messages.append({"role":"user","content":f"Tool result:\n{result}\n\nContinue."})
         _step_idx += 1
@@ -3008,10 +3416,10 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
            "tokens":{"input":input_token_estimate,"output":1,"total":input_token_estimate+1}}
 
 # ── non-streaming wrapper ─────────────────────────────────────────────────────
-def run_agent_task(task, history, files=None, sid=""):
+def run_agent_task(task, history, files=None, sid="", usage_principal: str = ""):
     tool_log, fallback_notice, final = [], "", None
     ensemble_meta: Optional[Dict[str, Any]] = None
-    for evt in stream_agent_task(task, history, files, sid=sid):
+    for evt in stream_agent_task(task, history, files, sid=sid, usage_principal=usage_principal):
         if evt["type"]=="tool":        tool_log.append(f"{evt['icon']} **`{evt['action']}`** `{evt['label']}` → {evt['result']}")
         elif evt["type"]=="think":     tool_log.append(f"💭 *{evt['thought']}*")
         elif evt["type"]=="fallback":  fallback_notice = f"*↩️ Auto-fallback: {evt['chain']}*\n\n"
@@ -3029,6 +3437,108 @@ def run_agent_task(task, history, files=None, sid=""):
     if ensemble_meta:
         out["ensemble"] = ensemble_meta
     return out
+
+
+def _resolve_repo_workdir_for_session(sid: str) -> str:
+    """Best-effort repo workdir for a session; falls back to session sandbox dir."""
+    workdir = get_session_dir(sid) if sid else os.getcwd()
+    repo_url = get_session_repo(sid) if sid else ""
+    if not repo_url:
+        return workdir
+    repo_name = repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+    candidate = os.path.join(workdir, repo_name)
+    if os.path.isdir(candidate):
+        return candidate
+    return workdir
+
+
+def run_repo_edit_verify_loop(
+    task: str,
+    history: list | None = None,
+    files: list | None = None,
+    sid: str = "",
+    verify_command: str = "",
+    max_loops: int = 3,
+    usage_principal: str = "",
+) -> Dict[str, Any]:
+    """Run bounded edit->verify attempts for repo coding tasks.
+
+    Each loop calls the normal agent task runner and optionally executes a local
+    verification command in the session repo working directory.
+    """
+    history = list(history or [])
+    files = list(files or [])
+    loops = max(1, min(int(max_loops or 3), 8))
+    verify_command = str(verify_command or "").strip()
+    workdir = _resolve_repo_workdir_for_session(sid)
+
+    attempts: List[Dict[str, Any]] = []
+    running_history = history
+
+    for attempt_no in range(1, loops + 1):
+        augmented_task = (
+            f"{task}\n\n"
+            f"Iteration {attempt_no}/{loops}. "
+            "Make minimal safe edits, then summarize changes clearly."
+        )
+        agent_out = run_agent_task(
+            augmented_task,
+            running_history,
+            files=files,
+            sid=sid,
+            usage_principal=usage_principal,
+        )
+        running_history = list(agent_out.get("history") or running_history)
+
+        verify_output = ""
+        verify_ok = True
+        if verify_command:
+            verify_output = tool_run_command(verify_command, workdir)
+            lowered = verify_output.lower()
+            failure_markers = (
+                "traceback",
+                "failed",
+                "error",
+                "assertionerror",
+                "exception",
+                "blocked",
+            )
+            verify_ok = not any(marker in lowered for marker in failure_markers)
+
+        attempts.append(
+            {
+                "attempt": attempt_no,
+                "agent_provider": agent_out.get("provider", ""),
+                "agent_model": agent_out.get("model", ""),
+                "verify_command": verify_command,
+                "verify_ok": verify_ok,
+                "verify_output": verify_output[:8000],
+                "agent_result_preview": str(agent_out.get("result", ""))[:2000],
+            }
+        )
+
+        if verify_ok:
+            return {
+                "ok": True,
+                "task": task,
+                "attempts": attempts,
+                "attempt_count": attempt_no,
+                "workdir": workdir,
+                "history": running_history,
+                "provider": agent_out.get("provider", ""),
+                "model": agent_out.get("model", ""),
+                "result": agent_out.get("result", ""),
+            }
+
+    return {
+        "ok": False,
+        "task": task,
+        "attempts": attempts,
+        "attempt_count": loops,
+        "workdir": workdir,
+        "history": running_history,
+        "error": "verification_failed_after_max_loops",
+    }
 
 
 # ── agent warm-up / pre-loading ───────────────────────────────────────────────

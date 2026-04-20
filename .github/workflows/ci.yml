@@ -4,12 +4,14 @@ on:
   push:
     paths:
       - '**.py'
+      - 'static/**'
       - 'requirements.txt'
       - 'requirements.rag.txt'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - '**.py'
+      - 'static/**'
       - 'requirements.txt'
       - 'requirements.rag.txt'
       - '.github/workflows/ci.yml'
@@ -44,3 +46,6 @@ jobs:
 
       - name: Run pytest contracts
         run: python -m pytest tests/test_v1_contracts.py -q
+
+      - name: Run frontend UI contracts
+        run: python -m pytest tests/test_v1_contracts.py -k "frontend_operator_panels or frontend_chat_streaming" -q

@@ -1,0 +1,9 @@
+{
+  "name": "@nexus-ai/sdk",
+  "version": "0.1.0",
+  "description": "Nexus AI TypeScript SDK",
+  "type": "module",
+  "main": "src/client.ts",
+  "types": "src/client.ts",
+  "license": "MIT"
+}

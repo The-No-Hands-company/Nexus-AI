@@ -11,6 +11,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .deployment_profiles import apply_profile
+apply_profile()  # apply NEXUS_PROFILE overrides before dependent modules read env vars
+
 from .db import init_db, init_projects_table, init_usage_table, init_users_table
 from .auth import MULTI_USER  # noqa: F401  (side-effect: sets auth mode)
 from .gist_backup import restore_from_gist

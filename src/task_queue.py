@@ -22,6 +22,7 @@ import json
 import threading
 import time
 import uuid
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
@@ -479,3 +480,125 @@ def worker_status() -> Dict[str, Any]:
         "active": len([t for t in _tasks.values() if t.status == TASK_RUNNING]),
         "total_tasks": len(_tasks),
     }
+
+
+def get_task_runtime_status(task_id: str) -> Optional[Dict[str, Any]]:
+    """Return detailed queue/runtime status for a task, including blockers and queue position."""
+    task = _tasks.get(task_id)
+    if task is None:
+        persisted = get_task(task_id)
+        if persisted is None:
+            return None
+        return {
+            **persisted,
+            "queue_position": None,
+            "blocked_by": [],
+            "deps_satisfied": True,
+            "worker_running": bool(_worker_thread is not None and _worker_thread.is_alive()),
+            "can_cancel": str(persisted.get("status") or "") not in (TASK_DONE, TASK_FAILED, TASK_CANCELLED),
+        }
+
+    with _heap_lock:
+        pending_order = sorted(
+            [t for t in _tasks.values() if t.status == TASK_PENDING],
+            key=lambda t: (t.priority, t.created_at),
+        )
+    queue_position = None
+    for idx, pending in enumerate(pending_order, start=1):
+        if pending.task_id == task_id:
+            queue_position = idx
+            break
+
+    blocked_by = []
+    for dep_id in task.dependencies:
+        dep = _tasks.get(dep_id)
+        dep_status = dep.status if dep else "missing"
+        if dep_status != TASK_DONE:
+            blocked_by.append({"task_id": dep_id, "status": dep_status})
+
+    payload = _task_to_dict(task)
+    payload.update(
+        {
+            "queue_position": queue_position,
+            "blocked_by": blocked_by,
+            "deps_satisfied": not blocked_by,
+            "worker_running": bool(_worker_thread is not None and _worker_thread.is_alive()),
+            "can_cancel": task.status not in (TASK_DONE, TASK_FAILED, TASK_CANCELLED),
+        }
+    )
+    return payload
+
+
+def list_task_sessions(limit: int = 200) -> List[Dict[str, Any]]:
+    """Aggregate task sessions from task metadata.session_id and return counts by status."""
+    sessions: Dict[str, Dict[str, Any]] = {}
+    status_counters: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    for task in _tasks.values():
+        session_id = str(task.metadata.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        if session_id not in sessions:
+            sessions[session_id] = {
+                "session_id": session_id,
+                "created_at": datetime.fromtimestamp(task.created_at, tz=timezone.utc).isoformat(),
+                "latest_task_at": datetime.fromtimestamp(task.created_at, tz=timezone.utc).isoformat(),
+            }
+        latest = sessions[session_id].get("latest_task_at") or ""
+        current = datetime.fromtimestamp(task.created_at, tz=timezone.utc).isoformat()
+        if current > latest:
+            sessions[session_id]["latest_task_at"] = current
+        status_counters[session_id][task.status] += 1
+
+    rows = []
+    for session_id, meta in sessions.items():
+        counters = status_counters.get(session_id, {})
+        rows.append(
+            {
+                **meta,
+                "counts": {
+                    "pending": int(counters.get(TASK_PENDING, 0)),
+                    "running": int(counters.get(TASK_RUNNING, 0)),
+                    "done": int(counters.get(TASK_DONE, 0)),
+                    "failed": int(counters.get(TASK_FAILED, 0)),
+                    "cancelled": int(counters.get(TASK_CANCELLED, 0)),
+                },
+                "total_tasks": int(sum(counters.values())),
+            }
+        )
+
+    rows.sort(key=lambda row: row.get("latest_task_at", ""), reverse=True)
+    return rows[: max(1, limit)]
+
+
+def get_session_tasks(session_id: str, status: str = "", limit: int = 200) -> List[Dict[str, Any]]:
+    """List tasks for a single session identifier."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return []
+    rows = []
+    for task in _tasks.values():
+        if str(task.metadata.get("session_id") or "").strip() != sid:
+            continue
+        if status and task.status != status:
+            continue
+        rows.append(_task_to_dict(task))
+    rows.sort(key=lambda row: row.get("created_at", ""), reverse=True)
+    return rows[: max(1, limit)]
+
+
+def cancel_session_tasks(session_id: str, include_running: bool = True) -> Dict[str, Any]:
+    """Cancel pending tasks for a session and optionally running tasks."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {"session_id": sid, "cancelled": 0, "task_ids": []}
+
+    cancelled_ids: List[str] = []
+    for task in _tasks.values():
+        if str(task.metadata.get("session_id") or "").strip() != sid:
+            continue
+        if task.status == TASK_PENDING or (include_running and task.status == TASK_RUNNING):
+            if cancel_task(task.task_id):
+                cancelled_ids.append(task.task_id)
+
+    return {"session_id": sid, "cancelled": len(cancelled_ids), "task_ids": cancelled_ids}

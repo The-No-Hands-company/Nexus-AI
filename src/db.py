@@ -9,6 +9,7 @@ import uuid
 import threading
 import sqlite3
 import contextlib
+import hashlib
 from typing import List, Dict, Optional, Any, Set
 from datetime import datetime, timezone
 from pathlib import Path
@@ -75,7 +76,16 @@ class DatabaseBackend(ABC):
     def load_pref(self, key: str, default: str = "") -> str: pass
 
     @abstractmethod
-    def log_usage(self, provider: str, model: str, in_tokens: int, out_tokens: int, task_type: str = "chat"): pass
+    def log_usage(
+        self,
+        provider: str,
+        model: str,
+        in_tokens: int,
+        out_tokens: int,
+        task_type: str = "chat",
+        username: str = "",
+        cost_usd: float = 0.0,
+    ): pass
 
     @abstractmethod
     def get_usage_stats(self, days: int = 7) -> dict: pass
@@ -180,7 +190,9 @@ class SQLiteBackend(DatabaseBackend):
                 model       TEXT NOT NULL,
                 in_tokens   INTEGER NOT NULL DEFAULT 0,
                 out_tokens  INTEGER NOT NULL DEFAULT 0,
-                task_type   TEXT NOT NULL DEFAULT 'chat'
+                task_type   TEXT NOT NULL DEFAULT 'chat',
+                username    TEXT NOT NULL DEFAULT '',
+                cost_usd    REAL NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS users (
                 username    TEXT PRIMARY KEY,
@@ -413,6 +425,8 @@ class SQLiteBackend(DatabaseBackend):
             "ALTER TABLE users ADD COLUMN email TEXT",
             "ALTER TABLE users ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE chats ADD COLUMN username TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE usage_log ADD COLUMN username TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE usage_log ADD COLUMN cost_usd REAL NOT NULL DEFAULT 0",
         ]:
             try:
                 c.execute(col_sql)
@@ -570,10 +584,28 @@ class SQLiteBackend(DatabaseBackend):
         row = self._conn().execute("SELECT value FROM user_prefs WHERE key=?", (key,)).fetchone()
         return row["value"] if row else default
 
-    def log_usage(self, provider: str, model: str, in_tokens: int, out_tokens: int, task_type: str = "chat"):
+    def log_usage(
+        self,
+        provider: str,
+        model: str,
+        in_tokens: int,
+        out_tokens: int,
+        task_type: str = "chat",
+        username: str = "",
+        cost_usd: float = 0.0,
+    ):
         self._conn().execute(
-            "INSERT INTO usage_log(ts,provider,model,in_tokens,out_tokens,task_type) VALUES(?,?,?,?,?,?)",
-            (datetime.now(timezone.utc).timestamp(), provider, model, in_tokens, out_tokens, task_type)
+            "INSERT INTO usage_log(ts,provider,model,in_tokens,out_tokens,task_type,username,cost_usd) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                datetime.now(timezone.utc).timestamp(),
+                provider,
+                model,
+                in_tokens,
+                out_tokens,
+                task_type,
+                (username or "")[:120],
+                float(cost_usd or 0.0),
+            )
         )
         self._conn().commit()
 
@@ -810,7 +842,9 @@ class PostgresBackend(DatabaseBackend):
                     model       TEXT NOT NULL,
                     in_tokens   INTEGER NOT NULL DEFAULT 0,
                     out_tokens  INTEGER NOT NULL DEFAULT 0,
-                    task_type   TEXT NOT NULL DEFAULT 'chat'
+                    task_type   TEXT NOT NULL DEFAULT 'chat',
+                    username    TEXT NOT NULL DEFAULT '',
+                    cost_usd    DOUBLE PRECISION NOT NULL DEFAULT 0
                 );
                 CREATE TABLE IF NOT EXISTS users (
                     username    TEXT PRIMARY KEY,
@@ -917,6 +951,8 @@ class PostgresBackend(DatabaseBackend):
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS email TEXT",
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS email_verified INTEGER NOT NULL DEFAULT 0",
+                "ALTER TABLE usage_log ADD COLUMN IF NOT EXISTS username TEXT NOT NULL DEFAULT ''",
+                "ALTER TABLE usage_log ADD COLUMN IF NOT EXISTS cost_usd DOUBLE PRECISION NOT NULL DEFAULT 0",
             ]:
                 try:
                     cur.execute(col_sql)
@@ -1185,11 +1221,31 @@ class PostgresBackend(DatabaseBackend):
         conn.close()
         return row["value"] if row else default
 
-    def log_usage(self, provider: str, model: str, in_tokens: int, out_tokens: int, task_type: str = "chat"):
+    def log_usage(
+        self,
+        provider: str,
+        model: str,
+        in_tokens: int,
+        out_tokens: int,
+        task_type: str = "chat",
+        username: str = "",
+        cost_usd: float = 0.0,
+    ):
         conn = self._get_conn()
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO usage_log(ts,provider,model,in_tokens,out_tokens,task_type) VALUES(%s,%s,%s,%s,%s,%s)",
-                       (datetime.now(timezone.utc).timestamp(), provider, model, in_tokens, out_tokens, task_type))
+            cur.execute(
+                "INSERT INTO usage_log(ts,provider,model,in_tokens,out_tokens,task_type,username,cost_usd) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)",
+                (
+                    datetime.now(timezone.utc).timestamp(),
+                    provider,
+                    model,
+                    in_tokens,
+                    out_tokens,
+                    task_type,
+                    (username or "")[:120],
+                    float(cost_usd or 0.0),
+                ),
+            )
         conn.commit()
         conn.close()
 
@@ -1406,7 +1462,8 @@ def assign_chat_to_project(project_id, chat_id): _backend.assign_chat_to_project
 def get_project_chats(project_id): return _backend.get_project_chats(project_id)
 def save_pref(key, value): _backend.save_pref(key, value)
 def load_pref(key, default=""): return _backend.load_pref(key, default)
-def log_usage(p, m, it, ot, tt="chat"): _backend.log_usage(p, m, it, ot, tt)
+def log_usage(p, m, it, ot, tt="chat", username="", cost_usd=0.0):
+    _backend.log_usage(p, m, it, ot, tt, username=username, cost_usd=cost_usd)
 def get_usage_stats(days=7): return _backend.get_usage_stats(days)
 def create_user(u, p, d="", role="user"): return _backend.create_user(u, p, d, role)
 def get_user(u): return _backend.get_user(u)
@@ -1552,6 +1609,67 @@ def get_usage_daily(days: int = 7) -> list[dict]:
     return list(by_day.values())
 
 
+def get_usage_records(days: int = 7, username: str = "", limit: int = 5000) -> list[dict]:
+    safe_days = max(1, min(int(days), 365))
+    safe_limit = max(1, min(int(limit), 50000))
+    since = datetime.now(timezone.utc).timestamp() - safe_days * 86400
+    ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+
+    clauses = [f"ts >= {ph}"]
+    params: list = [since]
+    if (username or "").strip():
+        clauses.append(f"username = {ph}")
+        params.append((username or "").strip())
+
+    where_sql = " AND ".join(clauses)
+    query = (
+        "SELECT ts, provider, model, in_tokens, out_tokens, task_type, username, cost_usd "
+        f"FROM usage_log WHERE {where_sql} ORDER BY ts DESC LIMIT {safe_limit}"
+    )
+
+    try:
+        rows = _sql_fetchall(query, tuple(params))
+    except Exception:
+        # Backward compatibility for old DBs without username/cost_usd.
+        fallback_query = (
+            "SELECT ts, provider, model, in_tokens, out_tokens, task_type "
+            f"FROM usage_log WHERE ts >= {ph} ORDER BY ts DESC LIMIT {safe_limit}"
+        )
+        rows = _sql_fetchall(fallback_query, (since,))
+
+    normalized: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        item.setdefault("username", "")
+        item.setdefault("cost_usd", 0.0)
+        normalized.append(item)
+    return normalized
+
+
+def get_usage_by_user(days: int = 7, limit: int = 200) -> list[dict]:
+    rows = get_usage_records(days=days, username="", limit=50000)
+    buckets: dict[str, dict] = {}
+    for row in rows:
+        user_key = str(row.get("username") or "anonymous").strip() or "anonymous"
+        item = buckets.setdefault(
+            user_key,
+            {
+                "username": user_key,
+                "calls": 0,
+                "in_tok": 0,
+                "out_tok": 0,
+                "cost_usd": 0.0,
+            },
+        )
+        item["calls"] += 1
+        item["in_tok"] += int(row.get("in_tokens") or 0)
+        item["out_tok"] += int(row.get("out_tokens") or 0)
+        item["cost_usd"] = round(float(item["cost_usd"]) + float(row.get("cost_usd") or 0.0), 6)
+
+    result = sorted(buckets.values(), key=lambda v: (v["calls"], v["out_tok"]), reverse=True)
+    return result[: max(1, min(int(limit), 1000))]
+
+
 def _load_json_pref(key: str, default):
     raw = load_pref(key, "")
     if not raw:
@@ -1616,6 +1734,19 @@ def list_self_reviews(limit: int = 10) -> list[dict]:
     return list(reversed(reviews))[: max(1, min(int(limit), 200))]
 
 
+def _canonicalize_safety_audit_entry(entry: dict) -> str:
+    payload = {
+        k: v for k, v in dict(entry or {}).items()
+        if k not in {"entry_hash", "previous_hash", "integrity_ok"}
+    }
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _compute_safety_audit_hash(entry: dict, previous_hash: str = "") -> str:
+    material = f"{previous_hash}|{_canonicalize_safety_audit_entry(entry)}".encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
 def load_safety_audit_entries(limit: int = 100, session_id: str = "", event_type: str = "") -> list[dict]:
     events = _load_json_pref("safety_audit_log", [])
     if not isinstance(events, list):
@@ -1630,12 +1761,38 @@ def load_safety_audit_entries(limit: int = 100, session_id: str = "", event_type
     return list(reversed(filtered))[: max(1, min(int(limit), 5000))]
 
 
+def verify_safety_audit_entries(limit: int = 5000) -> dict:
+    events = _load_json_pref("safety_audit_log", [])
+    if not isinstance(events, list):
+        events = []
+    relevant = events[-max(1, min(int(limit), 5000)):]
+    previous_hash = ""
+    broken_at = None
+    for idx, event in enumerate(relevant, start=1):
+        expected = _compute_safety_audit_hash(event, previous_hash=previous_hash)
+        actual = str(event.get("entry_hash") or "")
+        if actual != expected:
+            broken_at = idx
+            break
+        previous_hash = actual
+    return {
+        "ok": broken_at is None,
+        "checked": len(relevant),
+        "broken_at": broken_at,
+        "head_hash": previous_hash or None,
+    }
+
+
 def add_safety_audit_entry(entry: dict):
     events = _load_json_pref("safety_audit_log", [])
     if not isinstance(events, list):
         events = []
     payload = dict(entry or {})
     payload.setdefault("created_at", datetime.now(timezone.utc).isoformat())
+    payload.pop("integrity_ok", None)
+    previous_hash = str(events[-1].get("entry_hash") or "") if events else ""
+    payload["previous_hash"] = previous_hash or None
+    payload["entry_hash"] = _compute_safety_audit_hash(payload, previous_hash=previous_hash)
     events.append(payload)
     _save_json_pref("safety_audit_log", events[-5000:])
 
@@ -1644,12 +1801,22 @@ def clear_safety_audit_entries():
     _save_json_pref("safety_audit_log", [])
 
 
-def save_benchmark_result(provider: str, probe_name: str, latency_ms: float, response_len: int):
+def save_benchmark_result(
+    provider: str,
+    probe_name: str,
+    latency_ms: float,
+    response_len: int,
+    model: str = "",
+    task_type: str = "",
+):
     rows = _load_json_pref("benchmark_results", [])
+    resolved_task_type = str(task_type or probe_name or "chat").strip().lower()
     rows.append(
         {
             "provider": provider,
+            "model": str(model or "").strip(),
             "probe": probe_name,
+            "task_type": resolved_task_type,
             "latency_ms": float(latency_ms),
             "response_len": int(response_len),
             "ts": datetime.now(timezone.utc).timestamp(),

@@ -164,3 +164,175 @@ def describe_image_path(path: str, prompt: str = "Describe this image in detail.
         data = f.read()
     mime_type = "image/png" if path.lower().endswith(".png") else "image/jpeg"
     return describe_image(data, mime_type=mime_type, prompt=prompt)
+
+
+# ── Chart / table extraction ──────────────────────────────────────────────────
+
+def extract_charts_and_tables(image_bytes: bytes, mime_type: str = "image/png") -> dict:
+    """Extract structured chart data and tables from an image using a vision model.
+
+    Returns a dict with keys:
+        charts: list of {type, title, x_label, y_label, data_points}
+        tables: list of {headers, rows}
+        raw_description: str
+    """
+    prompt = (
+        "Analyze this image carefully. Extract ALL charts and tables.\n\n"
+        "For each CHART respond with JSON:\n"
+        "  {\"type\": \"bar|line|pie|scatter\", \"title\": \"...\", \"x_label\": \"...\", "
+        "\"y_label\": \"...\", \"data_points\": [{\"label\": \"...\", \"value\": ...}]}\n\n"
+        "For each TABLE respond with JSON:\n"
+        "  {\"headers\": [\"col1\", \"col2\"], \"rows\": [[\"v1\", \"v2\"], ...]}\n\n"
+        "Wrap your entire response in a JSON object:\n"
+        "{\"charts\": [...], \"tables\": [...], \"summary\": \"...\"}"
+    )
+    raw = describe_image(image_bytes, mime_type=mime_type, prompt=prompt)
+    import json, re
+    # Try to parse JSON from the response
+    match = re.search(r"\{.*\}", raw, re.DOTALL)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            return {
+                "charts": parsed.get("charts", []),
+                "tables": parsed.get("tables", []),
+                "summary": parsed.get("summary", ""),
+                "raw_description": raw,
+                "ok": True,
+            }
+        except json.JSONDecodeError:
+            pass
+    return {"charts": [], "tables": [], "summary": "", "raw_description": raw, "ok": False}
+
+
+# ── PDF / Office document understanding ──────────────────────────────────────
+
+def understand_pdf(pdf_bytes: bytes, extract_tables: bool = True,
+                   extract_images: bool = False) -> dict:
+    """Extract text, tables, and optionally images from a PDF.
+
+    Backend priority: pdfplumber > PyMuPDF > pdfminer > raw text fallback
+    """
+    # keep parameter for forward compatibility
+    _ = extract_images
+    # Try pdfplumber (best for tables)
+    try:
+        import pdfplumber  # type: ignore
+        import io
+        pages = []
+        tables_all = []
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for i, page in enumerate(pdf.pages):
+                text = (page.extract_text() or "").strip()
+                page_data: dict = {"page": i + 1, "text": text}
+                if extract_tables:
+                    raw_tables = page.extract_tables() or []
+                    page_tables = []
+                    for tbl in raw_tables:
+                        if tbl:
+                            headers = [str(c or "") for c in (tbl[0] or [])]
+                            rows = [[str(c or "") for c in row] for row in tbl[1:]]
+                            page_tables.append({"headers": headers, "rows": rows})
+                    page_data["tables"] = page_tables
+                    tables_all.extend(page_tables)
+                pages.append(page_data)
+        full_text = "\n\n".join(p["text"] for p in pages if p["text"])
+        return {"ok": True, "backend": "pdfplumber", "pages": pages,
+                "full_text": full_text, "tables": tables_all, "page_count": len(pages)}
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    # Try PyMuPDF
+    try:
+        import fitz  # type: ignore  (PyMuPDF)
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        pages = []
+        for i in range(len(doc)):
+            page = doc[i]
+            text = page.get_text("text").strip()
+            pages.append({"page": i + 1, "text": text})
+        doc.close()
+        full_text = "\n\n".join(p["text"] for p in pages if p["text"])
+        return {"ok": True, "backend": "pymupdf", "pages": pages,
+                "full_text": full_text, "tables": [], "page_count": len(pages)}
+    except ImportError:
+        pass
+    except Exception:
+        pass
+
+    return {"ok": False, "error": "No PDF backend available (install pdfplumber or PyMuPDF)",
+            "pages": [], "full_text": "", "tables": []}
+
+
+def understand_office_doc(file_bytes: bytes, filename: str) -> dict:
+    """Extract text from DOCX / XLSX / PPTX files."""
+    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+
+    if ext in ("docx",):
+        try:
+            import docx  # type: ignore
+            import io
+            doc = docx.Document(io.BytesIO(file_bytes))
+            text = "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+            return {"ok": True, "format": "docx", "text": text, "paragraphs": len(doc.paragraphs)}
+        except ImportError:
+            return {"ok": False, "error": "python-docx not installed", "text": ""}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "text": ""}
+
+    if ext in ("xlsx", "xls"):
+        try:
+            import openpyxl  # type: ignore
+            import io
+            wb = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True)
+            sheets = []
+            for ws in wb.worksheets:
+                rows = [[str(cell.value or "") for cell in row] for row in ws.iter_rows()]
+                headers = rows[0] if rows else []
+                data = rows[1:] if len(rows) > 1 else []
+                sheets.append({"name": ws.title, "headers": headers, "rows": data[:500]})
+            return {"ok": True, "format": "xlsx", "sheets": sheets}
+        except ImportError:
+            return {"ok": False, "error": "openpyxl not installed", "sheets": []}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "sheets": []}
+
+    if ext in ("pptx",):
+        try:
+            from pptx import Presentation  # type: ignore
+            import io
+            prs = Presentation(io.BytesIO(file_bytes))
+            slides = []
+            for i, slide in enumerate(prs.slides):
+                texts = [shape.text for shape in slide.shapes if hasattr(shape, "text") and shape.text.strip()]
+                slides.append({"slide": i + 1, "content": texts})
+            return {"ok": True, "format": "pptx", "slides": slides}
+        except ImportError:
+            return {"ok": False, "error": "python-pptx not installed", "slides": []}
+        except Exception as e:
+            return {"ok": False, "error": str(e), "slides": []}
+
+    return {"ok": False, "error": f"Unsupported format: {ext}"}
+
+
+# ── Document comparison / diff ────────────────────────────────────────────────
+
+def diff_documents(text_a: str, text_b: str, context_lines: int = 3) -> dict:
+    """Produce a unified diff and change summary between two text documents."""
+    import difflib
+    lines_a = text_a.splitlines(keepends=True)
+    lines_b = text_b.splitlines(keepends=True)
+    diff = list(difflib.unified_diff(lines_a, lines_b, lineterm="", n=context_lines))
+    added = sum(1 for l in diff if l.startswith("+") and not l.startswith("+++"))
+    removed = sum(1 for l in diff if l.startswith("-") and not l.startswith("---"))
+    sm = difflib.SequenceMatcher(None, text_a, text_b)
+    return {
+        "ok": True,
+        "unified_diff": "".join(diff),
+        "added_lines": added,
+        "removed_lines": removed,
+        "similarity": round(sm.ratio(), 4),
+        "changed": added > 0 or removed > 0,
+    }

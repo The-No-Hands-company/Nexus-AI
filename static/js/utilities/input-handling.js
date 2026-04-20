@@ -37,6 +37,24 @@ function setListening(v){
 var ta=document.getElementById('task');
 ta.addEventListener('input',()=>{ta.style.height='auto';ta.style.height=Math.min(ta.scrollHeight,130)+'px'});
 ta.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}});
+ta.addEventListener('paste', async (e) => {
+  const cb = e.clipboardData;
+  if (!cb || !cb.items) return;
+
+  const imageFiles = [];
+  for (const item of cb.items) {
+    if (item.kind === 'file' && item.type && item.type.startsWith('image/')) {
+      const f = item.getAsFile();
+      if (f) imageFiles.push(f);
+    }
+  }
+
+  if (!imageFiles.length) return;
+
+  // Keep pasted text behavior untouched when no image is present.
+  e.preventDefault();
+  await processFiles(imageFiles);
+});
 function fillTask(t){ta.value=t;ta.dispatchEvent(new Event('input'));ta.focus();if(drawerOpen)toggleDrawer()}
 
 // ── FILE HANDLING ──────────────────────────────────────────────────────────────

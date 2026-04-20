@@ -1,0 +1,20 @@
+# docker-compose.self-hosted.yml — self-hosted / air-gapped overrides
+# Usage: docker compose -f docker-compose.yml -f docker-compose.self-hosted.yml up -d
+# All inference is local via Ollama; no external API keys required.
+services:
+  nexus-ai:
+    environment:
+      - NEXUS_PROFILE=self-hosted
+      - PROVIDER=ollama
+      - LLM_MODEL=${LLM_MODEL:-llama3.2:3b}
+      # Clear cloud API keys to enforce local-only routing
+      - GROQ_API_KEY=
+      - GEMINI_API_KEY=
+      - CEREBRAS_API_KEY=
+      - MISTRAL_API_KEY=
+      - OPENROUTER_API_KEY=
+      - COHERE_API_KEY=
+      - GITHUB_MODELS_TOKEN=
+      - NVIDIA_API_KEY=
+      - GROK_API_KEY=
+      - CLAUDE_API_KEY=

@@ -19,6 +19,17 @@ function describeSafetyProfile(name, policy={}){
   return `${name}: ${destructive}; ${highStakes}.`;
 }
 
+function describeStrictProfile(name){
+  const key=(name||'strict').toLowerCase();
+  const descriptions={
+    balanced:'Balanced: low-risk chat flows with less interruption, while destructive actions still require no-guess certainty.',
+    strict:'Strict: safe-by-default with minimal friction, and no-guess execution for risky tasks.',
+    paranoid:'Paranoid: enterprise/compliance mode with maximum verification before execution.',
+    custom:'Custom: manual strict thresholds are active.',
+  };
+  return descriptions[key]||descriptions.strict;
+}
+
 function populateSettings(cfg,providers,safetySettings={}){
   const sel=document.getElementById('s-provider');
   sel.innerHTML=[{id:'auto',label:'Auto (try all)'},...providers]
@@ -48,6 +59,21 @@ function populateSettings(cfg,providers,safetySettings={}){
   };
   safetySel.onchange=updateHint;
   updateHint();
+
+  const strictSel=document.getElementById('s-strict-profile');
+  const strictHint=document.getElementById('s-strict-hint');
+  const strictProfiles=['balanced','strict','paranoid'];
+  strictSel.innerHTML=strictProfiles
+    .map(name=>`<option value="${name}">${name.charAt(0).toUpperCase()+name.slice(1)}</option>`)
+    .join('');
+  const strictValue=(cfg.strict_mode_profile||'strict').toLowerCase();
+  if(!strictProfiles.includes(strictValue)){
+    strictSel.insertAdjacentHTML('beforeend','<option value="custom">Custom</option>');
+  }
+  strictSel.value=strictProfiles.includes(strictValue)?strictValue:'custom';
+  const updateStrictHint=()=>{ strictHint.textContent=describeStrictProfile(strictSel.value); };
+  strictSel.onchange=updateStrictHint;
+  updateStrictHint();
 }
 
 async function loadSettingsModal(){
@@ -75,11 +101,13 @@ async function saveSettings(){
       provider:document.getElementById('s-provider').value,
       model:document.getElementById('s-model').value.trim(),
       temperature:parseFloat(document.getElementById('s-temp').value),
-      safety_profile:document.getElementById('s-safety-profile').value
+      safety_profile:document.getElementById('s-safety-profile').value,
+      strict_mode_profile:document.getElementById('s-strict-profile').value
     })}).then(r=>r.json());
   const savedProfile=resp.safety_profile||'standard';
+  const savedStrictProfile=(resp.strict_mode_profile||'strict').toLowerCase();
   document.getElementById('settings-status').textContent=
-    `Saved — ${resp.provider}${resp.model?' / '+resp.model:''} / temp ${resp.temperature} / ${savedProfile} safety`;
+    `Saved — ${resp.provider}${resp.model?' / '+resp.model:''} / temp ${resp.temperature} / ${savedProfile} safety / ${savedStrictProfile} execution`;
   await loadSettingsModal();
   await refreshSessionSafetyUI();
   await refreshProviders();
