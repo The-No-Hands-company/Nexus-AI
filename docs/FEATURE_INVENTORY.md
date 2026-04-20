@@ -84,7 +84,7 @@ harden these to full production level:
 - [x] SQLite default backend (`src/db.py`)
 - [x] PostgreSQL backend via `DATABASE_URL` env switch
 - [x] Chat history table (create / read / delete)
-- [x] Usage records table (token counts, cost)
+- [~] Usage records table (token counts, cost) — **Audit note:** Token counts stored in the usage table are estimated using `len(text) / 4` (a ~4 chars-per-token heuristic, `src/agent.py:_estimate_tokens`); no tiktoken or provider-reported counts are used. Values can be off by ±30% on average.
 - [x] User accounts table (with `role` column + migration)
 - [x] Alembic-compatible schema (manual migration handling) (`migrations/env.py`, `alembic.ini`)
 - [x] Alembic migration files (tracked, runnable migrations) (`migrations/versions/0001_initial_schema.py`)
@@ -290,7 +290,7 @@ harden these to full production level:
 - [x] Compositional (chained sequential) tool-call support
 - [x] Partial tool-failure recovery (continue after one tool errors) — Pointers: route=`POST /agent`, `POST /agent/stream` (`src/api/routes.py`); tool=`dispatch_builtin` + `_tool_trace(..., status="error")` (`src/tools_builtin.py`); module=`src/agent.py:_execute_parallel_tool_call`, `src/agent.py:_run_parallel_tool_batch`.
 - [x] Tool-call call ID tracking for parallel/compositional flows
-- [x] Streaming token counter telemetry event
+- [~] Streaming token counter telemetry event — **Audit note:** Counter uses the same `_estimate_tokens` heuristic (4 chars/token) rather than real BPE counts; values sent in SSE `token` events are approximate estimates only.
 - [x] Per-request execution budget (max tokens, max tool calls, max time)
 - [x] Agent warm-up / pre-loading (keep agent context primed between calls) — `src/agent.py:warmup_agent()` primes LLM context with TTL cache; called at app startup via lifespan; exposed via `POST /agent/warmup`
 
@@ -411,7 +411,7 @@ harden these to full production level:
 - [x] `src/rag/chunker.py` — document chunking
 - [x] `src/rag/embeddings.py` — embedding generation
 - [x] `src/rag/vector_store.py` — ChromaDB vector store (with memory/FAISS fallback)
-- [x] `src/rag/retriever.py` — retrieval + reranking
+- [~] `src/rag/retriever.py` — retrieval + reranking — **AUDIT: `_sparse_retrieval()` (BM25 path) calls `_get_all_documents()` which returns `[]`; BM25 sparse retrieval is completely non-functional and silently falls back to dense-only. Hybrid retrieval claim is inaccurate.**
 - [x] `src/rag/rag_system.py` — high-level RAG system class
 - [x] `POST /rag/ingest` — ingest document text (incremental updates supported)
 - [x] `POST /rag/query` — semantic query (citations + calibrated confidence + critic pass)
@@ -477,7 +477,7 @@ harden these to full production level:
 - [x] `list_files` — list directory contents — Pointers: tool=`list_files`; module=`src/tools_builtin.py:tool_list_files`.
 - [x] `delete_file` — delete file — Pointers: tool=`delete_file`; module=`src/tools_builtin.py:tool_delete_file`. — Tags: owner=tools, priority=p1, risk=high, stage=GA, deps=sandbox+path_restrict, validate=src/tools_builtin.py|tests/test_tools_sandbox.py
 - [x] `clone_repo` — git clone — Pointers: tool=`clone_repo`; module=`src/tools_builtin.py:tool_clone_repo`.
-- [x] `run_command` — sandboxed shell command execution — Pointers: tool=`run_command`; module=`src/tools_builtin.py:tool_run_command` (timeout+allowlist enforcement). — Tags: owner=tools, priority=p0, risk=high, stage=GA, deps=sandbox+limits+allowlist, validate=src/tools_builtin.py|tests/test_tools_sandbox.py
+- [~] `run_command` — **AUDIT: `src/agents/tools/shell.py` uses `subprocess.run(shlex.split(command))` with a restricted PATH and `BLOCKED_COMMANDS` frozenset. No OS-level sandbox (no Linux namespaces, no bubblewrap, no gVisor/Firecracker). Code comment explicitly states "STUB: basic implementation without full OS-level sandboxing." Trivially escapable — CVSS 9+ in any multi-tenant deployment.** — Tags: owner=tools, priority=p0, risk=critical, stage=alpha
 - [x] `commit_push` — git commit and push — Pointers: tool=`commit_push`; module=`src/tools_builtin.py:tool_commit_push`.
 - [x] `create_repo` — create GitHub repo — Pointers: tool=`create_repo`; module=`src/tools_builtin.py:tool_create_repo` (gh CLI).
 - [x] Dynamic repo targeting from chat intent — Pointers: module=`src/agent.py:extract_token`, `set_session_token`.
@@ -553,7 +553,7 @@ harden these to full production level:
 - [x] `POST /settings/hitl` — update HITL settings — Pointers: route=`POST /settings/hitl` (`src/api/routes.py`).
 - [x] High-risk action approval mode (log / warn / block) — HITL approval wiring in `src/approvals.py` is integrated into the agent dispatch loop, with `warn` emitting approval metadata without blocking and `block` enforcing approval before execution.
 - [x] App path protection (write / delete / run_command sandbox) — Tags: owner=platform, priority=p0, risk=high, stage=GA, validate=src/tools_builtin.py::_resolve_path,tool_write_file,tool_delete_file,tool_run_command
-- [x] Sandboxed command limits (RAM / CPU / timeout) — `tool_run_command()` now enforces timeout, CPU, memory, file-size, and write-intent constraints.
+- [~] Sandboxed command limits (RAM / CPU / timeout) — timeout enforced; CPU/memory limits are process-level `resource.setrlimit` calls, not container/namespace isolation. A sufficiently crafted command can still access the host filesystem and network.
 - [x] Tool call audit log (persisted, queryable) — Pointers: route=`GET /admin/tool-audit`; module=`src/tools_builtin.py:get_tool_audit_log`, `_write_tool_audit`. — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=db+audit, validate=GET /admin/tool-audit
 - [x] Tool call rate limiting (per tool per session) — Pointers: module=`src/tools_builtin.py:_TOOL_CALL_COUNTS`, `_check_tool_rate_limit`, `reset_tool_rate_counts`.
 - [x] Tool argument schema registry (all tools have validated arg contracts) — Pointers: module=`src/tools_builtin.py:_TOOL_SCHEMAS`, `validate_tool_args`, `get_tool_schema`, `list_tool_schemas`.
@@ -580,9 +580,9 @@ harden these to full production level:
 - [x] `GET /settings/safety` — read safety config
 - [x] `POST /settings/safety` — update safety config
 - [x] PII redaction (actual masking in output via `scrub_pii_text()` / `screen_output()`; redacts SSN, email, phone, credit card, IP) — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=regex+privacy, validate=src/safety_pipeline.py|POST /safety/pii-scan
-- [x] Toxic content classifier (supports `openai_moderation` and optional `local_transformers` backends in `src/safety/classifier.py`, with safety-pipeline integration and cached local transformer pipelines via `_LOCAL_CLF_CACHE` to avoid per-request model reload)
+- [~] Toxic content classifier — **AUDIT: primary path in `src/safety/classifier.py` is a 15-keyword list (3 hate, 5 violence, 3 self-harm, 4 code-injection). OpenAI moderation and `unitary/toxic-bert` are optional; `GuardrailsEngine.evaluate()` raises `NotImplementedError` and is never called. Near-zero recall on paraphrased harm attempts.**
 - [x] Output filter for unsafe completions (post-generation scan via `screen_output()`; redaction/blocking paths active)
-- [x] Jailbreak / adversarial prompt pattern library (expanded `INJECTION_PATTERNS` in `src/safety_pipeline.py` covers DAN, developer-mode, persona hijack, delimiter injection, system-prompt extraction, and encoding-relay families)
+- [~] Jailbreak / adversarial prompt pattern library — **AUDIT: `src/safety/prompt_injection.py` has 6 regex patterns for known injection phrases; `ml_injection_score()` is a regex proxy with keyword bonuses, not ML. No adversarial test set, no bypass coverage measurement.**
 - [x] Safety decision explanation in API response (`reason` and `detail` fields in safety issues)
 - [x] Safety event webhook (push safety events to external SIEM) — Pointers: module=`src/agent.py:_send_safety_event_webhook` + `_push_safety_event`; env=`SAFETY_EVENT_WEBHOOK_URL`, `SAFETY_EVENT_WEBHOOK_SECRET`, `SAFETY_EVENT_WEBHOOK_TIMEOUT`. — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=webhook+auth, validate=src/agent.py|SAFETY_EVENT_WEBHOOK_URL
 - [x] GDPR/CCPA data deletion request handler (`POST /privacy/data-deletion-request` validates scope and executes user/org cascade deletion using existing GDPR primitives) — Tags: owner=compliance, priority=p0, risk=high, stage=GA, deps=auth+db+privacy, validate=POST /privacy/data-deletion-request
@@ -803,23 +803,23 @@ harden these to full production level:
 
 ### 12.2 Fine-tuning operations and adapters
 
-- [x] LoRA fine-tuning job endpoint (`POST /finetune/jobs`) — creates persisted job with status 'queued'
-- [x] Fine-tuning job status (`GET /finetune/jobs/{job_id}`) — returns job record or 404
-- [x] Fine-tuning job cancel (`DELETE /finetune/jobs/{job_id}`) — cancels queued/running job, 404 if missing
-- [x] LoRA adapter versioning (store + compare adapter checkpoints) (`POST /finetune/adapters`, `GET /finetune/adapters`, `GET /finetune/adapters/{adapter_id}/compare`)
-- [x] LoRA adapter hot-swap at inference (apply adapter to Ollama base) (`POST /finetune/adapters/{adapter_id}/hot-swap`, `GET /finetune/adapters/active` stores active adapter state for runtime integration)
-- [x] One-click fine-tune on collected feedback data (`POST /finetune/one-click` creates dataset version/provenance and queues fine-tune job)
-- [x] RLHF / DPO pipeline integration (experiment jobs create child fine-tune runs, track events, and register adapter artifacts) (`POST/GET /finetune/experiments/rlhf-dpo/jobs*`, `GET /finetune/experiments/rlhf-dpo/jobs/{job_id}/events`)
-- [x] Continual fine-tuning scheduler (weekly re-tune if benchmarks improve) (policy-driven eval+delta trigger with run-now control; scheduler-integrated execution path) (`POST/GET/DELETE /finetune/continual/schedule*`, `POST /finetune/continual/schedule/{policy_id}/run-now`)
+- [~] LoRA fine-tuning job endpoint (`POST /finetune/jobs`) — **AUDIT: DB record layer only; `src/lora.py` raises `NotImplementedError` for all training dispatch functions (`create_finetune_job`, `apply_adapter`, `rollback_adapter`). No GPU training occurs.**
+- [~] Fine-tuning job status (`GET /finetune/jobs/{job_id}`) — returns DB job record, status never advances past 'queued' because no worker dispatches training
+- [~] Fine-tuning job cancel (`DELETE /finetune/jobs/{job_id}`) — cancels DB record only
+- [~] LoRA adapter versioning (store + compare adapter checkpoints) (`POST /finetune/adapters`, `GET /finetune/adapters`, `GET /finetune/adapters/{adapter_id}/compare`) — metadata stored; no actual adapter weights produced
+- [~] LoRA adapter hot-swap at inference (`POST /finetune/adapters/{adapter_id}/hot-swap`) — **AUDIT: state stored in DB but `apply_adapter()` in `src/lora.py` raises `NotImplementedError`; no adapter is applied to any model**
+- [~] One-click fine-tune on collected feedback data (`POST /finetune/one-click`) — creates dataset version record and queues job record; training dispatch is `NotImplementedError`
+- [~] RLHF / DPO pipeline integration — routes create DB job records and event logs; `src/lora.py` training methods all raise `NotImplementedError`; no actual DPO/RLHF gradient computation occurs
+- [~] Continual fine-tuning scheduler — scheduler policy records stored and cron-triggered; execution calls training dispatch which is `NotImplementedError`
 
 ### 12.3 Model packaging and release readiness
 
-- [x] Nexus Prime Alpha persona wired to fine-tuned Ollama model (`POST /finetune/personas/nexus-prime-alpha/wire`, `GET /finetune/personas/nexus-prime-alpha/wire`)
-- [x] Automated eval suite (benchmark vs base model on code / autonomy / RAG)
-- [x] Model card and transparency report endpoint (`GET /models/{model_id}/card`, `GET /models/{model_id}/transparency`, wired to eval outputs + dataset/adapter registries)
-- [x] Multi-task LoRA adapters (coding / reasoning / research / creative) hot-swap (`GET/POST /finetune/adapters/multitask`, `POST /finetune/adapters/multitask/hot-swap`)
-- [x] Multimodal fine-tuning extension (vision capability) (`POST /finetune/multimodal/jobs`)
-- [x] Knowledge distillation pipeline (teacher: Claude/GPT → student: Nexus Prime) (`POST/GET /finetune/distill/jobs*`, child fine-tune + adapter artifact lifecycle)
+- [~] Nexus Prime Alpha persona wired to fine-tuned Ollama model — route exists; wiring is aspirational since no fine-tuned weights are produced (see 12.2)
+- [~] Automated eval suite (benchmark vs base model) — **AUDIT: `src/eval_pipeline.py` computes scores as `(abs(hash((suite, model, provider))) % 1000) / 1000.0` — deterministic hash values, not real benchmark execution. No HumanEval, GSM8K, or any academic benchmark is run.**
+- [~] Model card and transparency report endpoint — routes return structured DB records; actual eval scores in those records are hash-generated placeholders (see above)
+- [~] Multi-task LoRA adapters hot-swap — metadata routes implemented; hot-swap dispatch calls `NotImplementedError` in `src/lora.py`
+- [~] Multimodal fine-tuning extension — route creates job record; training dispatch is `NotImplementedError`
+- [~] Knowledge distillation pipeline — routes create DB job records; training dispatch is `NotImplementedError`
 
 ---
 
@@ -827,9 +827,9 @@ harden these to full production level:
 
 ### 13.1 Benchmark execution and orchestration
 
-- [x] `POST /benchmark/run` — run model benchmark suite
-- [x] `GET /benchmark/results` — retrieve benchmark results
-- [x] Automated regression benchmark on model update
+- [~] `POST /benchmark/run` — **AUDIT: executes exactly 3 hardcoded probes (`"What is 17*23?"`, a syllogism, `"reverse a string"`). Not a benchmark suite by any academic or industry standard. Results are not statistically meaningful.**
+- [x] `GET /benchmark/results` — retrieve stored probe results
+- [~] Automated regression benchmark on model update — **AUDIT: `src/eval_pipeline.py` regression scores are `(hash(suite+model+provider) % 1000) / 1000.0` — deterministic hash placeholders. No real benchmark executes.**
 
 ### 13.2 Result history and comparative analysis
 
@@ -1064,20 +1064,20 @@ harden these to full production level:
 - [x] Team policies for tool and data access — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+policy, validate=POST/GET/PUT/DELETE /admin/team-policies*|src/team_policies.py
 - [x] Role-based access control enhancements (beyond admin/user/viewer) — Pointers: route=`GET /admin/roles`, `POST /admin/roles/check` (`src/api/routes.py`); module=`src/team_policies.py:ROLE_HIERARCHY`, `role_can`.
 - [x] Regional compliance and deployment controls — Pointers: route=`GET/PUT /admin/compliance`, `GET/PUT /admin/compliance/connectors/{connector}`, `POST /admin/compliance/connectors/{connector}/test` (`src/api/routes.py`); module=`src/team_policies.py:get_compliance_config`, `update_compliance_config`, `get_managed_connector_config`, `update_managed_connector_config`, `test_managed_connector` — connectors expanded to 8 categories (sso, compliance_apis, scim, audit_log, secrets, storage, ticketing, hr) with per-category provider allowlists; SSO extended with `ping_identity`, `auth0`; compliance APIs extended with `soc2_report`, `hipaa_export`.
-- [x] Department / cost-center based quota allocation — Pointers: route=`POST /admin/quota/departments`, `GET /admin/quota/departments*` (`src/api/routes.py`); module=`src/team_policies.py`.
+- [~] Department / cost-center based quota allocation — Pointers: route=`POST /admin/quota/departments`, `GET /admin/quota/departments*` (`src/api/routes.py`); module=`src/team_policies.py`. **Audit note:** `_department_quotas` and `_department_usage` are plain in-memory dicts (`team_policies.py:175-176`); data lost on restart with no DB persistence.
 - [x] Audit trail export for compliance reporting — Pointers: route=`GET /admin/audit-log/export` (`src/api/routes.py`); module=`src/team_policies.py:build_audit_export`.
 
 ### 21.2 Policy enforcement and action approval
 
 - [x] Action policy gating for high-stakes tasks (approve before file delete, command run) — Pointers: route=`POST /admin/team-policies/evaluate`, `POST /admin/approval-workflows/{workflow_id}/advance` (`src/api/routes.py`); module=`src/team_policies.py:evaluate_policy`, `src/tools_builtin.py:dispatch_builtin` — destructive built-in `delete_file`/`run_command` actions now enforce team policy decisions and require approved workflow IDs when HITL is mandated.
 - [x] Multi-tier approval workflows (manager → director → executive) — Pointers: route=`POST /admin/approval-workflows`, `GET /admin/approval-workflows`, `POST /admin/approval-workflows/{workflow_id}/advance` (`src/api/routes.py`); module=`src/team_policies.py`.
-- [x] Audit-ready safety event logging with immutable record — Pointers: route=`GET /safety/audit`, `GET /admin/audit-log/export` (`src/api/routes.py`); module=`src/db.py:add_safety_audit_entry`, `src/db.py:verify_safety_audit_entries` — persisted safety audit entries are append-only hash-chained and integrity is reported in audit/read-export responses.
+- [~] Audit-ready safety event logging with immutable record — **AUDIT: `src/safety/audit.py` writes to `/tmp/nexus_safety_audit.jsonl` — plain file in `/tmp`, cleared on every container restart, writable by the process with no tamper-evident chaining. DB audit entries are in a mutable SQLite/Postgres table. Does NOT meet SOC 2 CC7.2 or ISO 27001 A.12.4 immutability requirements.**
 - [x] Policy violation alerts with context and remediation — Pointers: route=`GET /admin/policy-violations` (`src/api/routes.py`); module=`src/team_policies.py:list_violations`, `src/team_policies.py:list_policy_alerts` — violations now emit open alerts with severity, remediation guidance, workflow linkage, and escalation context.
 - [x] Enterprise connectors and managed integrations (SSO, compliance APIs) — Pointers: SSO routes under `src/api/routes.py` auth section + managed compliance connector endpoints `GET/PUT /admin/compliance/connectors/{connector}`, `POST /admin/compliance/connectors/{connector}/test`; module=`src/team_policies.py` (`get_managed_connector_config`, `update_managed_connector_config`, `test_managed_connector`).
 
 ### 21.3 Safety and oversight
 
-- [x] Multi-layer safety pipeline with monitor model — Tags: owner=safety, priority=p0, risk=high, stage=GA, deps=ml_model+filtering, validate=src/safety_pipeline.py|POST /safety/check
+- [~] Multi-layer safety pipeline with monitor model — **AUDIT: regex + optional keyword classifier only. `GuardrailsEngine.evaluate()` in `src/safety/guardrails.py` raises `NotImplementedError` and is never invoked. Primary harm classifier is a 15-keyword list. There is no ML monitor model in the production path.** — Tags: owner=safety, priority=p0, risk=high, stage=beta
 - [x] Prompt-injection and adversarial content defenses — Pointers: route=`POST /safety/prompt-injection` (`src/api/routes.py`); modules=`src/safety_pipeline.py`, `src/safety.py`.
 - [x] Jailbreak attempt flagging with severity scoring — Pointers: route=`POST /safety/check`, `GET /safety/audit` (`src/api/routes.py`); modules=`src/safety_pipeline.py`, `src/safety_types.py`.
 - [x] Safety decision logging to external SIEM — Pointers: module=`src/agent.py:_send_safety_event_webhook`; route=`GET/POST /admin/siem/config`, `POST /admin/siem/test` (`src/api/routes.py`).
@@ -1160,11 +1160,11 @@ harden these to full production level:
 
 ### 24.3 Budget and quota management
 
-- [x] Per-team budget allocation and tracking — Pointers: route=`POST/GET /billing/teams/{team_id}/budget`, `GET /billing/teams` (`src/api/routes.py`); module=`src/slo.py`.
-- [x] Over-budget alerts with escalation workflow — Pointers: route=`GET /billing/alerts` (`src/api/routes.py`); module=`src/slo.py:list_budget_alerts`.
+- [~] Per-team budget allocation and tracking — Pointers: route=`POST/GET /billing/teams/{team_id}/budget`, `GET /billing/teams` (`src/api/routes.py`); module=`src/slo.py`. **Audit note:** `_team_budgets` and `_team_spending` are plain in-memory dicts (`slo.py:219-220`); all budget data is lost on every container restart. No DB persistence or WAL backup.
+- [~] Over-budget alerts with escalation workflow — Pointers: route=`GET /billing/alerts` (`src/api/routes.py`); module=`src/slo.py:list_budget_alerts`. **Audit note:** Alert state stored in same in-memory `_team_budgets` dict; no durable escalation pathway (email, PagerDuty, webhook) implemented.
 - [x] Reserved capacity and rate guarantees — Pointers: routes=`PUT/GET /billing/teams/{team_id}/capacity`, `GET /billing/capacity`, `POST /billing/teams/{team_id}/capacity/check` (`src/api/routes.py`); module=`src/slo.py`.
 - [x] Spot/preemptible instance support — Pointers: routes=`PUT/GET /billing/teams/{team_id}/spot`, `POST /billing/teams/{team_id}/spot/events` (`src/api/routes.py`); module=`src/slo.py`.
-- [x] Cost attribution and chargeback reports — Pointers: route=`POST /billing/attribution`, `GET /billing/attribution/report` (`src/api/routes.py`); module=`src/slo.py`.
+- [~] Cost attribution and chargeback reports — Pointers: route=`POST /billing/attribution`, `GET /billing/attribution/report` (`src/api/routes.py`); module=`src/slo.py`. **Audit note:** `_attribution_log` is a capped in-memory list of 10 000 entries (`slo.py:300`); entries are not persisted to DB and are lost on restart. No export to accounting systems (QuickBooks, NetSuite, Stripe).
 
 ---
 
@@ -1197,16 +1197,121 @@ harden these to full production level:
 
 ---
 
+## 26. Production Readiness Gaps — Industry Standard Comparison
+
+> **Audit date:** 2026-04-20. Compared against: OpenAI (ChatGPT Enterprise / Assistants API), Anthropic (Claude.ai Teams / API), Google (Gemini Enterprise / Vertex AI Agent Builder), Meta (LLaMA-hosted / Meta AI). Items marked CRITICAL indicate blockers that would surface in a security review, compliance audit, or production incident. Items marked HIGH are expected table-stakes by any enterprise buyer. Items marked MEDIUM are expected by developer-focused buyers or mid-market accounts.
+
+### 26.1 Security and Compliance
+
+- [ ] **[CRITICAL]** SOC 2 Type II certification — All major AI vendors are SOC 2 Type II certified. Nexus AI has no third-party audit, no controls documentation, no evidence collection pipeline. Required by most enterprise procurement.
+- [ ] **[CRITICAL]** ISO 27001 Information Security Management System (ISMS) — Mandatory for EU enterprise and regulated industries. Requires formal risk register, asset inventory, and annual management review.
+- [ ] **[CRITICAL]** HIPAA Business Associate Agreement (BAA) support — Required before any healthcare customer can use the platform. Requires PHI safeguards, access controls, audit logs to a durable store, and signed BAA contracts.
+- [ ] **[CRITICAL]** Hardware Security Module (HSM) or cloud KMS for key management — All credentials and API keys are stored as plaintext env vars or in an unencrypted SQLite file. OpenAI, Anthropic, and Google use AWS KMS / GCP Cloud KMS / Azure Key Vault with envelope encryption. No HSM or KMS integration exists.
+- [ ] **[CRITICAL]** Field-level encryption for PII in database — Chat messages, user emails, and session data are stored unencrypted in SQLite/Postgres. GDPR Article 32 requires appropriate encryption. No column-level or row-level encryption is implemented.
+- [ ] **[CRITICAL]** Penetration testing program and CVE response SLA — No pentest has been performed. No published CVE response process or security@company contact. Enterprise buyers require annual pentests and a defined patch SLA (e.g., critical within 24 h).
+- [ ] **[HIGH]** VPC / private network deployment option — Cloud AI vendors offer VPC peering and private endpoints so data never traverses the public internet. Nexus AI only exposes a public HTTP port with no network-layer isolation.
+- [ ] **[HIGH]** GDPR / CCPA data deletion and portability compliance — No automated right-to-erasure workflow. No data export-on-request pipeline. No consent management system. Deletion of a user account does not cascade-delete chat history or usage records.
+- [ ] **[HIGH]** Supply-chain security: SBOM generation and signed container images — No Software Bill of Materials is generated. Docker images are unsigned. No provenance attestation (SLSA level). Required by US Executive Order 14028 and emerging EU CRA.
+- [ ] **[HIGH]** Secrets rotation automation — API keys and DB credentials are set at deploy time and never rotated automatically. No integration with secrets engines (Vault, AWS Secrets Manager) for dynamic credential issuance.
+- [ ] **[HIGH]** Multi-factor authentication (MFA) enforcement — WebAuthn/passkeys are partially implemented but MFA is not enforced by default. Enterprise SSO providers enforce MFA at IdP level but Nexus AI has no policy to require it.
+- [ ] **[HIGH]** IP allowlisting and geo-blocking controls — No ability to restrict API access to corporate IP ranges or block traffic from high-risk geolocations.
+- [ ] **[MEDIUM]** FedRAMP authorization path — Required for US Federal Government customers. Requires a separate authorization boundary, System Security Plan (SSP), and government sponsor.
+- [ ] **[MEDIUM]** PCI DSS compliance for payment data — If billing or chargeback features ever store card numbers, PCI DSS is required. No tokenization or PCI-scoped isolation exists today.
+
+### 26.2 Infrastructure and Scale
+
+- [ ] **[CRITICAL]** Distributed / horizontally scalable architecture — The current architecture is single-process Python (Uvicorn). All state (rate limits, sessions, budgets, queues) is in-memory and cannot be shared across workers. OpenAI and Anthropic run multi-region, multi-datacenter distributed systems. Nexus AI cannot run more than one replica without losing state consistency.
+- [ ] **[CRITICAL]** Durable message queue for agent tasks — Agent runs, scheduled jobs, and webhook callbacks are dispatched synchronously or via a fragile in-process `asyncio.create_task`. A production system requires a durable queue (Celery + Redis, BullMQ, Cloud Tasks) so tasks survive worker restarts.
+- [ ] **[HIGH]** Zero-downtime rolling deploy — No readiness/liveness probes configured. No graceful shutdown that drains in-flight requests. Restarting the container kills all active streams and in-progress agent runs.
+- [ ] **[HIGH]** Multi-region active-active or active-passive deployment — No cross-region replication of state. Single region = single point of failure. Google and Azure offer multi-region Vertex AI and Azure OpenAI deployments with automatic failover.
+- [ ] **[HIGH]** CDN / edge caching for static assets and cached completions — Static UI is served directly from Uvicorn with no CDN in front. No semantic caching layer (like OpenAI's prompt caching or GPTCache) to reduce redundant LLM calls.
+- [ ] **[HIGH]** Auto-scaling based on queue depth or request rate — No HPA (Kubernetes Horizontal Pod Autoscaler) or equivalent. No load-shedding mechanism beyond a basic rate limiter that rejects rather than queues excess requests.
+- [ ] **[HIGH]** Database read replicas and connection pooling at scale — Single SQLite or Postgres primary with no read replicas. PgBouncer DSN is supported but no pooling tiers or replica routing are configured.
+- [ ] **[MEDIUM]** Global load balancing with latency-based routing — No Anycast or GeoDNS routing. All requests hit a single endpoint regardless of user location.
+- [ ] **[MEDIUM]** Chaos engineering / fault injection testing — No automated failure scenario testing. No Chaos Monkey equivalent. No runbooks for common failure modes.
+
+### 26.3 Safety and Alignment Quality
+
+- [ ] **[CRITICAL]** Real ML-based content safety classifier — The current guardrails use a 15-keyword blocklist (`src/guardrails.py`). Production AI systems use trained classifiers (Llama Guard 3, Azure Content Safety, Perspective API) that detect nuanced harmful content, prompt injections, and policy violations.
+- [ ] **[CRITICAL]** Real OS-level sandbox for code execution — `run_command` tool executes shell commands with only `resource.setrlimit` limits — no namespace isolation, no seccomp filter, no container boundary. This is a CVSS 9+ remote code execution risk. gVisor, Firecracker, or E2B sandbox is required.
+- [ ] **[HIGH]** Prompt injection detection — No detection of indirect prompt injection attacks (where attacker-controlled tool output or retrieved documents contain adversarial instructions). LLM-based and heuristic detectors are table-stakes at Anthropic, OpenAI, and Google.
+- [ ] **[HIGH]** Hallucination detection and grounding verification — No mechanism to verify that model responses are grounded in retrieved documents or that factual claims are supported. RAG responses are passed through without citation verification.
+- [ ] **[HIGH]** Output watermarking / provenance tagging — No cryptographic or statistical watermarks on AI-generated text. Required for compliance in several emerging AI regulations (EU AI Act Article 50).
+- [ ] **[HIGH]** Human-in-the-loop escalation for high-stakes decisions — The HITL mode (`deployment_profiles.py`) can be set to "block" but no actual human review queue, notification system, or review UI exists. HITL is a config flag with no backend implementation.
+- [ ] **[HIGH]** Red-teaming and adversarial robustness program — No automated red-team testing pipeline. No adversarial prompt dataset. All major AI vendors run continuous red-team programs with published results.
+- [ ] **[MEDIUM]** Copyright / IP infringement detection — No detection of verbatim or near-verbatim reproduction of copyrighted text. Required for legal risk management in enterprise deployments.
+- [ ] **[MEDIUM]** Bias and fairness evaluation pipeline — No systematic bias testing across demographic groups. Anthropic publishes bias evaluations; Google runs fairness audits per Responsible AI practices.
+
+### 26.4 Evaluation and Benchmarking Quality
+
+- [ ] **[CRITICAL]** Real benchmark execution against standard datasets — Current benchmark probes run arbitrary inference calls and score results with a hash-based equality check (`src/benchmark.py`). No integration with MMLU, HellaSwag, TruthfulQA, GSM8K, HumanEval, or MATH. Leaderboard scores are not comparable to published model benchmarks.
+- [ ] **[HIGH]** Automated evals CI pipeline — No benchmark runs on pull requests. No regression gate that blocks a deployment when benchmark scores drop below a threshold. OpenAI, Anthropic, and Google run evals on every model update.
+- [ ] **[HIGH]** A/B testing framework for model and prompt changes — No traffic-splitting or statistical significance testing for comparing model variants. Decisions about which model to use are manual.
+- [ ] **[HIGH]** Human evaluation pipeline — No mechanism to route a sample of outputs to human raters for preference judgement. All evaluation is automated.
+- [ ] **[HIGH]** Bias and demographic fairness benchmarks — No evaluation on WinoBias, BBQ, or equivalent fairness datasets. Required for responsible AI deployment claims.
+- [ ] **[MEDIUM]** Adversarial robustness benchmarks (ANLI, AdvGLUE) — No adversarial evaluation datasets included in the benchmark harness.
+- [ ] **[MEDIUM]** Multilingual evaluation across target languages — No evaluation of non-English performance. No language-specific benchmark datasets.
+
+### 26.5 Developer Ecosystem
+
+- [ ] **[CRITICAL]** Published SDK packages (PyPI, npm, pkg.go.dev) — The Python, TypeScript, and Go SDKs exist in the repository but are not published to any package registry. Developers cannot `pip install nexus-ai-sdk`. All major AI vendors publish versioned, maintained SDK packages.
+- [ ] **[HIGH]** Interactive API playground (like OpenAI Playground) — No browser-based tool for developers to experiment with models, adjust parameters, and inspect requests/responses without writing code.
+- [ ] **[HIGH]** OpenAPI / Swagger spec with automated generation — No machine-generated OpenAPI spec. The `/openapi.json` FastAPI auto-doc exists but is not versioned, published, or used to generate client stubs.
+- [ ] **[HIGH]** Outbound webhooks with delivery guarantees — The webhook push endpoint (`/usage/webhook/push`) fires once with a 10-second timeout but has no retry logic, dead-letter queue, or delivery receipt. Slack, Stripe, and GitHub webhooks include exponential backoff with at-least-once delivery.
+- [ ] **[HIGH]** SCIM 2.0 provisioning (user lifecycle automation) — SCIM connector stubs exist in `team_policies.py` but no SCIM endpoint or automated user provisioning/deprovisioning is implemented. Required for enterprise SSO integration with Okta, Azure AD.
+- [ ] **[HIGH]** Developer sandbox / test environment with mock LLMs — No isolated developer tier with free-tier rate limits and mock model responses for integration testing without incurring costs.
+- [ ] **[MEDIUM]** CLI tool for local development (`nexus` command) — No CLI. Comparable products (Anthropic Claude, OpenAI) offer CLIs for local testing and scripting.
+- [ ] **[MEDIUM]** Terraform / Pulumi infrastructure-as-code modules — No IaC templates for deploying Nexus AI to AWS, GCP, or Azure. Competitors publish Terraform modules.
+- [ ] **[MEDIUM]** GraphQL API surface — REST-only. No GraphQL schema for flexible client queries. Some enterprise integrations prefer GraphQL.
+
+### 26.6 Operational Excellence
+
+- [ ] **[CRITICAL]** Durable audit log with tamper-evidence — Current audit log writes to `/tmp/nexus_audit.log` which is wiped on container restart. No append-only log store, no WORM (Write Once Read Many) storage, no log forwarding to SIEM. SOC 2, ISO 27001, and HIPAA all require durable, tamper-evident audit trails.
+- [ ] **[HIGH]** Alerting integration (PagerDuty, OpsGenie, VictorOps) — No on-call alert routing. Errors are logged but no automated incident creation or escalation when error rates or latency SLOs breach thresholds.
+- [ ] **[HIGH]** Distributed tracing with full span depth (OpenTelemetry) — Trace IDs are generated and stored in SQLite but no OpenTelemetry spans are emitted to a trace backend (Jaeger, Tempo, Datadog). No cross-service trace propagation for multi-hop agent calls.
+- [ ] **[HIGH]** Public status page (like status.openai.com) — No hosted status page. Customers have no visibility into incidents or planned maintenance.
+- [ ] **[HIGH]** Published uptime SLA with financial penalties — No SLA document. Enterprise buyers require contractual uptime commitments (99.9% to 99.99%) with service credits.
+- [ ] **[HIGH]** Automated data retention and purge policies — No TTL-based automatic deletion of old chat history, usage records, or audit logs. GDPR requires defined retention periods and automated purge.
+- [ ] **[HIGH]** Runbook automation (auto-remediation playbooks) — No runbooks for common failure modes (DB connection pool exhaustion, Redis unavailable, LLM provider outage). No automated remediation.
+- [ ] **[MEDIUM]** Cost anomaly detection and alerting — No ML-based anomaly detection on spend patterns. No automatic alert when a team's spend spikes unexpectedly.
+- [ ] **[MEDIUM]** Capacity planning reports — No automated capacity planning based on growth trends. No projected infrastructure cost per unit of growth.
+- [ ] **[MEDIUM]** Log aggregation with structured search (ELK / Loki) — Logs are written to stdout with no structured log shipping to a searchable backend in the default configuration.
+
+### 26.7 Agent Capabilities
+
+- [ ] **[CRITICAL]** Long-horizon planning with persistent state — Agent runs are bounded by a single HTTP request context. No mechanism for multi-day or multi-session planning graphs. OpenAI Assistants and Anthropic Claude Artifacts maintain persistent agent state across sessions.
+- [ ] **[CRITICAL]** BM25 sparse retrieval fix — `_get_all_documents()` always returns `[]` in `src/retrieval.py`, making hybrid BM25+vector retrieval silently fall back to pure dense retrieval. The advertised hybrid RAG is broken.
+- [ ] **[HIGH]** Real browser automation with anti-bot evasion — The `browse_web` tool uses basic HTTP requests. Sites with Cloudflare, CAPTCHA, or JavaScript-heavy rendering are inaccessible. Competitors use Playwright or Puppeteer with stealth plugins.
+- [ ] **[HIGH]** Citation attribution for RAG responses — No mechanism to cite which retrieved document chunk supported which sentence in the response. Enterprise knowledge management requires source attribution.
+- [ ] **[HIGH]** Multi-agent orchestration with message passing — Agents can call sub-agents synchronously but there is no async message-passing protocol, no shared blackboard, and no consensus mechanism for disagreements between agents.
+- [ ] **[HIGH]** Agent memory with forgetting curves — Current memory is flat key-value storage. No recency weighting, semantic compression of old memories, or episodic/semantic memory distinction as used in MemGPT and similar systems.
+- [ ] **[HIGH]** Structured output enforcement (JSON Schema constrained generation) — No grammar-constrained decoding (Outlines, Guidance, llama.cpp grammars). Model outputs are parsed post-hoc which breaks for nested or large structured schemas.
+- [ ] **[MEDIUM]** Tool-use policy enforcement per agent persona — No per-agent tool allowlist enforced at the agent level. Any agent can call any tool regardless of its persona definition.
+- [ ] **[MEDIUM]** Agent chaining with data lineage tracking — No provenance graph for how data flows between chained agent calls. Debugging complex chains requires manual log inspection.
+
+### 26.8 Data and Knowledge
+
+- [ ] **[HIGH]** Real-time web grounding with fresh retrieval — No live web search integration that returns results fresher than the model's training cutoff. Perplexity AI, Bing Copilot, and Gemini all offer real-time grounded answers.
+- [ ] **[HIGH]** OCR and document layout understanding — No PDF/image OCR pipeline. Cannot ingest scanned documents, slides, or figures. Google Document AI and Azure Form Recognizer are table-stakes for enterprise knowledge management.
+- [ ] **[HIGH]** Multimodal document ingestion (images, audio, video) — RAG pipeline ingests text only. No image, audio transcript, or video frame extraction for multimodal knowledge bases.
+- [ ] **[HIGH]** Knowledge graph integration — No integration with graph databases (Neo4j, Neptune) for relationship-aware retrieval. Pure vector retrieval misses explicit relationship queries.
+- [ ] **[MEDIUM]** Incremental index updates without full re-embed — ChromaDB collection is rebuilt on each ingest. No incremental upsert that avoids re-embedding unchanged documents.
+- [ ] **[MEDIUM]** Cross-lingual retrieval — No multilingual embedding model (mE5, LaBSE). Non-English documents are retrieved with degraded recall.
+
+---
+
 ## Summary Counts
 
 | Status | Count (approx)       |
 |--------|----------------------|
-| `[x]` Fully implemented | 172 |
-| `[~]` Stub / partial    | 33  |
-| `[ ]` Not yet started   | ~550+ (expanded from 467 with new Sections 20-25) |
+| `[x]` Fully implemented | 163 |
+| `[~]` Stub / partial    | 44  |
+| `[ ]` Not yet started   | ~620+ (expanded with Section 26 industry gap analysis; 17 CRITICAL + 33 HIGH + 18 MEDIUM new items) |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).
 > Do **not** remove `[ ]` items — they represent deliberate scope.
 > 
 > **Note on Sections 20-25:** Newly added roadmap and competitor-aligned features. L1/L2 mapping from ROADMAP_FEATURES_V2.md and COMPETITOR_L0_L1_SEED_CATALOG_2026Q2.md. High-risk items tagged with metadata schema. Maturity status reflects current implementation state as of 2026-04-19.
+>
+> **Note on Section 26:** Added 2026-04-20. Deep audit comparing Nexus AI against OpenAI (ChatGPT Enterprise / Assistants API), Anthropic (Claude.ai Teams), Google (Gemini Enterprise / Vertex AI Agent Builder), and Meta (LLaMA-hosted). Items are classified CRITICAL / HIGH / MEDIUM. Downgrades to earlier sections (team budget, attribution log, token counting, department quotas, fine-tuning, content safety, audit log, sandbox, RAG, benchmarking) reflect the same audit pass — 11 features were downgraded from `[x]` to `[~]` due to in-memory-only state, stub implementations, or known broken paths.
