@@ -180,6 +180,9 @@ def _openai_moderation_classify(text: str) -> ClassificationResult | None:
     )
 
 
+_LOCAL_CLF_CACHE: dict = {}  # model_name → pipeline instance
+
+
 def _local_transformers_classify(text: str) -> ClassificationResult | None:
     model_name = (os.getenv("SAFETY_LOCAL_CLASSIFIER_MODEL", "unitary/toxic-bert") or "unitary/toxic-bert").strip()
     try:
@@ -188,7 +191,11 @@ def _local_transformers_classify(text: str) -> ClassificationResult | None:
         return None
 
     try:
-        clf = pipeline("text-classification", model=model_name, return_all_scores=True)
+        if model_name not in _LOCAL_CLF_CACHE:
+            _LOCAL_CLF_CACHE[model_name] = pipeline(
+                "text-classification", model=model_name, return_all_scores=True
+            )
+        clf = _LOCAL_CLF_CACHE[model_name]
         scored = clf(text[:4000])
     except Exception:
         return None
