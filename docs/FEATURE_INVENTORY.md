@@ -825,18 +825,18 @@ Tag definitions:
 
 ### 13.1 Benchmark execution and orchestration
 
-- [ ] `POST /benchmark/run` — run model benchmark suite
-- [ ] `GET /benchmark/results` — retrieve benchmark results
+- [x] `POST /benchmark/run` — run model benchmark suite
+- [x] `GET /benchmark/results` — retrieve benchmark results
 - [x] Automated regression benchmark on model update
 
 ### 13.2 Result history and comparative analysis
 
-- [ ] Per-model benchmark history (track quality over time)
-- [ ] Benchmark leaderboard endpoint (sorted by task type)
+- [x] Per-model benchmark history (track quality over time) (`GET /benchmark/history`)
+- [x] Benchmark leaderboard endpoint (sorted by task type) (`GET /benchmark/leaderboard`)
 
 ### 13.3 Reporting and product visibility
 
-- [ ] Public leaderboard page in UI
+- [x] Public leaderboard page in UI (overflow menu panel in static UI wired to `GET /benchmark/leaderboard`)
 
 ---
 
