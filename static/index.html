@@ -17,7 +17,7 @@
   <meta name="apple-mobile-web-app-title" content="Nexus AI">
   <link rel="apple-touch-icon" href="/static/icon-192.svg">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <link id="hljs-theme-link" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
   <link rel="stylesheet" href="/static/css/base.css">
   <link rel="stylesheet" href="/static/css/panels.css">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
@@ -303,6 +303,7 @@
       --bg:#f8fafc; --surface:#ffffff; --surface2:#f1f5f9;
       --border:#e2e8f0; --text:#1e293b; --muted:#94a3b8;
     }
+    body.light, body.light-theme { color-scheme: light; }
     body.light .user .bubble { background:var(--accent); color:#fff; }
     body.light .agent .bubble { background:#fff; border-color:#e2e8f0; color:#1e293b; }
     body.light #sidebar { background:#fff; }
@@ -1408,15 +1409,73 @@
   </div>
 
   <!-- Swarm View panel -->
-  <div id="swarm-panel" style="position:fixed;bottom:80px;right:18px;width:340px;max-height:360px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:40;box-shadow:0 8px 32px rgba(0,0,0,.4);">
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
-      <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🧬 Swarm Activity</span>
-      <button class="panel-btn" onclick="closeSwarmPanel()" title="Close">✕</button>
+  <div id="swarm-panel" style="position:fixed;bottom:80px;right:18px;width:420px;max-height:520px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:40;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🧬 Swarm</span>
+        <!-- Tab bar -->
+        <div style="display:flex;gap:2px;background:var(--surface2);border-radius:7px;padding:2px;">
+          <button id="swarm-tab-activity" onclick="swarmTab('activity')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:var(--accent);color:#fff;font-weight:600;">Activity</button>
+          <button id="swarm-tab-graph" onclick="swarmTab('graph')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:transparent;color:var(--muted);">Graph</button>
+          <button id="swarm-tab-assign" onclick="swarmTab('assign')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:transparent;color:var(--muted);">Assign</button>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span id="swarm-pause-badge" style="display:none;font-size:.6rem;background:#e55;color:#fff;border-radius:4px;padding:1px 5px;font-weight:700;">PAUSED</span>
+        <button id="swarm-pause-btn" onclick="swarmTogglePause()" title="Pause / Resume swarm" style="background:none;border:1px solid var(--border);border-radius:5px;padding:2px 7px;font-size:.68rem;color:var(--muted);cursor:pointer;">⏸</button>
+        <button class="panel-btn" onclick="closeSwarmPanel()" title="Close">✕</button>
+      </div>
     </div>
-    <div id="swarm-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:4px;min-height:60px;"></div>
-    <div style="padding:6px 14px;border-top:1px solid var(--border);font-size:.65rem;color:var(--muted);display:flex;justify-content:space-between;">
-      <span id="swarm-count">0 events</span>
-      <button onclick="clearSwarmFeed()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:.65rem;">Clear</button>
+
+    <!-- Tab: Activity -->
+    <div id="swarm-pane-activity" style="display:flex;flex-direction:column;flex:1;min-height:0;">
+      <div id="swarm-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:4px;min-height:60px;"></div>
+      <div style="padding:6px 14px;border-top:1px solid var(--border);font-size:.65rem;color:var(--muted);display:flex;justify-content:space-between;flex-shrink:0;">
+        <span id="swarm-count">0 events</span>
+        <button onclick="clearSwarmFeed()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:.65rem;">Clear</button>
+      </div>
+    </div>
+
+    <!-- Tab: Graph -->
+    <div id="swarm-pane-graph" style="display:none;flex-direction:column;flex:1;min-height:0;">
+      <div style="padding:6px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;">
+        <span style="font-size:.65rem;color:var(--muted);">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#4a9;margin-right:3px;"></span>idle
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d96;margin:0 3px 0 8px;"></span>busy
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#e55;margin:0 3px 0 8px;"></span>errored
+        </span>
+        <button onclick="swarmGraphRefresh()" style="margin-left:auto;font-size:.65rem;background:none;border:1px solid var(--border);border-radius:5px;padding:2px 8px;color:var(--muted);cursor:pointer;">↻ Refresh</button>
+      </div>
+      <div style="flex:1;min-height:0;position:relative;">
+        <canvas id="swarm-graph-canvas" style="width:100%;height:100%;display:block;"></canvas>
+        <div id="swarm-graph-tooltip" style="display:none;position:absolute;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:.7rem;color:var(--text);pointer-events:none;white-space:nowrap;"></div>
+      </div>
+      <div style="padding:4px 12px;border-top:1px solid var(--border);font-size:.63rem;color:var(--muted);flex-shrink:0;">
+        <span id="swarm-graph-summary">Loading…</span>
+      </div>
+    </div>
+
+    <!-- Tab: Assign Task -->
+    <div id="swarm-pane-assign" style="display:none;flex-direction:column;flex:1;min-height:0;overflow-y:auto;">
+      <div style="padding:12px 14px;display:flex;flex-direction:column;gap:9px;">
+        <div>
+          <label style="font-size:.7rem;color:var(--muted);display:block;margin-bottom:3px;">Agent</label>
+          <select id="swarm-assign-agent" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;">
+            <option value="">— select agent —</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:.7rem;color:var(--muted);display:block;margin-bottom:3px;">Topic <span style="font-style:italic;">(optional)</span></label>
+          <input id="swarm-assign-topic" placeholder="e.g. code-review" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;box-sizing:border-box;" />
+        </div>
+        <div>
+          <label style="font-size:.7rem;color:var(--muted);display:block;margin-bottom:3px;">Task description</label>
+          <textarea id="swarm-assign-task" rows="4" placeholder="Describe the task for this agent…" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;resize:vertical;font-family:inherit;box-sizing:border-box;"></textarea>
+        </div>
+        <button onclick="swarmAssignTask()" class="btn-primary" style="width:100%;">Assign Task →</button>
+        <div id="swarm-assign-result" style="display:none;font-size:.72rem;padding:6px 10px;border-radius:7px;background:var(--surface2);color:var(--text);"></div>
+      </div>
     </div>
   </div>
 
@@ -1740,9 +1799,47 @@ async function init(){
                      initSessionSafetySelector(profileNames)]);
   setupDrop();
   setupVoice();
-}
+let voiceRecognition=null, isListening=false;
+let artifactCount=0;
 
-// Provider utilities moved to static/js/utilities/providers.js
+// ── WEB SPEECH API ────────────────────────────────────────────────────────────
+function setListening(val){
+  isListening=val;
+  const btn=document.getElementById('voice-btn');
+  if(!btn)return;
+  btn.classList.toggle('listening',val);
+  btn.title=val?'Stop recording':'Voice input';
+}
+function toggleVoice(){
+  if(!('webkitSpeechRecognition' in window||'SpeechRecognition' in window)){
+    alert('Your browser does not support speech recognition. Try Chrome or Edge.');
+    return;
+  }
+  if(isListening){voiceRecognition?.stop();setListening(false);return;}
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  voiceRecognition=new SR();
+  voiceRecognition.continuous=false;
+  voiceRecognition.interimResults=true;
+  voiceRecognition.lang=navigator.language||'en-US';
+  const taskEl=document.getElementById('task');
+  let interimStart=taskEl?taskEl.value:'';
+  voiceRecognition.onstart=()=>setListening(true);
+  voiceRecognition.onend=()=>setListening(false);
+  voiceRecognition.onerror=(e)=>{setListening(false);if(e.error!=='no-speech')console.warn('Speech error:',e.error);};
+  voiceRecognition.onresult=(e)=>{
+    if(!taskEl)return;
+    let interim='',final='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal)final+=e.results[i][0].transcript;
+      else interim+=e.results[i][0].transcript;
+    }
+    taskEl.value=interimStart+(final||interim);
+    taskEl.dispatchEvent(new Event('input'));
+    if(final)interimStart+=final;
+  };
+  voiceRecognition.start();
+}
+}
 
 // ── SIDEBAR ────────────────────────────────────────────────────────────────────
 // Sidebar utilities moved to static/js/utilities/sidebar.js

@@ -15,13 +15,13 @@ Database tables used: orgs, org_members, org_invites  (defined in db.py)
 from __future__ import annotations
 
 import json
-import logging
+from .observability import get_logger
 import os
 import secrets
 import time
 from typing import Any
 
-logger = logging.getLogger("nexus.orgs")
+logger = get_logger("nexus.orgs")
 
 _ORG_INVITE_TTL = int(os.getenv("ORG_INVITE_TTL_HOURS", "72")) * 3600
 
@@ -48,7 +48,7 @@ def create_org(
         metadata=json.dumps(metadata or {}),
     )
     db_add_org_member(org["id"], owner_username, role="admin")
-    logger.info("org_created", org_id=org["id"], owner=owner_username)
+    logger.info("org_created org_id=%s owner=%s", org["id"], owner_username)
     return org
 
 
@@ -83,7 +83,7 @@ def delete_org(org_id: str) -> bool:
     db_delete_org_members(org_id)
     deleted = db_delete_org(org_id)
     if deleted:
-        logger.info("org_deleted", org_id=org_id)
+        logger.info("org_deleted org_id=%s", org_id)
     return deleted
 
 
@@ -102,7 +102,7 @@ def remove_member(org_id: str, username: str) -> bool:
     from .db import db_remove_org_member
     result = db_remove_org_member(org_id, username)
     if result:
-        logger.info("org_member_removed", org_id=org_id, username=username)
+        logger.info("org_member_removed org_id=%s username=%s", org_id, username)
     return result
 
 
@@ -161,7 +161,7 @@ def create_invite(
         role=role,
         expires_at=time.time() + _ORG_INVITE_TTL,
     )
-    logger.info("org_invite_created", org_id=org_id, invited_by=invited_by)
+    logger.info("org_invite_created org_id=%s invited_by=%s", org_id, invited_by)
     return invite
 
 
@@ -179,7 +179,7 @@ def accept_invite(token: str, username: str) -> dict:
     role = invite.get("role", "member")
     member = add_member(org_id, username, role=role)
     db_mark_invite_used(token, username)
-    logger.info("org_invite_accepted", org_id=org_id, username=username)
+    logger.info("org_invite_accepted org_id=%s username=%s", org_id, username)
     return {"org_id": org_id, "role": role, "member": member}
 
 

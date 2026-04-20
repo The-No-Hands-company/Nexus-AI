@@ -1,26 +1,82 @@
 // ── THEME ──────────────────────────────────────────────────────────────────────
-let isDark = localStorage.getItem('theme') !== 'light';
-function applyTheme() {
-  document.body.classList.toggle('light', !isDark);
-  document.getElementById('theme-btn').textContent = isDark ? '☀️' : '🌙';
+const HLJS_THEME_DARK = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css';
+const HLJS_THEME_LIGHT = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-light.min.css';
+const BROWSER_THEME_DARK = '#09090e';
+const BROWSER_THEME_LIGHT = '#f8fafc';
+
+function normalizeTheme(theme) {
+  return theme === 'light' ? 'light' : 'dark';
 }
+
+function updateThemeControls(theme) {
+  const themeBtn = document.getElementById('theme-btn');
+  if (themeBtn) {
+    themeBtn.textContent = theme === 'dark' ? '☀️' : '🌙';
+    themeBtn.title = theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+  }
+
+  const lightBtn = document.getElementById('theme-light');
+  const darkBtn = document.getElementById('theme-dark');
+  if (lightBtn && darkBtn) {
+    lightBtn.style.borderColor = theme === 'light' ? 'var(--accent)' : '';
+    darkBtn.style.borderColor = theme === 'dark' ? 'var(--accent)' : '';
+    lightBtn.style.color = theme === 'light' ? 'var(--text)' : '';
+    darkBtn.style.color = theme === 'dark' ? 'var(--text)' : '';
+  }
+}
+
+function updateBrowserTheme(theme) {
+  const themeColor = theme === 'light' ? BROWSER_THEME_LIGHT : BROWSER_THEME_DARK;
+  document.querySelectorAll('meta[name="theme-color"]').forEach((meta) => {
+    meta.setAttribute('content', themeColor);
+  });
+}
+
+function updateCodeTheme(theme) {
+  const hljsTheme = document.getElementById('hljs-theme-link');
+  if (!hljsTheme) return;
+  hljsTheme.setAttribute('href', theme === 'light' ? HLJS_THEME_LIGHT : HLJS_THEME_DARK);
+}
+
+function applyTheme(theme) {
+  const resolvedTheme = normalizeTheme(theme);
+  const isLight = resolvedTheme === 'light';
+
+  document.body.classList.toggle('light', isLight);
+  document.body.classList.toggle('light-theme', isLight);
+  document.body.setAttribute('data-theme', resolvedTheme);
+  document.documentElement.style.colorScheme = isLight ? 'light' : 'dark';
+
+  updateThemeControls(resolvedTheme);
+  updateBrowserTheme(resolvedTheme);
+  updateCodeTheme(resolvedTheme);
+}
+
+function persistTheme(theme) {
+  localStorage.setItem('theme', theme);
+  fetch('/prefs', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({theme}),
+  }).catch(() => {});
+}
+
+function setTheme(theme, options = {}) {
+  const resolvedTheme = normalizeTheme(theme);
+  applyTheme(resolvedTheme);
+  if (options.persist !== false) persistTheme(resolvedTheme);
+}
+
 function toggleTheme() {
-  isDark = !isDark;
-  localStorage.setItem('theme', isDark ? 'dark' : 'light');
-  applyTheme(); haptic('light');
+  const currentTheme = normalizeTheme(localStorage.getItem('theme') || 'dark');
+  const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
+  setTheme(nextTheme, {persist: true});
+  haptic('light');
 }
-applyTheme();
+
+applyTheme(normalizeTheme(localStorage.getItem('theme') || 'dark'));
 
 // ── THEME & FONT SIZE ─────────────────────────────────────────────────────────
-function setTheme(theme) {
-  document.body.classList.toggle('light-theme', theme === 'light');
-  fetch('/prefs', {method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({theme})});
-  document.getElementById('theme-light').style.borderColor = theme==='light' ? 'var(--accent)' : '';
-  document.getElementById('theme-dark').style.borderColor  = theme==='dark'  ? 'var(--accent)' : '';
-  document.getElementById('theme-light').style.color = theme==='light' ? 'var(--text)' : '';
-  document.getElementById('theme-dark').style.color  = theme==='dark'  ? 'var(--text)' : '';
-}
 
 function setFontSize(size) {
   document.body.className = document.body.className
@@ -32,6 +88,9 @@ function setFontSize(size) {
 
 async function loadPrefs() {
   const d = await fetch('/prefs').then(r=>r.json()).catch(()=>({}));
-  if (d.theme) setTheme(d.theme);
+  if (d.theme) {
+    setTheme(d.theme, {persist: false});
+    localStorage.setItem('theme', normalizeTheme(d.theme));
+  }
   if (d.font_size) setFontSize(parseInt(d.font_size));
 }

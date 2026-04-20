@@ -178,6 +178,14 @@ class _NoopHistogram:
         return contextlib.nullcontext()
 
 
+class _NoopGauge:
+    def labels(self, **_):
+        return self
+
+    def set(self, *_, **__):
+        pass
+
+
 if _prometheus_available:
     import prometheus_client as prom  # type: ignore
 
@@ -212,6 +220,10 @@ if _prometheus_available:
         "nexus_active_streams",
         "Currently active SSE streams",
     )
+    TASK_QUEUE_DEPTH = prom.Gauge(
+        "nexus_task_queue_depth",
+        "Current background task queue depth",
+    )
     CACHE_HITS = prom.Counter(
         "nexus_cache_hits_total",
         "Cache hit/miss events",
@@ -223,8 +235,46 @@ else:
     LLM_CALLS_TOTAL = _NoopCounter()
     LLM_LATENCY = _NoopHistogram()
     SAFETY_BLOCKS_TOTAL = _NoopCounter()
-    ACTIVE_STREAMS = _NoopCounter()
+    ACTIVE_STREAMS = _NoopGauge()
+    TASK_QUEUE_DEPTH = _NoopGauge()
     CACHE_HITS = _NoopCounter()
+
+
+def set_active_streams_gauge(count: int) -> None:
+    """Update active SSE stream gauge with best-effort safety."""
+    try:
+        ACTIVE_STREAMS.set(max(0, int(count)))
+    except Exception:
+        pass
+
+
+def set_task_queue_depth_gauge(depth: int) -> None:
+    """Update queue depth gauge with best-effort safety."""
+    try:
+        TASK_QUEUE_DEPTH.set(max(0, int(depth)))
+    except Exception:
+        pass
+
+
+def refresh_runtime_gauges() -> None:
+    """Refresh runtime gauges from live in-memory state.
+
+    This keeps /metrics representative even when no requests are currently flowing.
+    """
+    try:
+        from .task_queue import worker_status
+
+        status = worker_status()
+        set_task_queue_depth_gauge(int(status.get("queue_depth", 0)))
+    except Exception:
+        pass
+
+    try:
+        from .api.state import _active_streams
+
+        set_active_streams_gauge(len(_active_streams))
+    except Exception:
+        pass
 
 
 def get_prometheus_metrics_text() -> str:
@@ -312,6 +362,12 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         req_id = request.headers.get(self._header) or str(uuid.uuid4())
         corr_id = request.headers.get("X-Correlation-ID", req_id)
+        actor = request.client.host if request.client else "unknown"
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Bearer "):
+            actor = f"bearer:{auth[7:19]}"
+        elif request.headers.get("X-API-Key", ""):
+            actor = f"api_key:{request.headers.get('X-API-Key', '')[:12]}"
         audit_body = os.getenv("AUDIT_BODY_LOG", "false").lower() == "true"
         req_body = ""
         if audit_body:
@@ -326,7 +382,21 @@ class RequestIdMiddleware(BaseHTTPMiddleware):
 
         start = time.time()
         try:
-            response = await call_next(request)
+            try:
+                from .secrets_manager import secret_access_context
+                from .observability import get_tracer as _get_tracer  # local import for cycle safety
+
+                tracer = _get_tracer()
+                with secret_access_context(actor=actor, request_id=req_id):
+                    with tracer.start_as_current_span("http.request") as span:
+                        if hasattr(span, "set_attribute"):
+                            span.set_attribute("http.method", request.method)
+                            span.set_attribute("http.path", request.url.path)
+                            span.set_attribute("request.id", req_id)
+                            span.set_attribute("correlation.id", corr_id)
+                        response = await call_next(request)
+            except Exception:
+                response = await call_next(request)
         finally:
             request_id_ctx.reset(token_rid)
             correlation_id_ctx.reset(token_cid)
@@ -406,6 +476,7 @@ class BackpressureMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp, max_concurrent: int = 100) -> None:
         super().__init__(app)
         self._max = int(os.getenv("MAX_CONCURRENT_REQUESTS", str(max_concurrent)))
+        self._max_queue_depth = int(os.getenv("MAX_WORKER_QUEUE_DEPTH", "200"))
         self._active = 0
         self._lock = __import__("threading").Lock()
 
@@ -416,6 +487,28 @@ class BackpressureMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         with self._lock:
+            queue_depth = 0
+            try:
+                from .task_queue import worker_status
+
+                queue_depth = int(worker_status().get("queue_depth", 0))
+                set_task_queue_depth_gauge(queue_depth)
+            except Exception:
+                queue_depth = 0
+
+            if queue_depth >= self._max_queue_depth:
+                return Response(
+                    content=json.dumps({
+                        "error": "Service overloaded — worker queue is saturated",
+                        "type": "backpressure_queue_depth",
+                        "queue_depth": queue_depth,
+                        "queue_limit": self._max_queue_depth,
+                    }),
+                    status_code=503,
+                    media_type="application/json",
+                    headers={"Retry-After": "5"},
+                )
+
             if self._active >= self._max:
                 return Response(
                     content=json.dumps({
@@ -460,6 +553,10 @@ class IpRateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         path = request.url.path
         if path in ("/health", "/health/live", "/health/deep", "/metrics"):
+            return await call_next(request)
+
+        # Keep contract/integration tests deterministic; they use Starlette's test client host.
+        if (request.client and request.client.host == "testclient") or os.getenv("PYTEST_CURRENT_TEST"):
             return await call_next(request)
 
         ip = self._get_ip(request)

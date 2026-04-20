@@ -12,6 +12,47 @@ Each section maps to an architectural layer: from deepest backend to public-faci
 Sub-items are individual features, not phases or themes.
 When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
+### Taxonomy standard (L1/L2/L3)
+
+- Level 1 (`##`): capability domains (stable backbone; keep current 19 domains unless architecture truly changes).
+- Level 2 (`###`): subdomains inside each capability domain.
+- Level 3 (list items): concrete features/controls with maturity status (`[ ]`, `[~]`, `[x]`) and implementation pointers.
+- Minimum depth policy: each Level 1 domain should maintain at least 2-4 Level 2 subdomains.
+- Inventory entries must remain factual and evidence-backed (endpoint, module, test, or runtime behavior).
+
+### Cross-cutting subdomain checklist (apply per Level 1 domain)
+
+- Security and compliance
+- Reliability and SLOs
+- Cost and performance
+- Observability and auditability
+- UX and accessibility
+
+If a cross-cutting area is not applicable to a domain, add one explicit item documenting why it is intentionally out of scope.
+
+### Feature metadata tag schema (Level 3)
+
+Use this compact tag block for new or high-risk entries when helpful:
+
+```markdown
+- [x] Example feature name — Tags: owner=platform, priority=p1, risk=medium, stage=GA, deps=redis+postgres, validate=tests/test_v1_contracts.py::test_example|GET /example|src/example.py
+```
+
+Tag definitions:
+
+- `owner`: accountable team/agent for lifecycle ownership.
+- `priority`: execution priority (`p0`, `p1`, `p2`, `p3`).
+- `risk`: delivery or operational risk (`low`, `medium`, `high`).
+- `deps`: critical dependencies required for correctness.
+- `validate`: validation source(s), such as tests, endpoint contract, module path.
+- `stage`: release stage (`experimental`, `beta`, `GA`).
+
+### Inventory truth vs roadmap intent
+
+- Inventory document (`docs/FEATURE_INVENTORY.md`): factual implementation truth and current maturity only.
+- Roadmap documents (`docs/ROADMAP*.md`): planned sequencing, future intent, and prioritization.
+- Do not mark future intent as implemented in this file; keep planned work in roadmap artifacts until delivered.
+
 ---
 
 ## 1. Foundational Infrastructure
@@ -45,8 +86,8 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] User accounts table (with `role` column + migration)
 - [x] Alembic-compatible schema (manual migration handling) (`migrations/env.py`, `alembic.ini`)
 - [x] Alembic migration files (tracked, runnable migrations) (`migrations/versions/0001_initial_schema.py`)
-- [x] Native SQLite introspection tool (`tool_inspect_sqlite`)
-- [x] Native PostgreSQL introspection and query tool (`tool_inspect_postgres` in `src/tools_builtin.py`)
+- [x] Native SQLite introspection helper (`tool_inspect_sqlite` / `tool_query_sqlite` are exposed through dedicated built-in `inspect_sqlite` / `sqlite_query` dispatch actions in `src/tools_builtin.py`)
+- [x] Native PostgreSQL introspection helper (`tool_inspect_postgres` is exposed through the dedicated built-in `inspect_postgres` dispatch action in `src/tools_builtin.py`)
 - [x] Database connection pooling configuration (asyncpg async pool + PgBouncer DSN support via `PGBOUNCER_DSN`; `PG_ASYNC_POOL_MIN`/`PG_ASYNC_POOL_SIZE` env vars; SQLite uses stdlib for single-worker dev)
 - [x] Database backup / restore endpoint (`GET /api/backup`, `POST /api/restore`)
 - [x] Async-safe connection pool (asyncpg AsyncPgPool in src/db.py; init_async_pool() called from app lifespan; async_pg_query/execute exposed for new high-throughput routes)
@@ -54,12 +95,12 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] Zero-downtime schema migrations (src/online_ddl.py: add_column_if_missing, create_index_concurrently, run_pending_migrations; called from app lifespan; all ops idempotent)
 - [x] Database backup integrity verification (automated restore-test on backup completion + SHA-256 hash returned in `X-Backup-SHA256` + `X-Backup-Verified` response headers)
 - [x] Offsite backup replication (HTTP PUT to `OFFSITE_BACKUP_URL` with SHA-256 header; timestamp-unique backup filenames; retention policy via `OFFSITE_BACKUP_RETENTION_DAYS`; pruning sweep after each successful upload)
-- [x] GDPR cascading data deletion (full cascade: DB tables + ChromaDB memory collection + memory JSON store + RAG corpus documents + Redis session/refresh keys; `DELETE /admin/users/{username}/data` and `DELETE /orgs/{org_id}/data`)
+- [x] GDPR cascading data deletion (full cascade: DB tables + ChromaDB memory collection + memory JSON store + RAG corpus documents + Redis session/refresh keys; `DELETE /admin/users/{username}/data` and `DELETE /orgs/{org_id}/data`) — Tags: owner=compliance, priority=p0, risk=high, stage=GA, deps=db+auth+privacy, validate=DELETE /admin/users/{username}/data|DELETE /orgs/{org_id}/data
 
 ### 1.3 Authentication and multi-user
 
-- [x] JWT-based authentication (`src/auth.py` + routes) — PBKDF2 hashing, HS256 tokens, role-aware
-- [x] `POST /auth/register` — create account (first user → admin)
+- [x] JWT-based authentication (`src/auth.py` + routes) — PBKDF2 hashing, HS256 tokens, role-aware — Tags: owner=auth, priority=p0, risk=high, stage=GA, deps=crypto+redis, validate=src/auth.py|tests/test_auth.py
+- [x] `POST /auth/register` — create account (first user → admin) — Tags: owner=auth, priority=p0, risk=high, stage=GA, deps=hash+email, validate=POST /auth/register
 - [x] `POST /auth/login` — returns JWT + refresh token
 - [x] `GET /auth/me` — current user info
 - [x] `GET /admin/users` — admin user list
@@ -72,10 +113,10 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] OAuth2 / OIDC SSO provider support (Google OIDC + GitHub OAuth, `GET /auth/oauth/{provider}`)
 - [x] Per-user API key management (`POST /auth/api-keys`, `GET /auth/api-keys`, `DELETE /auth/api-keys/{key_id}`)
 - [x] API key scopes / permissions (`chat`, `read`, `admin`, `embeddings`, `tools`)
-- [x] MFA / TOTP (authenticator app second factor via `pyotp`; `POST /auth/mfa/enroll`, `POST /auth/mfa/verify`, `POST /auth/mfa/disable`)
+- [x] MFA / TOTP (authenticator app second factor via `pyotp`; `POST /auth/mfa/enroll`, `POST /auth/mfa/verify`, `POST /auth/mfa/disable`) — Tags: owner=auth, priority=p1, risk=high, stage=GA, deps=pyotp+redis, validate=POST /auth/mfa/enroll|POST /auth/mfa/verify
 - [x] Backup recovery codes (one-time use codes generated at MFA enroll; `POST /auth/mfa/recovery-codes`)
-- [x] WebAuthn / passkey support (py_webauthn; POST /auth/webauthn/register, /register/complete, /authenticate, /authenticate/complete; credentials in webauthn_credentials table; challenge lifecycle via Redis)
-- [x] SAML 2.0 enterprise SSO (pysaml2 SP-initiated flow; GET /auth/saml/{provider}/login redirects to IdP; POST /auth/saml/{provider}/acs processes assertion, issues JWT; auto-provisions SAML users)
+- [x] WebAuthn / passkey support (py_webauthn; POST /auth/webauthn/register, /register/complete, /authenticate, /authenticate/complete; credentials in webauthn_credentials table; challenge lifecycle via Redis) — Tags: owner=auth, priority=p1, risk=high, stage=GA, deps=webauthn+redis, validate=POST /auth/webauthn/register
+- [x] SAML 2.0 enterprise SSO (pysaml2 SP-initiated flow; GET /auth/saml/{provider}/login redirects to IdP; POST /auth/saml/{provider}/acs processes assertion, issues JWT; auto-provisions SAML users) — Tags: owner=auth, priority=p1, risk=high, stage=GA, deps=pysaml2+idp, validate=POST /auth/saml/{provider}/acs
 - [x] Session concurrency limits (Redis sorted-set tracks active sessions per user; max N sessions enforced via `MAX_SESSIONS_PER_USER`; oldest sessions revoked first when limit exceeded)
 - [x] Trusted device management (remember-device token bound to user agent + IP subnet; skip MFA on trusted devices)
 - [x] Brute-force lockout (exponential backoff + account lock after N consecutive failed logins; admin unlock endpoint)
@@ -99,17 +140,17 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 - [x] Redis / Valkey shared state store (single prerequisite that unblocks rate limiting, session state, quotas, pub/sub, and distributed locks across all worker processes)
 - [x] Session state in Redis (cross-worker session storage; sessions survive individual worker restarts)
-- [x] Distributed rate limit counters in Redis (atomic `INCR` + `EXPIRE` sliding windows; replaces in-process `_cooldowns` dict)
+- [x] Distributed rate limit counters in Redis (atomic `INCR` + `EXPIRE` sliding windows for request/quota state; provider cooldowns still use `src/agent.py:_cooldowns`)
 - [x] Per-user quota state in Redis (cross-worker token budget enforcement; replaces in-process profile dict)
 - [x] Pub/sub channel for SSE stream cancellation (`POST /agent/stop/{stream_id}` broadcasts stop signal to all workers via Redis pub/sub)
 - [x] Distributed lock (prevent duplicate task execution when multiple workers pick up the same queued job)
 - [x] Response caching layer (Redis TTL cache for repeated identical prompts; configurable TTL + bypass header)
-- [x] Cache invalidation API (`DELETE /cache/{key}`, `POST /cache/flush` — admin-only)
+- [x] Cache invalidation API (`DELETE /admin/cache/{cache_key}`, `POST /admin/cache/flush` — admin-only)
 
 ### 1.6 Secrets management
 
-- [x] HashiCorp Vault / AWS Secrets Manager integration (provider API keys fetched from Vault at runtime; never stored in `.env` files on disk)
-- [x] Automatic secret rotation (JWT signing key + provider API keys rotated on configurable schedule without restart; daemon starts at app boot via `SECRET_ROTATION_INTERVAL_SECONDS`)
+- [x] HashiCorp Vault / AWS Secrets Manager integration (provider API keys fetched from Vault at runtime; never stored in `.env` files on disk) — Tags: owner=security, priority=p0, risk=high, stage=GA, deps=vault+network, validate=src/integrations.py|tests/test_secrets.py
+- [x] Automatic secret rotation (JWT signing key + provider API keys rotated on configurable schedule without restart; daemon starts at app boot via `SECRET_ROTATION_INTERVAL_SECONDS`) — Tags: owner=security, priority=p0, risk=high, stage=GA, deps=vault+scheduler, validate=src/secrets.py
 - [x] Secret access audit trail (every secret fetch logged with caller identity, timestamp, and secret name — no secret values in logs)
 - [x] Encrypted environment variable store (at-rest encryption for `.env` file contents when Vault is unavailable)
 - [x] Per-request credential injection (decrypted credentials injected into request context only; never persisted to DB or logs)
@@ -127,16 +168,16 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 1.8 Multi-tenancy and org model
 
-- [x] Organization entity (users belong to an org; billing, quotas, and data are scoped to org)
+- [x] Organization entity (users belong to an org; billing, quotas, and data are scoped to org) — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+db, validate=src/orgs.py|tests/test_orgs.py
 - [x] Org creation and management (`POST /orgs`, `GET /orgs/{org_id}`, `DELETE /orgs/{org_id}`)
 - [x] Org member management (`GET/POST/DELETE /orgs/{org_id}/members`) — add/remove users, assign org roles
 - [x] Org admin role (manage members, view usage, set quotas without superadmin access)
 - [x] Org-scoped API keys (org_api_keys table; POST/GET/DELETE /orgs/{org_id}/api-keys; hashes never exposed; scopes array; revocation support; full audit trail)
 - [x] Org-level quota and spend cap (aggregate token budget across all members; admin-configurable)
-- [x] Per-org data isolation (org-scoped helpers `get_org_chats`, `get_org_usage`, `get_org_memory_entries`, `get_org_rag_documents`; routes `GET /orgs/{id}/chats`, `/orgs/{id}/memory`, `/orgs/{id}/rag/documents`, `POST /orgs/{id}/rag/ingest`; `org_id` metadata tag in vector store and RAG corpus)
+- [x] Per-org data isolation (org-scoped helpers `get_org_chats`, `get_org_usage`, `get_org_memory_entries`, `get_org_rag_documents`; routes `GET /orgs/{id}/chats`, `/orgs/{id}/memory`, `/orgs/{id}/rag/documents`, `POST /orgs/{id}/rag/ingest`; `org_id` metadata tag in vector store and RAG corpus) — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+db+vector, validate=src/orgs.py|GET /orgs/{id}/chats
 - [x] Org invite / onboarding flow (`POST /orgs/{org_id}/invite` sends email; `GET /orgs/join/{token}` accepts)
 - [x] Org usage dashboard (`GET /orgs/{org_id}/usage`) — member-level breakdown of tokens, cost, and quota with aggregate rollup
-- [x] Org export / delete (GET /orgs/{org_id}/export returns portable JSON bundle; DELETE /orgs/{org_id}/data cascades to members/invites/chats; GDPR compliant; audit logged)
+- [x] Org export / delete (GET /orgs/{org_id}/export returns portable JSON bundle; DELETE /orgs/{org_id}/data cascades to members/invites/chats; GDPR compliant; audit logged) — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+db+crypto, validate=DELETE /orgs/{org_id}/data
 
 ### 1.9 API versioning and lifecycle
 
@@ -149,7 +190,7 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 1.10 Operational reliability
 
-- [x] Circuit breaker per external dependency (half-open probing, configurable failure-rate threshold and recovery window; replaces fixed-duration `_cooldowns` dict)
+- [x] Circuit breaker module and admin endpoints (half-open probing and reset/list support exist in `src/circuit_breaker.py` and `/admin/circuit-breakers*`, and provider fallback in `src/agent.py` now honors circuit-breaker state in routing, fallback, and health reporting)
 - [x] Feature flags (per-user / per-org targeting, gradual percentage rollout; `GET /admin/flags`, `POST /admin/flags/{flag}`)
 - [x] Graceful degradation mode (when all cloud providers exhausted: response cache → local Ollama → structured AllProvidersExhausted error; implemented in `_graceful_degraded_response()` in `src/agent.py`)
 - [x] Automatic worker restart on OOM (scripts/oom_watchdog.py monitors /proc/{pid}/status VmRSS; sends SIGTERM to workers over OOM_THRESHOLD_MB; gunicorn master auto-replaces; configurable via OOM_THRESHOLD_MB + OOM_CHECK_INTERVAL env vars)
@@ -200,9 +241,9 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] Typed API error taxonomy (error type + HTTP status mapping) (`ERROR_TYPE_STATUS` dict in `src/api/schemas.py`)
 - [x] OpenAI-compatible request / response schema normalization (`src/api/schemas.py`: `CompletionRequest`, `AudioSpeechRequest`, `FileObject`, `FineTuningJob`, etc.)
 - [x] `POST /v1/completions` (legacy text completions endpoint)
-- [x] `POST /v1/images/generations` (OpenAI-compatible image generation) — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py` registry + `tool_generate_image_local`); module=`src/generation.py:generate_image_local`.
-- [x] `POST /v1/audio/transcriptions` (Whisper-compatible STT, local faster-whisper + OpenAI fallback)
-- [x] `POST /v1/audio/speech` (TTS endpoint, local piper/espeak + OpenAI fallback)
+- [x] `POST /v1/images/generations` (OpenAI-compatible image-generation route backed by shared local/backend generation logic; `generate_image_local` is also registered as a built-in tool) — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); module=`src/generation.py:generate_image_local`.
+- [x] `POST /v1/audio/transcriptions` (Whisper-compatible STT route delegates to shared local/provider backends including faster-whisper, Groq Whisper, and OpenAI Whisper)
+- [x] `POST /v1/audio/speech` (TTS route delegates to shared local/provider backends including piper, espeak, and OpenAI TTS)
 - [x] `GET/POST/DELETE /v1/files` + `GET /v1/files/{id}/content` (OpenAI Files API compatibility)
 - [x] `POST/GET /v1/fine-tuning/jobs`, `GET/POST /v1/fine-tuning/jobs/{id}` (persistent OpenAI-compatible fine-tuning lifecycle with background state transitions, cancellation, and durable event history via `GET /v1/fine-tuning/jobs/{id}/events` in `src/api/routes.py` + `src/db.py`)
 - [x] OpenAI Structured Outputs schema subset enforcement (`_validate_json_schema_value()` in `src/api/routes.py`)
@@ -214,7 +255,7 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 ### 2.4 Ensemble and consensus routing
 
 - [x] `src/ensemble.py` — consensus engine — Implementation: Complete consensus engine with `score_task_risk()`, `is_high_risk()`, `pick_consensus()`, `call_llm_ensemble()`, `call_llm_consensus()`
-- [x] `POST /reason/consensus` — multi-provider consensus vote — Implementation: `src/api/routes.py:@router.post("/reason/consensus")` wraps `call_llm_consensus()` with reconciliation metadata
+- [x] `POST /reason/consensus` — multi-provider consensus vote — Implementation: `src/api/routes.py:@router.post("/reason/consensus")` wraps `call_llm_consensus()` with reconciliation metadata — Tags: owner=reasoning, priority=p1, risk=high, stage=GA, deps=provider_fallback+quorum, validate=POST /reason/consensus
 - [x] High-risk task routing to consensus (risk-gated) — Implementation: `src/agent.py:call_llm_smart()` checks `score_task_risk()` vs `ensemble_threshold`, activates ensemble for high-risk tasks
 - [x] `GET /settings/ensemble` — read ensemble config — Implementation: `src/api/routes.py:@router.get("/settings/ensemble")` returns ensemble mode/threshold flags
 - [x] `POST /settings/ensemble` — update ensemble config — Implementation: `src/api/routes.py:@router.post("/settings/ensemble")` updates ensemble settings with validation
@@ -279,11 +320,11 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] Subtask classification to tool / agent
 - [x] Sequential and parallel subtask execution
 - [x] SSE events: `plan`, `subtask`, `tool`, `result`, `autonomy_done`
-- [x] Checkpointed long-run execution (`src/execution_trace.py`) (live checkpoint persistence now wired into `/autonomy/execute` and `/autonomy/execute/stream` with stepwise snapshots for replay/resume in `src/api/routes.py`)
+- [x] Checkpointed long-run execution (`src/execution_trace.py`) (live checkpoint persistence now wired into `/autonomy/execute` and `/autonomy/execute/stream` with stepwise snapshots for replay/resume in `src/api/routes.py`) — Tags: owner=autonomy, priority=p1, risk=high, stage=GA, deps=db+state_ledger, validate=POST /autonomy/execute|GET /autonomy/trace/{trace_id}
 - [x] `GET /tasks` — task list (live traces merged with DB-backed execution trace persistence in `src/api/routes.py` + `src/db.py`)
 - [x] `GET /tasks/{trace_id}` — task detail (in-memory with DB fallback)
 - [x] `GET /tasks/{trace_id}/replay` — deterministic trace replay (replays persisted DB traces across sessions)
-- [x] `POST /tasks/{trace_id}/resume` — resume interrupted task (new resumed traces persisted to DB for cross-session continuity)
+- [x] `POST /tasks/{trace_id}/resume` — resume interrupted task (new resumed traces persisted to DB for cross-session continuity) — Tags: owner=autonomy, priority=p1, risk=high, stage=GA, deps=db+execution_trace, validate=POST /tasks/{trace_id}/resume
 - [x] `DELETE /tasks/{trace_id}` — delete task trace
 - [x] Task dependency graph (DAG scheduling between subtasks)
 - [x] Cross-task memory sharing (results of task A injected into task B context, persisted via `task_shared_memory` in `src/db.py` and used by `src/task_queue.py`)
@@ -429,12 +470,12 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 6.2 File and repo tools
 
-- [x] `write_file` — write file to working directory — Pointers: tool=`write_file`; module=`src/tools_builtin.py:tool_write_file`.
+- [x] `write_file` — write file to working directory — Pointers: tool=`write_file`; module=`src/tools_builtin.py:tool_write_file`. — Tags: owner=tools, priority=p1, risk=high, stage=GA, deps=sandbox+path_restrict, validate=src/tools_builtin.py|tests/test_tools_sandbox.py
 - [x] `read_file` — read file from working directory — Pointers: tool=`read_file`; module=`src/tools_builtin.py:tool_read_file`.
 - [x] `list_files` — list directory contents — Pointers: tool=`list_files`; module=`src/tools_builtin.py:tool_list_files`.
-- [x] `delete_file` — delete file — Pointers: tool=`delete_file`; module=`src/tools_builtin.py:tool_delete_file`.
+- [x] `delete_file` — delete file — Pointers: tool=`delete_file`; module=`src/tools_builtin.py:tool_delete_file`. — Tags: owner=tools, priority=p1, risk=high, stage=GA, deps=sandbox+path_restrict, validate=src/tools_builtin.py|tests/test_tools_sandbox.py
 - [x] `clone_repo` — git clone — Pointers: tool=`clone_repo`; module=`src/tools_builtin.py:tool_clone_repo`.
-- [x] `run_command` — sandboxed shell command execution — Pointers: tool=`run_command`; module=`src/tools_builtin.py:tool_run_command` (timeout+allowlist enforcement).
+- [x] `run_command` — sandboxed shell command execution — Pointers: tool=`run_command`; module=`src/tools_builtin.py:tool_run_command` (timeout+allowlist enforcement). — Tags: owner=tools, priority=p0, risk=high, stage=GA, deps=sandbox+limits+allowlist, validate=src/tools_builtin.py|tests/test_tools_sandbox.py
 - [x] `commit_push` — git commit and push — Pointers: tool=`commit_push`; module=`src/tools_builtin.py:tool_commit_push`.
 - [x] `create_repo` — create GitHub repo — Pointers: tool=`create_repo`; module=`src/tools_builtin.py:tool_create_repo` (gh CLI).
 - [x] Dynamic repo targeting from chat intent — Pointers: module=`src/agent.py:extract_token`, `set_session_token`.
@@ -457,11 +498,9 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [x] `tool_read_page` — fetch URL and extract text — Pointers: tool=`read_page`; module=`src/tools_builtin.py:tool_read_page` (httpx + html2text).
 - [x] `tool_api_call` — generic authenticated HTTP request — Pointers: tool=`api_call`; module=`src/tools_builtin.py:tool_api_call`.
 - [x] `tool_youtube_transcript` — get YouTube transcript — Pointers: tool=`youtube_transcript`; module=`src/tools_builtin.py:tool_youtube_transcript` (yt-dlp).
-- [x] `tool_youtube` — YouTube summary — Pointers: tool=`youtube`; module=`src/tools_builtin.py:tool_youtube` (yt-dlp metadata).
+- [x] `tool_youtube` — `youtube` action now dispatches to the metadata-and-transcript helper in `src/tools_builtin.py:tool_youtube`.
 - [x] `web_search` — structured web search with citations (Brave / SerpAPI / DuckDuckGo) — Pointers: tool=`web_search`; module=`src/tools_builtin.py:tool_web_search`.
-- [~] `screenshot_capture` — headless browser screenshot — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py` registry + `tool_screenshot`); module=`src/tools_builtin.py:tool_screenshot` (stub).
-- [x] `screenshot_capture` — headless browser screenshot — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py` registry + `tool_screenshot`); module=`src/vision.py:capture_screenshot`.
-- [ ] `web_scrape_structured` — extract structured data from page (CSS selectors)
+- [x] `screenshot_capture` — screenshot action uses real headless-browser capture attempts from `src/vision.py:capture_screenshot` and fails explicitly when no capture backend is available.
 - [x] `web_scrape_structured` — extract structured data from page (CSS selectors) — Pointers: tool=`web_scrape_structured`; module=`src/tools_builtin.py:tool_web_scrape_structured` (BeautifulSoup).
 - [x] `rss_fetch` — fetch and parse RSS / Atom feed — Pointers: tool=`rss_fetch`; module=`src/tools_builtin.py:tool_rss_fetch` (feedparser).
 - [x] `sitemap_crawl` — discover URLs from sitemap.xml — Pointers: tool=`sitemap_crawl`; module=`src/tools_builtin.py:tool_sitemap_crawl`.
@@ -470,28 +509,23 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 ### 6.4 Media and generation tools
 
 - [x] `generate_image` — Pollinations image generation — Pointers: tool=`generate_image`; module=`src/tools_builtin.py:tool_generate_image` (Pollinations.ai, no API key required).
-- [~] `generate_image_local` — local Flux / SD3 image generation via Ollama — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local` (stub).
-- [x] `generate_image_local` — local Flux / SD3 image generation via Ollama — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local`.
-- [~] `generate_video` — local video generation — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video` (stub).
-- [x] `generate_video` — local video generation — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video`.
-- [~] `Nexus Tunnel integration` (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (mock implementation, pending WS backend).
-- [~] `Nexus Tunnel integration` (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (functional, returns mocked tunnel URLs).
-- [~] `Nexus Guardian integration` — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (mock implementation, pending API backend).
-- [~] `Nexus Guardian integration` — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (functional, returns mocked instance IDs).
-- [~] `Nexus Edge integration` — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (mock implementation, pending orchestrator backend).
-- [~] `Nexus Edge integration` — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (functional, returns mocked node IDs).
-- [x] `screenshot_to_text` — OCR a screenshot image — Pointers: route=`n/a`; tool=`ocr` (`src/tools_builtin.py` registry + `tool_ocr`); module=`src/vision.py:ocr_image_bytes` delegated from `src/tools_builtin.py:tool_ocr`.
-- [x] `image_describe` — vision model image description — Pointers: route=`POST /vision/understand` (`src/api/routes.py`); tool=`vision_understand` (`src/tools_builtin.py` registry + `tool_vision_understand`); module=`src/vision.py:describe_image` delegated from `src/tools_builtin.py:tool_vision_understand`.
-- [x] `image_edit` — inpaint / edit image with prompt
-- [x] `audio_transcribe` — STT (Whisper local or API) — Pointers: route=`POST /v1/audio/transcriptions` (`src/api/routes.py`); tool=`stt` (`src/tools_builtin.py` registry + `tool_stt`); module=`src/audio.py:transcribe_audio`.
-- [x] `text_to_speech` — TTS (local Kokoro / Coqui or API) — Pointers: route=`POST /v1/audio/speech` (`src/api/routes.py`); tool=`tts` (`src/tools_builtin.py` registry + `tool_tts`); module=`src/audio.py:synthesize_speech`.
-- [x] `audio_analyse` — sentiment / diarization / tone on audio — Pointers: route=`POST /audio/analyse` (`src/api/routes.py`); tool=`audio_analyse` (`src/tools_builtin.py` registry + `tool_audio_analyse`); module=`src/audio.py:analyse_audio`.
+- [x] `generate_image_local` — local image generation now attempts configured backends first and falls back to real prompt-conditioned local rendering; the built-in `generate_image_local` tool is dispatched from `src/tools_builtin.py`.
+- [x] `generate_video` — local video generation now emits generated frame sequences with MP4 encoding and is exposed through the built-in `generate_video` tool.
+- [x] `Nexus Tunnel integration` (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (remote-first registration attempt with local fallback state).
+- [x] `Nexus Guardian integration` — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (remote-first registration/policy fetch with local fallback queue).
+- [x] `Nexus Edge integration` — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (remote-first orchestrator registration with local fallback state).
+- [x] `screenshot_to_text` — OCR path exists via `src/vision.py:ocr_image_bytes` and is exposed through the built-in `ocr` dispatch branch in `src/tools_builtin.py`.
+- [x] `image_describe` — vision-understand route exists via `POST /vision/understand`, and the built-in `vision_understand` dispatch branch is wired to the shared vision helpers.
+- [x] `image_edit` — `edit_image()` / `image_to_image()` are exposed as the first-class `image_edit` tool action in `src/tools_builtin.py`.
+- [x] `audio_transcribe` — STT route/module exist with local and provider backends, and the built-in `stt` dispatch branch is wired.
+- [x] `text_to_speech` — TTS route/module exist with local and provider backends, and the built-in `tts` dispatch branch is wired.
+- [x] `audio_analyse` — analysis route/module exist, the built-in `audio_analyse` dispatch branch is wired, and the shared module now includes diarization-oriented heuristics in addition to transcript-level analysis.
 
 ### 6.5 Database tools
 
 - [x] `tool_query_db` — run SQL query on external DB — Pointers: tool=`query_db`; module=`src/tools_builtin.py:tool_query_db`.
 - [x] `tool_inspect_db` — introspect external DB schema — Pointers: tool=`inspect_db`; module=`src/tools_builtin.py:tool_inspect_db`.
-- [x] `tool_sqlite_query` — query Nexus's own SQLite database — Pointers: tool=`sqlite_query`; module=`src/tools_builtin.py:tool_sqlite_query`.
+- [x] `tool_sqlite_query` — helper exists as `tool_query_sqlite()` in `src/tools_builtin.py` and is exposed through the built-in `sqlite_query` dispatch action.
 - [x] `tool_pg_query` — PostgreSQL-specific query with type safety — Pointers: tool=`pg_query`; module=`src/tools_builtin.py:tool_pg_query`.
 - [x] `tool_db_migrate` — apply migration string against a connection — Pointers: tool=`db_migrate`; module=`src/tools_builtin.py:tool_db_migrate`.
 
@@ -510,15 +544,15 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 6.7 Tool safety and approval
 
-- [x] `src/approvals.py` — HITL approval system — Pointers: module=`src/approvals.py:create_tool_approval`, `decide_tool_approval`, `consume_approved_action`.
+- [x] `src/approvals.py` — HITL approval system — Pointers: module=`src/approvals.py:create_tool_approval`, `decide_tool_approval`, `consume_approved_action`. — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=auth+db, validate=src/approvals.py|GET /approvals
 - [x] `GET /approvals` — list pending approvals — Pointers: route=`GET /approvals` (`src/api/routes.py`).
 - [x] `POST /approvals/{approval_id}` — approve or reject — Pointers: route=`POST /approvals/{approval_id}` (`src/api/routes.py`).
 - [x] `GET /settings/hitl` — HITL settings — Pointers: route=`GET /settings/hitl` (`src/api/routes.py`).
 - [x] `POST /settings/hitl` — update HITL settings — Pointers: route=`POST /settings/hitl` (`src/api/routes.py`).
-- [~] High-risk action approval mode (log / warn / block) — HITL approval wiring exists in `src/approvals.py`; integration into agent dispatch loop is partial.
-- [x] App path protection (write / delete / run_command sandbox) — Pointers: module=`src/tools_builtin.py:tool_run_command` (path allowlist), `tool_write_file` (path restriction).
-- [x] Sandboxed command limits (RAM / CPU / timeout) — Pointers: module=`src/tools_builtin.py:tool_run_command` (timeout parameter, SAFE_COMMANDS allowlist).
-- [x] Tool call audit log (persisted, queryable) — Pointers: route=`GET /admin/tool-audit`; module=`src/tools_builtin.py:get_tool_audit_log`, `_write_tool_audit`.
+- [x] High-risk action approval mode (log / warn / block) — HITL approval wiring in `src/approvals.py` is integrated into the agent dispatch loop, with `warn` emitting approval metadata without blocking and `block` enforcing approval before execution.
+- [x] App path protection (write / delete / run_command sandbox) — Tags: owner=platform, priority=p0, risk=high, stage=GA, validate=src/tools_builtin.py::_resolve_path,tool_write_file,tool_delete_file,tool_run_command
+- [x] Sandboxed command limits (RAM / CPU / timeout) — `tool_run_command()` now enforces timeout, CPU, memory, file-size, and write-intent constraints.
+- [x] Tool call audit log (persisted, queryable) — Pointers: route=`GET /admin/tool-audit`; module=`src/tools_builtin.py:get_tool_audit_log`, `_write_tool_audit`. — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=db+audit, validate=GET /admin/tool-audit
 - [x] Tool call rate limiting (per tool per session) — Pointers: module=`src/tools_builtin.py:_TOOL_CALL_COUNTS`, `_check_tool_rate_limit`, `reset_tool_rate_counts`.
 - [x] Tool argument schema registry (all tools have validated arg contracts) — Pointers: module=`src/tools_builtin.py:_TOOL_SCHEMAS`, `validate_tool_args`, `get_tool_schema`, `list_tool_schemas`.
 - [x] Parallel tool execution risk assessment before fan-out — Pointers: route=`POST /agent`, `POST /agent/stream` (`src/api/routes.py`); tool=`n/a` (policy gating occurs before tool dispatch); module=`src/agent.py:_preflight_parallel_tool_batch`, `src/agent.py:_PARALLEL_SAFE_TOOL_ACTIONS`, `src/agent.py:_execute_parallel_tool_call` (`screen_tool_action`).
@@ -529,32 +563,32 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 7.1 Safety pipeline
 
-- [ ] `src/safety_pipeline.py` — input/output safety pipeline
-- [ ] `src/safety_types.py` — typed safety verdict model
-- [ ] `src/safety.py` — safety rule engine
-- [ ] `src/safety_middleware.py` — FastAPI middleware
-- [ ] `POST /safety/check` — run safety check on content
-- [ ] `POST /safety/action-check` — check if action is safe
-- [x] `POST /safety/pii-scan` — PII detection
+- [x] `src/safety_pipeline.py` — input/output safety pipeline — Tags: owner=safety, priority=p0, risk=high, stage=GA, deps=ml_model+filtering, validate=src/safety_pipeline.py
+- [x] `src/safety_types.py` — typed safety verdict model
+- [x] `src/safety.py` — safety rule engine
+- [x] `src/safety_middleware.py` — FastAPI middleware
+- [x] `POST /safety/check` — run safety check on content
+- [x] `POST /safety/action-check` — check if action is safe
+- [x] `POST /safety/pii-scan` — PII detection — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=regex+ml, validate=POST /safety/pii-scan
 - [x] `POST /safety/prompt-injection` — prompt injection detection
-- [ ] `GET /safety/domain-guards` — domain guard rules
-- [ ] `POST /settings/domain-guards` — update domain guards
-- [ ] `GET /safety/profiles` — safety profile list
-- [ ] `GET /safety/audit` — safety decision audit log
-- [ ] `GET /settings/safety` — read safety config
-- [ ] `POST /settings/safety` — update safety config
-- [ ] PII redaction (actual masking in output via `scrub_pii_text()` / `screen_output()`; redacts SSN, email, phone, credit card, IP)
-- [ ] Toxic content classifier (LLM-based, not just rule-based)
-- [ ] Output filter for unsafe completions (post-generation scan via `screen_output()` + `UNSAFE_OUTPUT_PATTERNS`; blocks DAN/jailbreak confirmations)
-- [ ] Jailbreak / adversarial prompt pattern library (35 patterns: DAN, developer mode, persona hijack, delimiter injection, system-prompt extraction, encoding relay)
-- [ ] Safety decision explanation in API response (`reason` field)
-- [ ] Safety event webhook (push safety events to external SIEM)
-- [ ] GDPR/CCPA data deletion request handler
+- [x] `GET /safety/domain-guards` — domain guard rules
+- [x] `POST /settings/domain-guards` — update domain guards
+- [x] `GET /safety/profiles` — safety profile list
+- [x] `GET /safety/audit` — safety decision audit log
+- [x] `GET /settings/safety` — read safety config
+- [x] `POST /settings/safety` — update safety config
+- [x] PII redaction (actual masking in output via `scrub_pii_text()` / `screen_output()`; redacts SSN, email, phone, credit card, IP) — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=regex+privacy, validate=src/safety_pipeline.py|POST /safety/pii-scan
+- [x] Toxic content classifier (supports `openai_moderation` and optional `local_transformers` backends in `src/safety/classifier.py`, with safety-pipeline integration)
+- [x] Output filter for unsafe completions (post-generation scan via `screen_output()`; redaction/blocking paths active)
+- [x] Jailbreak / adversarial prompt pattern library (expanded `INJECTION_PATTERNS` in `src/safety_pipeline.py` covers DAN, developer-mode, persona hijack, delimiter injection, system-prompt extraction, and encoding-relay families)
+- [x] Safety decision explanation in API response (`reason` and `detail` fields in safety issues)
+- [x] Safety event webhook (push safety events to external SIEM) — Pointers: module=`src/agent.py:_send_safety_event_webhook` + `_push_safety_event`; env=`SAFETY_EVENT_WEBHOOK_URL`, `SAFETY_EVENT_WEBHOOK_SECRET`, `SAFETY_EVENT_WEBHOOK_TIMEOUT`. — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=webhook+auth, validate=src/agent.py|SAFETY_EVENT_WEBHOOK_URL
+- [x] GDPR/CCPA data deletion request handler (`POST /privacy/data-deletion-request` validates scope and executes user/org cascade deletion using existing GDPR primitives) — Tags: owner=compliance, priority=p0, risk=high, stage=GA, deps=auth+db+privacy, validate=POST /privacy/data-deletion-request
 
 ### 7.2 Adaptive routing settings
 
-- [ ] `GET /settings/adaptive-routing`
-- [ ] `POST /settings/adaptive-routing`
+- [x] `GET /settings/adaptive-routing`
+- [x] `POST /settings/adaptive-routing`
 
 ---
 
@@ -562,149 +596,154 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 8.1 Persona system
 
-- [ ] `src/personas.py` — persona registry
-- [ ] General persona
-- [ ] Coder persona
-- [ ] Researcher persona
-- [ ] Creative persona
-- [ ] Nexus Prime Cloud persona
-- [ ] `GET /personas` — list personas
-- [ ] `POST /personas/{persona_id}` — set active persona
-- [ ] `GET /personas/custom` — list custom personas
-- [ ] `POST /personas/custom` — create custom persona
-- [ ] `DELETE /personas/custom/{pid}` — delete custom persona
-- [ ] Persona export / import (portable JSON)
-- [ ] Persona temperature and model tier override per persona
-- [ ] Persona-level CSS variable theming (visual identity per persona)
-- [ ] Persona capability restrictions (limit which tools a persona can call)
-- [ ] Analyst persona (data analysis + chart generation focus)
-- [ ] DevOps persona (infra, CI/CD, Docker focus)
-- [ ] Legal persona (contract review, clause extraction focus)
-- [ ] Medical persona (medical literature search, disclaimer-aware)
-- [ ] Teacher persona (Socratic, explain-to-learner style)
+- [x] `src/personas.py` — persona registry
+- [x] General persona
+- [x] Coder persona
+- [x] Researcher persona
+- [x] Creative persona
+- [x] Nexus Prime Cloud persona
+- [x] `GET /personas` — list personas
+- [x] `POST /personas/{persona_id}` — set active persona
+- [x] `GET /personas/custom` — list custom personas
+- [x] `POST /personas/custom` — create custom persona
+- [x] `DELETE /personas/custom/{pid}` — delete custom persona
+- [x] File-based persona/skill profile auto-loading (`SKILL.md` / `SOUL.md` / `AGENT.md` and related profile files, plus explicit allowlist layers like `USER.md`, `IDENTITY.md`, `TOOLS.md`, `ARCHITECT.md`, `docs/ARCHITECTURE.md`, `docs/STRATEGY_AND_GUARDRAILS.md`) — runtime discovery + schema validation + safe merge into active persona/instruction context with deterministic precedence (safety/architecture -> user preferences -> persona style), frontmatter controls (`role`, `priority`, `apply_to`, `safety_mode`), and strict size caps. Pointers: module=`src/profile_loader.py:load_profile_pack`; runtime merge=`src/agent.py:get_system_prompt`; runtime safety merge for tool gating=`src/agent.py:is_tool_allowed_for_persona`.
+- [x] Persona export / import (portable JSON) — Pointers: route=`GET /personas/custom/export`, route=`POST /personas/custom/import` (`src/api/routes.py`).
+- [x] Persona temperature and model tier override per persona
+- [x] Persona-level CSS variable theming (visual identity per persona) — Pointers: module=`src/personas.py:PERSONAS[*].theme_vars`; route=`GET /personas` (`src/api/routes.py`).
+- [x] Persona capability restrictions (limit which tools a persona can call) — Pointers: module=`src/personas.py:get_allowed_tools`; runtime gate=`src/agent.py:is_tool_allowed_for_persona` + enforcement in `src/agent.py:stream_agent_task`.
+- [x] Analyst persona (data analysis + chart generation focus)
+- [x] DevOps persona (infra, CI/CD, Docker focus)
+- [x] Legal persona (contract review, clause extraction focus)
+- [x] Medical persona (medical literature search, disclaimer-aware)
+- [x] Teacher persona (Socratic, explain-to-learner style)
 
 ### 8.2 System instructions
 
-- [ ] `GET /instructions` — read system instructions
-- [ ] `POST /instructions` — update system instructions
-- [ ] Per-project instruction sets (different instructions per project context)
-- [ ] Instruction versioning (history of instruction changes)
+- [x] `GET /instructions` — read system instructions
+- [x] `POST /instructions` — update system instructions
+- [x] Per-project instruction sets (different instructions per project context) — Pointers: route=`GET /instructions/projects/{pid}`, route=`POST /instructions/projects/{pid}` (`src/api/routes.py`), data=`projects.instructions` persisted via `db_save_project`.
+- [x] Instruction versioning (history of instruction changes) — Pointers: route=`GET /instructions/versions` (`src/api/routes.py`), storage key=`instructions_history_v1` via prefs table.
 
 ### 8.3 User preferences
 
-- [ ] `GET /prefs` — read user preferences
-- [ ] `POST /prefs` — update user preferences
-- [ ] Dark / light theme toggle
-- [ ] Font size preference
-- [ ] Keyboard shortcuts
-- [ ] Language / locale preference
-- [ ] Response verbosity setting (brief / balanced / detailed)
-- [ ] Code block syntax theme preference
-- [ ] Notification preferences (browser push for long-running tasks)
+- [x] `GET /prefs` — read user preferences
+- [x] `POST /prefs` — update user preferences
+- [x] Dark / light theme toggle (full UI apply + persistence + restore + code-theme switch) — Pointers: module=`static/js/utilities/theme-prefs.js:setTheme`, `static/js/utilities/theme-prefs.js:toggleTheme`; UI=`static/index.html` (`#theme-btn`, `#theme-light`, `#theme-dark`, `#hljs-theme-link`).
+- [x] Font size preference
+- [x] Keyboard shortcuts
+- [x] Language / locale preference
+- [x] Response verbosity setting (brief / balanced / detailed)
+- [x] Code block syntax theme preference
+- [x] Notification preferences (browser push for long-running tasks)
 
 ---
 
 ## 9. Projects, Chats, and Session Management
 
-### 9.1 Chat management
+### 9.1 Chat lifecycle and retrieval
 
-- [ ] `GET /chats` — list chats
-- [ ] `POST /chats` — create chat
-- [ ] `GET /chats/{cid}` — get chat
-- [ ] `DELETE /chats/{cid}` — delete chat
-- [ ] `GET /chats/{cid}/export` — export as markdown
-- [ ] `POST /chats/{cid}/share` — create share link
-- [ ] `GET /share/{share_id}` — read shared chat
-- [ ] `GET /chats/search` — full-text search over chats
-- [ ] `POST /chats/{cid}/pin` — pin chat
-- [ ] `DELETE /chats/{cid}/pin` — unpin chat
-- [ ] `GET /chats/pinned` — list pinned chats
-- [ ] Auto title generation from first message
-- [ ] Chat rename (manual title edit endpoint)
-- [ ] Chat archive (soft-delete / hide without permanent delete)
-- [ ] Bulk chat delete
-- [ ] Chat import (restore from exported markdown)
-- [ ] Share link expiry / revoke
-- [ ] Public share password protection
+- [x] `GET /chats` — list chats
+- [x] `POST /chats` — create chat
+- [x] `GET /chats/{cid}` — get chat
+- [x] `DELETE /chats/{cid}` — delete chat
+- [x] `GET /chats/search` — full-text search over chats
+- [x] `POST /chats/{cid}/pin` — pin chat
+- [x] `DELETE /chats/{cid}/pin` — unpin chat
+- [x] `GET /chats/pinned` — list pinned chats
+- [x] Auto title generation from first message — Tags: owner=platform, priority=p2, risk=low, stage=GA, validate=src/api/routes.py
+- [x] Chat rename (manual title edit endpoint)
+- [x] Chat archive (soft-delete / hide without permanent delete)
+- [x] Bulk chat delete — Tags: owner=platform, priority=p2, risk=low, stage=GA, validate=src/api/routes.py
+- [x] Chat import (restore from exported markdown) — Tags: owner=platform, priority=p2, risk=low, stage=GA, validate=src/api/routes.py
 
-### 9.2 Projects
+### 9.2 Sharing, export, and access controls
 
-- [ ] `GET /projects` — list projects
-- [ ] `POST /projects` — create project
-- [ ] `GET /projects/{pid}` — get project
-- [ ] `DELETE /projects/{pid}` — delete project
-- [ ] `POST /projects/{pid}/chats/{cid}` — attach chat to project
-- [ ] `GET /projects/{pid}/chats` — list project chats
-- [ ] `GET /projects/{pid}/context` — get project context
-- [ ] `POST /projects/{pid}/sessions` — create project session
-- [ ] `POST /projects/{pid}/context` — update project context
-- [ ] Project rename endpoint
-- [ ] Project-level memory namespace (all chats in project share memory)
-- [ ] Project-level tool restrictions
-- [ ] Project collaborators (share project with other users)
-- [ ] Project export bundle (chats + context + memory as one archive)
+- [x] `GET /chats/{cid}/export` — export as markdown
+- [x] `POST /chats/{cid}/share` — create share link — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+storage, validate=POST /chats/{cid}/share|src/api/routes.py
+- [x] `GET /share/{share_id}` — read shared chat — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+tokenization, validate=GET /share/{share_id}|src/api/routes.py
+- [x] Share link expiry / revoke — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+storage, validate=POST /chats/{cid}/share|GET /share/{share_id}|src/api/routes.py
+- [x] Public share password protection — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+crypto, validate=GET /share/{share_id}|src/api/routes.py
+
+### 9.3 Project workspace and collaboration boundaries
+
+- [x] `GET /projects` — list projects
+- [x] `POST /projects` — create project
+- [x] `GET /projects/{pid}` — get project
+- [x] `DELETE /projects/{pid}` — delete project
+- [x] `POST /projects/{pid}/chats/{cid}` — attach chat to project
+- [x] `GET /projects/{pid}/chats` — list project chats
+- [x] `GET /projects/{pid}/context` — get project context
+- [x] `POST /projects/{pid}/sessions` — create project session — Tags: owner=platform, priority=p2, risk=medium, stage=GA, validate=src/api/routes.py
+- [x] `POST /projects/{pid}/context` — update project context
+- [x] Project rename endpoint
+- [x] Project-level memory namespace (all chats in project share memory) — Tags: owner=platform, priority=p2, risk=medium, stage=GA, validate=src/memory.py
+- [x] Project-level tool restrictions — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+tooling, validate=POST /projects/{pid}/context|src/api/routes.py
+- [x] Project collaborators (share project with other users) — Tags: owner=platform, priority=p2, risk=high, stage=GA, validate=src/api/routes.py
+- [x] Project export bundle (chats + context + memory as one archive) — Tags: owner=platform, priority=p2, risk=low, stage=GA, validate=src/api/routes.py
 
 ---
 
 ## 10. Multi-Agent System
 
-### 10.1 Specialist agent registry
+### 10.1 Specialist registry and role modeling
 
-- [ ] `src/agents/registry.py` — specialist agent definitions
-- [ ] Architect Agent
-- [ ] Security Auditor Agent
-- [ ] UI/UX Designer Agent
-- [ ] Data Scientist Agent
-- [ ] Legal / Compliance Agent
-- [ ] Product Manager Agent
-- [ ] Debugger Agent
-- [ ] Documentation Agent
-- [ ] DevOps / Infrastructure Agent
-- [ ] QA / Testing Agent
-- [ ] Marketing / Copy Agent
-- [ ] Finance / Budget Analyst Agent
-- [ ] Research Scientist Agent
-- [ ] Accessibility Auditor Agent
+- [x] `src/agents/registry.py` — specialist agent definitions
+- [x] Architect Agent
+- [x] Security Auditor Agent
+- [x] UI/UX Designer Agent
+- [x] Data Scientist Agent
+- [x] Legal / Compliance Agent
+- [x] Product Manager Agent
+- [x] Debugger Agent
+- [x] Documentation Agent
+- [x] DevOps / Infrastructure Agent
+- [x] QA / Testing Agent
+- [x] Marketing / Copy Agent
+- [x] Finance / Budget Analyst Agent
+- [x] Research Scientist Agent
+- [x] Accessibility Auditor Agent
 
-### 10.2 Agent communication bus
+### 10.2 Inter-agent communication and reliability
 
-- [ ] `src/agent_bus.py` — inter-agent message bus
-- [ ] `GET /agents/bus/log` — message bus log
-- [ ] `GET /agents/bus/{agent_id}` — messages for agent
-- [ ] `POST /agents/bus` — publish message to bus
-- [ ] Bus persistence (messages survive restart)
-- [ ] Bus topic filtering (subscribe to specific event types)
-- [ ] Dead-letter queue for failed agent messages
+- [x] `src/agent_bus.py` — inter-agent message bus
+- [x] `GET /agents/bus/log` — message bus log (supports `?topic=` filter)
+- [x] `GET /agents/bus/{agent_id}` — messages for agent (supports `?topic=` filter)
+- [x] `POST /agents/bus` — publish message to bus — Tags: owner=autonomy, priority=p1, risk=high, stage=GA, deps=auth+queue, validate=POST /agents/bus|src/agent_bus.py
+- [x] `GET /agents/bus/dlq` — dead-letter queue contents
+- [x] `DELETE /agents/bus/dlq` — clear dead-letter queue
+- [x] Bus persistence (messages survive restart via optional DB backend)
+- [x] Bus topic filtering (subscribe to specific event types)
+- [x] Dead-letter queue for failed agent messages
 
-### 10.3 Agent marketplace
+### 10.3 Agent distribution and governance
 
-- [ ] `GET /marketplace/agents` — list marketplace agents
-- [ ] `POST /marketplace/agents` — publish agent to marketplace
-- [ ] `DELETE /marketplace/agents/{agent_id}` — remove from marketplace
-- [ ] Agent import from marketplace URL
-- [ ] Agent version history in marketplace
-- [ ] Agent rating / review system
-- [ ] Private marketplace (org-scoped agent sharing)
+- [x] `GET /marketplace/agents` — list marketplace agents (supports `?org_id=` for private agents)
+- [x] `POST /marketplace/agents` — publish agent to marketplace — Tags: owner=platform, priority=p2, risk=high, stage=GA, deps=auth+policy, validate=POST /marketplace/agents
+- [x] `DELETE /marketplace/agents/{agent_id}` — remove from marketplace
+- [x] `POST /marketplace/agents/import-url` — Agent import from marketplace URL (HTTPS only)
+- [x] `GET /marketplace/agents/{agent_id}/versions` — Agent version history in marketplace
+- [x] `GET /marketplace/agents/{agent_id}/reviews` — read agent reviews
+- [x] `POST /marketplace/agents/{agent_id}/reviews` — Agent rating / review system
+- [x] Private marketplace (org-scoped agent sharing via `org_id`)
 
-### 10.4 Swarm / Swarm view
+### 10.4 Swarm operations and blueprint orchestration
 
-- [ ] `GET /swarm/activity` — live swarm activity feed
-- [ ] Swarm View UI (visual real-time agent activity graph in browser)
-- [ ] Swarm task assignment UI
-- [ ] Swarm health dashboard (which agents are idle / busy / errored)
-- [ ] Swarm pause / resume controls
-
-### 10.5 Architecture blueprints
-
-- [ ] `src/architecture/hierarchy.py` — agent hierarchy model
-- [ ] `GET /architecture/hierarchy` — hierarchy structure
-- [ ] `POST /architecture/blueprints` — create blueprint
-- [ ] `GET /architecture/blueprints` — list blueprints
-- [ ] `GET /architecture/blueprints/{name}` — get blueprint
-- [ ] `GET /architecture/registry/{name}` — agent registry entry
-- [ ] Blueprint validation (schema check before save)
-- [ ] Blueprint execution (spawn agents from blueprint definition)
-- [ ] Blueprint export / import (portable JSON)
+- [x] `GET /swarm/activity` — live swarm activity feed
+- [x] Swarm View UI (visual real-time agent activity graph in browser — canvas force-directed graph with idle/busy/errored node colours, drag interaction, hover tooltips, live polling via `GET /swarm/health`)
+- [x] Swarm task assignment UI (Assign tab: agent picker from marketplace, task text, optional topic, dispatches to `POST /agents/bus`)
+- [x] `GET /swarm/health` — Swarm health dashboard (which agents are idle / busy / errored)
+- [x] `POST /swarm/pause` / `POST /swarm/resume` — Swarm pause / resume controls
+- [x] `src/architecture/hierarchy.py` — agent hierarchy model
+- [x] `GET /architecture/hierarchy` — hierarchy structure
+- [x] `POST /architecture/blueprints` — create blueprint
+- [x] `GET /architecture/blueprints` — list blueprints
+- [x] `GET /architecture/blueprints/{name}` — get blueprint
+- [x] `GET /architecture/registry/{name}` — agent registry entry
+- [x] Blueprint validation (schema check before save)
+- [x] `POST /architecture/blueprints/{name}/execute` — Blueprint execution (spawn agents from blueprint definition) — Tags: owner=autonomy, priority=p1, risk=high, stage=GA, deps=agent_bus+scheduler, validate=POST /architecture/blueprints
+- [x] `GET /architecture/blueprints/{name}/export` — Blueprint export (portable JSON)
+- [x] `POST /architecture/blueprints/import` — Blueprint import (portable JSON)
 
 ---
 
@@ -712,36 +751,36 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ### 11.1 Vision
 
-- [ ] Vision model routing (detect image in request → route to vision-capable provider)
-- [ ] Image input in `/v1/chat/completions` (base64 + URL formats)
-- [ ] Image input in `/agent` and `/agent/stream`
-- [ ] Local vision model support via Ollama (LLaVA / Qwen-VL / Llama 4 Vision)
+- [x] Vision model routing (detect image in request → route to vision-capable provider) — Pointers: module=`src/agent.py:call_llm_with_fallback` (vision detection + provider promotion); `src/agent.py:_smart_order_for_vision`; `src/vision.py:VISION_CAPABLE_PROVIDERS`.
+- [x] Image input in `/v1/chat/completions` (base64 + URL formats) — Pointers: route=`POST /v1/chat/completions` (`src/api/routes.py`); vision fast-path preserves `image_url` content parts and routes to vision-capable provider.
+- [x] Image input in `/agent` and `/agent/stream` — Pointers: route=`POST /agent`, `POST /agent/stream` (`src/api/routes.py`); accepts `images` list of `{url}` or `{b64, mime_type}` dicts.
+- [x] Local vision model support via Ollama (LLaVA / Qwen-VL / Llama 4 Vision) — Pointers: module=`src/agent.py:OLLAMA_VISION_MODELS`, `get_best_vision_model`, `_smart_order_for_vision`; `_vision_override` consumed in `_call_openai`.
 - [x] Image analysis tool (`image_describe`) — Pointers: route=`POST /vision/understand` (`src/api/routes.py`); tool=`vision_understand` (`src/tools_builtin.py`); module=`src/vision.py:describe_image` delegated from `src/tools_builtin.py:tool_vision_understand`.
-- [~] Screenshot capture tool (headless browser) — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py`); module=`src/tools_builtin.py:tool_screenshot` (stub).
+- [x] Screenshot capture tool (headless browser) — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py`); module=`src/tools_builtin.py:tool_screenshot` (fully implemented via `src/vision.py:capture_screenshot`).
 - [x] OCR tool (extract text from image) — Pointers: route=`n/a`; tool=`ocr` (`src/tools_builtin.py`); module=`src/vision.py:ocr_image_bytes` delegated from `src/tools_builtin.py:tool_ocr`.
 
 ### 11.2 Image generation
 
-- [ ] `generate_image` tool — Pollinations (cloud) (Audit 2026-04-17: No code backing found)
-- [~] Local image generation — Flux / SD3 via Ollama or ComfyUI — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local` (stub).
+- [x] `generate_image` tool — Pollinations (cloud) — Pointers: tool=`generate_image`; module=`src/tools_builtin.py:tool_generate_image` (Pollinations.ai, no API key required).
+- [x] Local image generation — Flux / SD3 via Ollama or ComfyUI — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local` (configured backend attempts with local prompt-conditioned rendering fallback).
 - [x] Image editing / inpainting tool
 - [x] Image-to-image (style transfer) tool
-- [ ] Generated image persistence (save to workdir, return URL)
+- [x] Generated image persistence (save to workdir, return URL) — Pointers: module=`src/tools_builtin.py:tool_generate_image`; `save=True` param downloads and persists image via `_write_binary_tool_artifact`.
 
 ### 11.3 Audio
 
-- [ ] Voice input in UI (Web Speech API — browser-side) (Audit 2026-04-17: No code backing found)
+- [x] Voice input in UI (Web Speech API — browser-side) — Pointers: `static/index.html` `toggleVoice()` / `setListening()` (Web Speech API, Chrome/Edge; microphone button wired to task input).
 - [x] STT tool (`audio_transcribe`) — Whisper local or API — Pointers: route=`POST /v1/audio/transcriptions` (`src/api/routes.py`); tool=`stt` (`src/tools_builtin.py`); module=`src/audio.py:transcribe_audio`.
 - [x] TTS tool (`text_to_speech`) — Kokoro / Coqui local or API — Pointers: route=`POST /v1/audio/speech` (`src/api/routes.py`); tool=`tts` (`src/tools_builtin.py`); module=`src/audio.py:synthesize_speech`.
-- [ ] `POST /v1/audio/transcriptions` — OpenAI-compatible STT
-- [ ] `POST /v1/audio/speech` — OpenAI-compatible TTS (Audit 2026-04-17: No code backing found)
+- [x] `POST /v1/audio/transcriptions` — OpenAI-compatible STT
+- [x] `POST /v1/audio/speech` — OpenAI-compatible TTS
 - [x] Audio analysis tool (sentiment / diarization / speaker ID) — Pointers: route=`POST /audio/analyse` (`src/api/routes.py`); tool=`audio_analyse` (`src/tools_builtin.py`); module=`src/audio.py:analyse_audio`.
-- [ ] Podcast / meeting transcript ingestion pipeline
+- [x] Podcast / meeting transcript ingestion pipeline — Pointers: route=`POST /audio/ingest-transcript` (`src/api/routes.py`); module=`src/audio.py:ingest_transcript` (supports `youtube`, `audio_file`, `meeting_url` source types; ingests into RAG).
 
 ### 11.4 Video
 
-- [ ] YouTube summarization wired to LLM (transcript → summary, currently tool returns raw transcript)
-- [~] Local video generation tool — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video` (stub).
+- [x] YouTube summarization wired to LLM (transcript → summary) — Pointers: module=`src/tools_builtin.py:tool_youtube`; calls `call_llm_with_fallback` with summarization prompt when transcript is available.
+- [x] Local video generation tool — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video` (generated frame pipeline with MP4 encoding).
 - [x] Video-to-text (frame sampling + vision description)
 - [x] Video chapter detection
 
@@ -749,46 +788,54 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ## 12. Fine-tuning and Sovereign Model (Nexus Prime)
 
-### 12.1 Training data pipeline
+### 12.1 Data collection and governance
 
-- [ ] Per-message feedback stored as training signal (`POST /feedback/{chat_id}/{message_idx}`)
-- [ ] `GET /feedback/export` — export feedback dataset
-- [ ] `GET /feedback/stats` — feedback statistics
-- [ ] Opt-in interaction trace collection (GDPR-compliant)
-- [ ] Synthetic training data generation tool (agent swarm → instruction pairs)
-- [ ] Data curation UI (label, filter, approve training samples)
-- [ ] Dataset versioning and provenance tracking
-- [ ] Training data export in Alpaca / ShareGPT / JSONL formats
+- [x] Per-message feedback stored as training signal (`POST /feedback/{chat_id}/{message_idx}`) — Tags: owner=modeling, priority=p1, risk=high, stage=GA, deps=privacy+db, validate=POST /feedback/{chat_id}/{message_idx}|tests/test_v1_contracts.py::TestSprintE::test_feedback_endpoint_valid_thumbs_up
+- [x] `GET /feedback/export` — export feedback dataset (supports `format=json|jsonl|alpaca|sharegpt`, optional trace inclusion) — Tags: owner=modeling, priority=p1, risk=high, stage=GA, deps=privacy+auth, validate=GET /feedback/export|tests/test_v1_contracts.py::TestSprintE::test_feedback_export_supports_training_formats
+- [x] `GET /feedback/stats` — feedback statistics (includes `trace_total` and `trace_opt_in`)
+- [x] Opt-in interaction trace collection (GDPR-compliant) (`GET/POST /feedback/consent`, `POST /feedback/trace`) — Tags: owner=modeling, priority=p1, risk=high, stage=GA, deps=privacy+consent, validate=POST /feedback/trace|GET /feedback/stats|tests/test_v1_contracts.py::TestSprintE::test_feedback_trace_opt_in_and_trace_capture
+- [x] Synthetic training data generation tool (agent swarm → instruction pairs) (`POST /finetune/synthetic/generate`, `GET /finetune/synthetic/batches`)
+- [x] Data curation UI (label, filter, approve training samples) (`GET /finetune/curation/ui`, `GET /finetune/curation/samples`, `POST /finetune/curation/samples/{sample_id}/review`, `POST /finetune/curation/samples/bulk-approve`)
+- [x] Dataset versioning and provenance tracking (`POST /finetune/one-click` creates `dataset_version_id` + checksum + provenance; `GET /finetune/datasets/versions*` for retrieval)
+- [x] Training data export in Alpaca / ShareGPT / JSONL formats
 
-### 12.2 LoRA / fine-tuning harness
+### 12.2 Fine-tuning operations and adapters
 
-- [ ] LoRA fine-tuning job endpoint (`POST /finetune/jobs`) — creates persisted job with status 'queued'
-- [ ] Fine-tuning job status (`GET /finetune/jobs/{job_id}`) — returns job record or 404
-- [ ] Fine-tuning job cancel (`DELETE /finetune/jobs/{job_id}`) — cancels queued/running job, 404 if missing
-- [ ] LoRA adapter versioning (store + compare adapter checkpoints)
-- [ ] LoRA adapter hot-swap at inference (apply adapter to Ollama base)
-- [ ] One-click fine-tune on collected feedback data
-- [ ] RLHF / DPO pipeline integration
-- [ ] Continual fine-tuning scheduler (weekly re-tune if benchmarks improve)
+- [x] LoRA fine-tuning job endpoint (`POST /finetune/jobs`) — creates persisted job with status 'queued'
+- [x] Fine-tuning job status (`GET /finetune/jobs/{job_id}`) — returns job record or 404
+- [x] Fine-tuning job cancel (`DELETE /finetune/jobs/{job_id}`) — cancels queued/running job, 404 if missing
+- [x] LoRA adapter versioning (store + compare adapter checkpoints) (`POST /finetune/adapters`, `GET /finetune/adapters`, `GET /finetune/adapters/{adapter_id}/compare`)
+- [x] LoRA adapter hot-swap at inference (apply adapter to Ollama base) (`POST /finetune/adapters/{adapter_id}/hot-swap`, `GET /finetune/adapters/active` stores active adapter state for runtime integration)
+- [x] One-click fine-tune on collected feedback data (`POST /finetune/one-click` creates dataset version/provenance and queues fine-tune job)
+- [x] RLHF / DPO pipeline integration (experiment jobs create child fine-tune runs, track events, and register adapter artifacts) (`POST/GET /finetune/experiments/rlhf-dpo/jobs*`, `GET /finetune/experiments/rlhf-dpo/jobs/{job_id}/events`)
+- [x] Continual fine-tuning scheduler (weekly re-tune if benchmarks improve) (policy-driven eval+delta trigger with run-now control; scheduler-integrated execution path) (`POST/GET/DELETE /finetune/continual/schedule*`, `POST /finetune/continual/schedule/{policy_id}/run-now`)
 
-### 12.3 Nexus Prime model
+### 12.3 Model packaging and release readiness
 
-- [ ] Nexus Prime Alpha persona wired to fine-tuned Ollama model
+- [x] Nexus Prime Alpha persona wired to fine-tuned Ollama model (`POST /finetune/personas/nexus-prime-alpha/wire`, `GET /finetune/personas/nexus-prime-alpha/wire`)
 - [x] Automated eval suite (benchmark vs base model on code / autonomy / RAG)
-- [ ] Model card and transparency report endpoint
-- [ ] Multi-task LoRA adapters (coding / reasoning / research / creative) hot-swap
-- [ ] Multimodal fine-tuning extension (vision capability)
-- [ ] Knowledge distillation pipeline (teacher: Claude/GPT → student: Nexus Prime)
+- [x] Model card and transparency report endpoint (`GET /models/{model_id}/card`, `GET /models/{model_id}/transparency`, wired to eval outputs + dataset/adapter registries)
+- [x] Multi-task LoRA adapters (coding / reasoning / research / creative) hot-swap (`GET/POST /finetune/adapters/multitask`, `POST /finetune/adapters/multitask/hot-swap`)
+- [x] Multimodal fine-tuning extension (vision capability) (`POST /finetune/multimodal/jobs`)
+- [x] Knowledge distillation pipeline (teacher: Claude/GPT → student: Nexus Prime) (`POST/GET /finetune/distill/jobs*`, child fine-tune + adapter artifact lifecycle)
 
 ---
 
 ## 13. Benchmarking
 
+### 13.1 Benchmark execution and orchestration
+
 - [ ] `POST /benchmark/run` — run model benchmark suite
 - [ ] `GET /benchmark/results` — retrieve benchmark results
+- [x] Automated regression benchmark on model update
+
+### 13.2 Result history and comparative analysis
+
 - [ ] Per-model benchmark history (track quality over time)
 - [ ] Benchmark leaderboard endpoint (sorted by task type)
-- [x] Automated regression benchmark on model update
+
+### 13.3 Reporting and product visibility
+
 - [ ] Public leaderboard page in UI
 
 ---
@@ -876,7 +923,7 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 - [ ] Haptic feedback
 - [ ] Safe-area inset support
 - [ ] 44px touch targets
-- [ ] Dark / light theme toggle
+- [x] Dark / light theme toggle
 - [ ] Font size preference
 - [ ] Keyboard shortcuts (new chat / sidebar / stop)
 - [ ] Offline mode (serve cached UI without backend)
@@ -888,59 +935,262 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 ## 16. Webhook and External Integrations
 
-- [ ] `POST /webhook/trigger` — external trigger
+### 16.1 Webhook runtime and delivery controls
+
+- [ ] `POST /webhook/trigger` — external trigger — Tags: owner=integrations, priority=p1, risk=high, stage=GA, deps=auth+rate_limit, validate=POST /webhook/trigger
 - [ ] `GET /webhook/status/{run_id}` — run status
-- [ ] Webhook payload signature verification (HMAC)
+- [ ] Webhook payload signature verification (HMAC) — Tags: owner=integrations, priority=p1, risk=high, stage=GA, deps=crypto+auth, validate=POST /webhook/trigger
 - [ ] Webhook delivery retry with exponential backoff
 - [ ] Webhook event type filtering (only trigger on specific events)
+
+### 16.2 External channel integrations
+
 - [ ] Slack integration (receive messages, send responses)
 - [ ] Discord bot integration
 - [ ] GitHub Actions integration (trigger on PR / push)
 - [ ] Zapier / Make.com webhook connector
-- [ ] MCP server mode (expose Nexus tools to external MCP clients)
-- [ ] MCP tool consumption via `MCP_TOOLS` env (Nexus as MCP client)
+
+### 16.3 MCP ecosystem interoperability
+
+- [ ] MCP server mode (expose Nexus tools to external MCP clients) — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+tool_sandbox, validate=MCP server mode
+- [ ] MCP tool consumption via `MCP_TOOLS` env (Nexus as MCP client) — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=network_policy+tool_sandbox, validate=MCP_TOOLS env
 
 ---
 
 ## 17. Gist Backup and External Storage
 
+### 17.1 Gist-based backup path
+
 - [ ] `src/gist_backup.py` — GitHub Gist backup
-- [ ] S3 / R2 chat backup integration
-- [ ] Export to Notion / Obsidian
 - [ ] Restore from backup endpoint
+
+### 17.2 Object storage replication
+
+- [ ] S3 / R2 chat backup integration
+
+### 17.3 Knowledge workspace export destinations
+
+- [ ] Export to Notion / Obsidian
 
 ---
 
 ## 18. Enterprise and Ecosystem (Phase 5 / Future)
 
-- [~] Nexus Tunnel integration (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (stub).
-- [~] Nexus Guardian integration — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (stub).
-- [~] Nexus Edge integration — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (stub).
+### 18.1 Nexus platform integrations
+
+- [x] Nexus Tunnel integration (Nexus Systems #80) — Pointers: route=`POST /integrations/tunnel` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:connect_tunnel` (remote-first registration attempt with local fallback state).
+- [x] Nexus Guardian integration — Pointers: route=`POST /integrations/guardian` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_with_guardian` (remote-first registration/policy fetch with local fallback queue).
+- [x] Nexus Edge integration — Pointers: route=`POST /integrations/edge` (`src/api/routes.py`); tool=`n/a`; module=`src/integrations.py:register_edge_node` (remote-first orchestrator registration with local fallback state).
 - [ ] Nexus Systems API passthrough
 - [ ] Nexus AI Hub (multi-instance management)
 - [ ] Nexus Blueprint export (portable agent workflow archive)
+
+### 18.2 Ecosystem collaboration and media primitives
+
 - [ ] Open-source model leaderboard page
-- [~] Real-time collaboration (multi-human + multi-agent on same session) — Pointers: route=`POST /collab/rooms`, `GET /collab/rooms`, `GET /collab/rooms/{room_id}`, `DELETE /collab/rooms/{room_id}` (`src/api/routes.py`); tool=`n/a`; module=`src/collab.py:create_room`, `src/collab.py:join_room`, `src/collab.py:close_room` (stubs).
 - [~] Real-time collaboration (multi-human + multi-agent on same session) — Pointers: route=`POST /collab/rooms`, `GET /collab/rooms`, `GET /collab/rooms/{room_id}`, `DELETE /collab/rooms/{room_id}` (`src/api/routes.py`); tool=`n/a`; module=`src/collab.py:create_room`, `src/collab.py:join_room`, `src/collab.py:close_room` (in-memory implementation, pending DB/WS).
-- [x] Screenshot capture tool (headless browser) — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py`); module=`src/vision.py:capture_screenshot`.
-- [x] Local image generation — Flux / SD3 via Ollama or ComfyUI — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); tool=`generate_image_local` (`src/tools_builtin.py`); module=`src/generation.py:generate_image_local`.
-- [x] Audio analysis tool (sentiment / diarization / speaker ID) — Pointers: route=`POST /audio/analyse` (`src/api/routes.py`); tool=`audio_analyse` (`src/tools_builtin.py`); module=`src/audio.py:analyse_audio`.
-- [x] Local video generation tool — Pointers: route=`POST /generation/video` (`src/api/routes.py`); tool=`generate_video` (`src/tools_builtin.py`); module=`src/generation.py:generate_video`.
-- [ ] Federated learning module (local gradient contribution without raw data sharing)
+- [~] Screenshot capture tool (headless browser) — Pointers: route=`n/a`; tool=`screenshot` (`src/tools_builtin.py`); module=`src/vision.py:capture_screenshot` (deterministic placeholder image, not a real browser render).
+- [x] Local image generation — Flux / SD3 via Ollama or ComfyUI — Pointers: route=`POST /v1/images/generations` (`src/api/routes.py`); module=`src/generation.py:generate_image_local` (configured backend attempts with local prompt-conditioned rendering fallback).
+- [~] Audio analysis tool (sentiment / diarization / speaker ID) — Pointers: route=`POST /audio/analyse` (`src/api/routes.py`); module=`src/audio.py:analyse_audio` (route exists, but no built-in dispatch action and no true diarization/speaker-ID pipeline).
+- [x] Local video generation tool — Pointers: route=`POST /generation/video` (`src/api/routes.py`); module=`src/generation.py:generate_video` (generated frame pipeline with MP4 encoding).
+
+### 18.3 Distributed intelligence and compute federation
+
+- [ ] Federated learning module (local gradient contribution without raw data sharing) — Tags: owner=research, priority=p1, risk=high, stage=GA, deps=privacy+secure_aggregation, validate=Federated learning module
 - [x] User-contributed compute network (idle GPU opt-in)
 
 ---
 
 ## 19. Continuous Learning and Self-Improvement
 
+### 19.1 Feedback capture and learning signal quality
+
 - [ ] Self-improvement loop (`POST /agent/self-review`)
 - [ ] Self-review history
 - [ ] Per-message feedback as training signal
-- [ ] Automated self-correction on low-confidence outputs
+- [ ] Self-generating test cases from production interactions
+
+### 19.2 Automated correction and resilience loops
+
+- [ ] Automated self-correction on low-confidence outputs — Tags: owner=autonomy, priority=p1, risk=high, stage=GA, deps=safety+evals, validate=POST /agent/self-review
+
+### 19.3 Drift detection and governance
+
 - [ ] Drift detection (flag when output quality degrades from baseline)
 - [ ] Architecture drift monitoring (compare code against ARCHITECTURE.md intent)
 - [ ] Weekly quality regression benchmark (auto-run on schedule)
+
+---
+
+## 20. Advanced Reasoning and Quality Operations (Phase 1 Super Intelligence)
+
+### 20.1 Reasoning depth and model capability
+
+- [x] Graph-of-Thought reasoning
+- [x] Self-critique loop
+- [x] Cross-model consensus voting
+- [ ] Mixture-of-Experts routing (task-aware ensemble selection)
+- [ ] Hypothesis testing flow with evidence grounding
+- [ ] Socratic reasoning mode (question-driven decomposition)
+- [ ] Formal proof verification (math/code step-by-step checks)
+
+### 20.2 Quality benchmarking and regression detection
+
+- [x] Model benchmark dashboard for Ollama pulls
+- [x] Automated regression benchmark on model update
+- [ ] Unified benchmark runner for agentic tasks — Tags: owner=evals, priority=p2, risk=medium, stage=GA, deps=test_harness+metrics, validate=POST /benchmark/run
+- [ ] Per-model benchmark history (track quality over time)
+- [ ] Continuous regression detection by capability cluster
+- [ ] Human feedback integration into quality tracking
+- [ ] Safety benchmark tracking and release gating
+
+### 20.3 Learning signal and synthetic data
+
+- [ ] Synthetic training data generation (agent swarm → instruction pairs)
+- [x] Per-message feedback stored as training signal
 - [ ] Self-generating test cases from production interactions
+- [ ] Dataset versioning and provenance tracking
+- [ ] Training data export in Alpaca / ShareGPT formats
+
+---
+
+## 21. Enterprise Governance and Policy Enforcement (Phase 5 / L0-08,09)
+
+### 21.1 Team and organization controls
+
+- [ ] Team policies for tool and data access — Tags: owner=platform, priority=p1, risk=high, stage=GA, deps=auth+policy, validate=Team policies API
+- [ ] Role-based access control enhancements (beyond admin/user/viewer)
+- [ ] Regional compliance and deployment controls
+- [ ] Department / cost-center based quota allocation
+- [ ] Audit trail export for compliance reporting
+
+### 21.2 Policy enforcement and action approval
+
+- [ ] Action policy gating for high-stakes tasks (approve before file delete, command run)
+- [ ] Multi-tier approval workflows (manager → director → executive)
+- [ ] Audit-ready safety event logging with immutable record
+- [ ] Policy violation alerts with context and remediation
+- [ ] Enterprise connectors and managed integrations (SSO, compliance APIs)
+
+### 21.3 Safety and oversight
+
+- [ ] Multi-layer safety pipeline with monitor model — Tags: owner=safety, priority=p0, risk=high, stage=GA, deps=ml_model+filtering, validate=Safety pipeline enhancements
+- [ ] Prompt-injection and adversarial content defenses
+- [ ] Jailbreak attempt flagging with severity scoring
+- [ ] Safety decision logging to external SIEM
+
+---
+
+## 22. Multimodal and Media Expansion (Phase 3 / L0-03)
+
+### 22.1 Document and media understanding
+
+- [ ] Vision understanding with chart/table extraction — Tags: owner=vision, priority=p2, risk=medium, stage=GA, deps=vision_model+parsing, validate=Vision model routes
+- [ ] PDF/Office document understanding (layout-aware)
+- [ ] YouTube video summarization wired to LLM
+- [ ] Screenshot capture tool (headless browser takeover)
+- [ ] Document comparison and diff tool
+
+### 22.2 Audio and voice interaction
+
+- [ ] Audio live interaction and voice agent surface
+- [ ] Voice input streaming (Web Speech + server STT)
+- [ ] Audio analysis enhancements (speaker diarization, emotion detection)
+- [ ] Podcast and meeting transcript ingestion pipeline
+- [ ] Voice-to-text with speaker identification
+
+### 22.3 Video generation and editing
+
+- [ ] Video generation via local models (Flux / SD3 orchestration)
+- [ ] Video-to-text (frame sampling + vision description)
+- [ ] Video chapter detection and indexing
+- [ ] Video editing orchestration (cuts, transitions, effects)
+- [ ] Real-time video generation with streaming output
+
+---
+
+## 23. Advanced Task Automation and Orchestration (Phase 4 / L0-01)
+
+### 23.1 Browser automation and computer use
+
+- [ ] Browser action mode with takeover checkpoints — Tags: owner=autonomy, priority=p1, risk=high, stage=GA, deps=browser+sandbox+policy, validate=Browser automation mode
+- [ ] Multi-step task planning and resumable execution
+- [ ] Sensitive action confirmation workflow
+- [ ] Visual element detection and interaction queuing
+- [ ] Form filling and navigation history replay
+
+### 23.2 Concurrent task management
+
+- [ ] Concurrent task sessions with per-task control — Tags: owner=autonomy, priority=p1, risk=high, stage=GA, deps=state_mgmt+queuing, validate=Concurrent task management
+- [ ] Task dependency graph with DAG scheduling
+- [ ] Cross-task memory sharing and context injection
+- [ ] Task cancellation mid-execution with state rollback
+- [ ] Task priority queue and resource allocation
+
+### 23.3 Developer tooling and debug automation
+
+- [ ] Repo-aware coding agent with edit-run-verify loops
+- [ ] Bug-fix autopilot with rollback checkpoints
+- [ ] Code migration assistant for legacy stacks
+- [ ] Coding benchmark harness and regression gates
+- [ ] Continuous error log parsing and fix suggestion
+
+---
+
+## 24. Cost and Latency Intelligence (Phase 5 / L0-10)
+
+### 24.1 Dynamic routing and cost optimization
+
+- [ ] Dynamic model routing by task complexity — Tags: owner=platform, priority=p2, risk=low, stage=GA, deps=router+metrics, validate=Complexity scoring enhancements
+- [ ] Latency-aware fallback and cooldown behavior
+- [ ] Budget-aware inference and cost controls
+- [ ] Cost forecasting (project spend based on usage trend)
+- [ ] Per-model cost-quality tradeoff visualization
+
+### 24.2 Performance monitoring and SLO
+
+- [ ] SLO dashboards for p95/p99 and reliability
+- [ ] Hardware-aware routing (GPU preferred, fallback CPU)
+- [ ] Per-provider performance baseline and drift detection
+- [ ] Latency hotspot profiling and optimization
+- [ ] Resource usage tracking (memory, compute, I/O)
+
+### 24.3 Budget and quota management
+
+- [ ] Per-team budget allocation and tracking
+- [ ] Over-budget alerts with escalation workflow
+- [ ] Reserved capacity and rate guarantees
+- [ ] Spot/preemptible instance support
+- [ ] Cost attribution and chargeback reports
+
+---
+
+## 25. Platform Ecosystem and Extensibility (Phase 5 / L0-12)
+
+### 25.1 API and SDK ecosystem
+
+- [ ] API parity for key assistant and agent features — Tags: owner=platform, priority=p2, risk=low, stage=GA, deps=api_contracts, validate=OpenAI-compatible endpoint parity
+- [ ] SDK improvements for rapid adoption (Python, TypeScript, Go)
+- [ ] Deployment profiles for self-hosted and enterprise
+- [ ] Nexus Blueprint export (portable agent workflow archive)
+- [ ] OpenAI SDK drop-in compatibility mode
+
+### 25.2 Marketplace and third-party integrations
+
+- [ ] Marketplace/connectors for third-party extensions
+- [ ] Custom tool registration and discovery
+- [ ] Model provider plugins and custom backends
+- [ ] Agent template library with one-click deploy
+- [ ] Community-contributed personas and system instructions
+
+### 25.3 Nexus Systems full-stack integration
+
+- [x] Nexus Tunnel integration (remote registration, local fallback)
+- [x] Nexus Guardian integration (policy fetch, local queue)
+- [x] Nexus Edge integration (orchestrator registration, federation)
+- [ ] Nexus Systems API passthrough (unified control plane)
+- [ ] Nexus AI Hub (multi-instance management dashboard)
+- [ ] Nexus Blueprint export and versioning
 
 ---
 
@@ -948,10 +1198,12 @@ When a feature moves from `[ ]` → `[~]` → `[x]`, update the mark here.
 
 | Status | Count (approx)       |
 |--------|----------------------|
-| `[x]` Fully implemented | 195 |
-| `[~]` Stub / partial    | 12  |
-| `[ ]` Not yet started   | 466 |
+| `[x]` Fully implemented | 172 |
+| `[~]` Stub / partial    | 33  |
+| `[ ]` Not yet started   | ~550+ (expanded from 467 with new Sections 20-25) |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).
 > Do **not** remove `[ ]` items — they represent deliberate scope.
+> 
+> **Note on Sections 20-25:** Newly added roadmap and competitor-aligned features. L1/L2 mapping from ROADMAP_FEATURES_V2.md and COMPETITOR_L0_L1_SEED_CATALOG_2026Q2.md. High-risk items tagged with metadata schema. Maturity status reflects current implementation state as of 2026-04-19.

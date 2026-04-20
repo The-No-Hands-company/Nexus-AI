@@ -25,6 +25,7 @@ import os
 import threading
 import time
 from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 logger = logging.getLogger("nexus.secrets")
@@ -43,6 +44,20 @@ _cache_lock = threading.Lock()
 _access_log: list[dict] = []  # lightweight in-process audit trail
 _rotation_started = False
 _rotation_lock = threading.Lock()
+_secret_actor_ctx: ContextVar[str] = ContextVar("secret_actor", default="system")
+_secret_request_id_ctx: ContextVar[str] = ContextVar("secret_request_id", default="")
+
+
+@contextmanager
+def secret_access_context(actor: str = "system", request_id: str = ""):
+    """Set caller context for secret access audit events within the current scope."""
+    tok_actor = _secret_actor_ctx.set(actor or "system")
+    tok_req = _secret_request_id_ctx.set(request_id or "")
+    try:
+        yield
+    finally:
+        _secret_actor_ctx.reset(tok_actor)
+        _secret_request_id_ctx.reset(tok_req)
 
 
 def _cache_get(name: str) -> Any:
@@ -60,7 +75,15 @@ def _cache_set(name: str, value: Any) -> None:
 
 def _record_access(name: str, source: str) -> None:
     """Append an access record to the in-process audit trail."""
-    entry = {"name": name, "source": source, "ts": time.time()}
+    actor = _secret_actor_ctx.get() or "system"
+    request_id = _secret_request_id_ctx.get() or ""
+    entry = {
+        "name": name,
+        "source": source,
+        "ts": time.time(),
+        "actor": actor,
+        "request_id": request_id,
+    }
     with _cache_lock:
         _access_log.append(entry)
         if len(_access_log) > 500:
@@ -68,11 +91,12 @@ def _record_access(name: str, source: str) -> None:
     try:
         from .observability import write_audit_log
         write_audit_log(
-            actor="system",
+            actor=actor,
             action="secret_access",
             resource=name,
             result="ok",
-            metadata={"source": source},
+            metadata={"source": source, "request_id": request_id},
+            request_id=request_id,
         )
     except Exception:
         pass

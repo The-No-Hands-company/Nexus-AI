@@ -3,6 +3,13 @@
 # ════════════════════════════════════════════════════════════════════════════
 import unittest
 
+from fastapi.testclient import TestClient
+
+from src.app import app
+
+
+client = TestClient(app)
+
 
 class TestIntegrationAutonomyRAGReasoning(unittest.TestCase):
     """Integration tests for autonomy, RAG, and reasoning endpoint workflows."""

@@ -10,6 +10,7 @@
 - [High-Level Component Map](#high-level-component-map)
 - [Request Lifecycle](#request-lifecycle)
 - [Autonomous Runtime Loop](#autonomous-runtime-loop)
+- [Fine-Tuning and Sovereign Model API Reference](#fine-tuning-and-sovereign-model-api-reference)
 - [Component Deep-Dives](#component-deep-dives)
   - [main.py — API Gateway](#mainpy--api-gateway)
   - [agent.py — Agent Loop](#agentpy--agent-loop)
@@ -158,6 +159,32 @@ Supervisor -> Orchestrator -> Autonomizers -> Enforcers -> Orchestrator -> Super
 6. Supervisor receives summarized status, approves directional changes, or revises intent.
 
 This design keeps planning authority centralized, execution specialized, and governance explicit.
+
+---
+
+## Fine-Tuning and Sovereign Model API Reference
+
+This reference consolidates the production-facing API surface for Section 12 operations. It is intended for operators, release engineers, and platform automation workflows that manage dataset lineage, training runs, adapter lifecycle, and model governance.
+
+| Domain | Endpoint(s) | Operational Purpose | Persistence / Execution Notes |
+|---|---|---|---|
+| Feedback signals | `POST /feedback/{chat_id}/{message_idx}` | Capture per-message preference signal for training and analytics. | Stored as durable feedback signal; contributes to export, one-click, and continual retraining flows. |
+| Feedback export | `GET /feedback/export` | Export training-ready datasets in `json`, `jsonl`, `alpaca`, or `sharegpt`. | Supports trace-aware exports and downstream dataset packaging. |
+| Consent + trace | `GET/POST /feedback/consent`, `POST /feedback/trace` | Manage GDPR-style trace opt-in and record interaction traces. | Trace capture is explicit opt-in and feeds dataset generation workflows. |
+| Dataset registry | `GET /finetune/datasets/versions`, `GET /finetune/datasets/versions/{dataset_id}` | Inspect dataset lineage, provenance metadata, and checksums. | Backed by durable dataset version registry in persistence layer. |
+| One-click fine-tune | `POST /finetune/one-click` | Build a dataset from approved feedback/trace signals and start training in one operation. | Creates `dataset_version_id`, stores checksum/provenance, enqueues fine-tune lifecycle job. |
+| Synthetic data generation | `POST /finetune/synthetic/generate`, `GET /finetune/synthetic/batches` | Generate instruction-response training rows from agent-swarm simulation and immediately package into trainable dataset/job. | Persists synthetic batch metadata and training sample entries for curation/audit. |
+| Curation operations | `GET /finetune/curation/samples`, `POST /finetune/curation/samples/{sample_id}/review`, `POST /finetune/curation/samples/bulk-approve`, `GET /finetune/curation/ui` | Filter, label, approve, and review candidate training samples before promotion. | Curation state is persisted per sample and queryable for governance and QA. |
+| Fine-tune job lifecycle | `POST /finetune/jobs`, `GET /finetune/jobs/{job_id}`, `DELETE /finetune/jobs/{job_id}` | Manage baseline LoRA-compatible training runs. | Compatible with `/v1/fine-tuning/jobs*`; durable status + event history. |
+| Adapter registry | `POST /finetune/adapters`, `GET /finetune/adapters`, `GET /finetune/adapters/{adapter_id}`, `GET /finetune/adapters/{adapter_id}/versions/{version}`, `GET /finetune/adapters/{adapter_id}/compare` | Register, inspect, and compare adapter versions and metrics. | Versioned adapter metadata with provenance and checkpoint references. |
+| Adapter activation | `POST /finetune/adapters/{adapter_id}/hot-swap`, `GET /finetune/adapters/active` | Activate adapter version for runtime targeting. | Records active adapter state for provider/runtime integration. |
+| Multi-task adapter routing | `GET /finetune/adapters/multitask`, `POST /finetune/adapters/multitask`, `POST /finetune/adapters/multitask/hot-swap` | Assign and hot-swap task-specific adapters (coding, reasoning, research, creative). | Maintains persisted task→adapter map plus active adapter updates. |
+| RLHF / DPO experiments | `POST /finetune/experiments/rlhf-dpo/jobs`, `GET /finetune/experiments/rlhf-dpo/jobs`, `GET /finetune/experiments/rlhf-dpo/jobs/{job_id}`, `GET /finetune/experiments/rlhf-dpo/jobs/{job_id}/events`, `POST /finetune/experiments/rlhf-dpo/jobs/{job_id}/cancel` | Execute preference-optimization jobs with auditable lifecycle and cancellation controls. | Jobs create child fine-tune runs, append event log, and register resulting adapter artifacts. |
+| Continual retraining policy | `POST /finetune/continual/schedule`, `GET /finetune/continual/schedule`, `DELETE /finetune/continual/schedule/{policy_id}`, `POST /finetune/continual/schedule/{policy_id}/run-now` | Manage benchmark-triggered recurring retraining policies. | Scheduler executes policy payload: eval run → score delta gate → conditional one-click retrain. |
+| Multimodal tuning | `POST /finetune/multimodal/jobs` | Create vision-text fine-tune jobs with multimodal training rows. | Dataset provenance captures modality and multimodal source metadata. |
+| Distillation pipeline | `POST /finetune/distill/jobs`, `GET /finetune/distill/jobs`, `GET /finetune/distill/jobs/{job_id}`, `POST /finetune/distill/jobs/{job_id}/cancel` | Run teacher→student distillation workflows and promote student adapters. | Job lifecycle: teacher generation → dataset versioning → child fine-tune → adapter registration. |
+| Nexus Prime Alpha wiring | `POST /finetune/personas/nexus-prime-alpha/wire`, `GET /finetune/personas/nexus-prime-alpha/wire` | Bind production persona runtime to selected model/provider order/adapter state. | Updates active persona/runtime preferences and persists wiring metadata. |
+| Model transparency | `GET /models/{model_id}/card`, `GET /models/{model_id}/transparency` | Retrieve model card and operational transparency report for governance and release readiness. | Aggregates eval outcomes, dataset provenance, and adapter lineage. |
 
 ---
 

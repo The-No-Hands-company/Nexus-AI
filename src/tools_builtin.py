@@ -2,7 +2,7 @@
 Built-in tools that don't need LLM calls — calculator, weather, currency,
 unit converter, regex tester, base64, JSON formatter, color info.
 """
-import os, re, json, math, subprocess, zipfile, base64 as b64lib
+import os, re, json, math, subprocess, zipfile, base64 as b64lib, time, hashlib
 from pathlib import Path
 from datetime import datetime
 from .providers.model_router import ModelRouter
@@ -613,14 +613,99 @@ def _dispatch_builtin_core(action: dict) -> dict | None:
         r = tool_check_url_status(urls_val, int(action.get("timeout", 10)))
         return _tool_trace(action, r)
     if kind == "screenshot":
-        try:
-            from .vision import capture_screenshot
-            url_val = action.get("url", "")
-            r = capture_screenshot(url_val) if url_val else "❌ url is required"
-        except Exception as _exc:
-            r = f"❌ screenshot failed: {_exc}"
+        r = tool_screenshot(
+            action.get("url", ""),
+            int(action.get("width", 1280)),
+            int(action.get("height", 800)),
+            action.get("workdir", "/tmp"),
+            action.get("output_path", ""),
+        )
         return _tool_trace(action, r, {"url": action.get("url", "")})
+    if kind == "youtube":
+        r = tool_youtube(action.get("url", ""))
+        return _tool_trace(action, r, {"url": action.get("url", "")})
+    if kind == "ocr":
+        r = tool_ocr(action.get("image_b64", ""), action.get("image_url", ""))
+        return _tool_trace(action, r)
+    if kind == "vision_understand":
+        r = tool_vision_understand(
+            action.get("image_b64", ""),
+            action.get("image_url", ""),
+            action.get("prompt", "Describe this image in detail."),
+        )
+        return _tool_trace(action, r)
+    if kind == "stt":
+        r = tool_stt(
+            action.get("audio_b64", ""),
+            action.get("audio_url", ""),
+            action.get("language"),
+            action.get("backend", "auto"),
+        )
+        return _tool_trace(action, r)
+    if kind == "tts":
+        r = tool_tts(
+            action.get("text", ""),
+            action.get("voice", "alloy"),
+            float(action.get("speed", 1.0)),
+            action.get("format", "mp3"),
+            action.get("backend", "auto"),
+            action.get("workdir", "/tmp"),
+            action.get("output_path", ""),
+        )
+        return _tool_trace(action, r)
+    if kind == "audio_analyse":
+        r = tool_audio_analyse(
+            action.get("audio_b64", ""),
+            action.get("audio_url", ""),
+            action.get("analyses"),
+        )
+        return _tool_trace(action, r)
+    if kind == "generate_image_local":
+        r = tool_generate_image_local(
+            action.get("prompt", ""),
+            action.get("negative_prompt", ""),
+            int(action.get("width", 1024)),
+            int(action.get("height", 1024)),
+            int(action.get("steps", 20)),
+            action.get("backend", "ollama_flux"),
+            action.get("model", "auto"),
+            action.get("workdir", "/tmp"),
+            action.get("output_path", ""),
+        )
+        return _tool_trace(action, r, {"prompt": action.get("prompt", "")[:120]})
+    if kind == "generate_video":
+        r = tool_generate_video(
+            action.get("prompt", ""),
+            float(action.get("duration_seconds", 4.0)),
+            int(action.get("fps", 8)),
+            int(action.get("width", 512)),
+            int(action.get("height", 512)),
+            action.get("backend", "wan_local"),
+            action.get("workdir", "/tmp"),
+            action.get("output_path", ""),
+        )
+        return _tool_trace(action, r, {"prompt": action.get("prompt", "")[:120]})
+    if kind == "image_edit":
+        r = tool_image_edit(
+            action.get("image_b64", ""),
+            action.get("image_url", ""),
+            action.get("mask_b64", ""),
+            action.get("prompt", ""),
+            action.get("backend", "comfyui"),
+            action.get("workdir", "/tmp"),
+            action.get("output_path", ""),
+        )
+        return _tool_trace(action, r, {"prompt": action.get("prompt", "")[:120]})
     # ── NEW Section 6.5 DB tools ──────────────────────────────────────────────
+    if kind == "inspect_sqlite":
+        r = tool_inspect_sqlite(action.get("query", ""), action.get("db_path", ""))
+        return _tool_trace(action, r, {"db_path": action.get("db_path", "")})
+    if kind == "sqlite_query":
+        r = tool_query_sqlite(action.get("sql", action.get("query", "")), action.get("db_path", ""))
+        return _tool_trace(action, r, {"db_path": action.get("db_path", "")})
+    if kind == "inspect_postgres":
+        r = tool_inspect_postgres(action.get("query", ""), action.get("database_url", ""))
+        return _tool_trace(action, r, {"database_url": action.get("database_url", "")})
     if kind == "pg_query":
         r = tool_pg_query(action.get("sql", ""), action.get("database_url", ""),
                           int(action.get("max_rows", 100)))
@@ -678,17 +763,235 @@ def dispatch_builtin(action: dict, session_id: str = "") -> dict | None:
 
 # ── IMAGE GENERATION ──────────────────────────────────────────────────────────
 def tool_generate_image(prompt: str, width: int = 1024, height: int = 1024,
-                         model: str = "flux") -> dict:
+                         model: str = "flux", save: bool = False,
+                         workdir: str = "/tmp", output_path: str = "") -> dict:
     """
     Generate an image via Pollinations.ai (free, no API key).
     Returns a dict with the image URL and prompt used.
+    When save=True the image is also downloaded and saved to workdir.
     """
     import urllib.parse
     encoded = urllib.parse.quote(prompt)
     seed    = hash(prompt) % 9999
     url     = (f"https://image.pollinations.ai/prompt/{encoded}"
                f"?width={width}&height={height}&model={model}&seed={seed}&nologo=true")
-    return {"url": url, "prompt": prompt, "width": width, "height": height}
+    result: dict = {"url": url, "prompt": prompt, "width": width, "height": height}
+    if save:
+        try:
+            image_bytes = _fetch_binary_tool_input(url)
+            saved = _write_binary_tool_artifact(
+                image_bytes, ".png", workdir, output_path, prefix="gen_image"
+            )
+            result["saved_path"] = saved
+        except Exception as _e:
+            result["save_error"] = str(_e)
+    return result
+
+
+def _fetch_binary_tool_input(url: str, timeout: int = 45) -> bytes:
+    if not url.strip():
+        raise ValueError("url is required")
+    import requests as _requests
+    resp = _requests.get(url, timeout=timeout)
+    resp.raise_for_status()
+    return resp.content
+
+
+def _write_binary_tool_artifact(
+    data: bytes,
+    suffix: str,
+    workdir: str = "/tmp",
+    output_path: str = "",
+    prefix: str = "artifact",
+) -> str:
+    target = _resolve_path(output_path, workdir) if output_path else (_resolve_path(".nexus_tool_outputs", workdir) / f"{prefix}_{int(time.time() * 1000)}{suffix}")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    with open(target, "wb") as f:
+        f.write(data)
+    return str(target)
+
+
+def tool_screenshot(
+    url: str,
+    width: int = 1280,
+    height: int = 800,
+    workdir: str = "/tmp",
+    output_path: str = "",
+) -> str:
+    from .vision import capture_screenshot
+
+    image_bytes = capture_screenshot(url, width=width, height=height)
+    digest = hashlib.sha256(image_bytes).hexdigest()[:12]
+    target = _write_binary_tool_artifact(image_bytes, ".png", workdir, output_path, prefix="screenshot")
+    return (
+        f"✅ Captured screenshot for {url}\n"
+        f"Saved: `{target}`\n"
+        f"Bytes: {len(image_bytes)}\n"
+        f"SHA256: `{digest}`"
+    )
+
+
+def tool_generate_image_local(
+    prompt: str,
+    negative_prompt: str = "",
+    width: int = 1024,
+    height: int = 1024,
+    steps: int = 20,
+    backend: str = "ollama_flux",
+    model: str = "auto",
+    workdir: str = "/tmp",
+    output_path: str = "",
+) -> str:
+    from .generation import generate_image_local as _generate_image_local
+
+    image_bytes = _generate_image_local(
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        width=width,
+        height=height,
+        steps=steps,
+        backend=backend,
+        model=model,
+    )
+    digest = hashlib.sha256(image_bytes).hexdigest()[:12]
+    target = _write_binary_tool_artifact(image_bytes, ".png", workdir, output_path, prefix="generated_image")
+    return (
+        f"✅ Generated image for prompt: {prompt[:160]}\n"
+        f"Saved: `{target}`\n"
+        f"Backend: `{backend}`\n"
+        f"Bytes: {len(image_bytes)}\n"
+        f"SHA256: `{digest}`"
+    )
+
+
+def tool_generate_video(
+    prompt: str,
+    duration_seconds: float = 4.0,
+    fps: int = 8,
+    width: int = 512,
+    height: int = 512,
+    backend: str = "wan_local",
+    workdir: str = "/tmp",
+    output_path: str = "",
+) -> str:
+    from .generation import generate_video as _generate_video
+
+    video_bytes = _generate_video(
+        prompt=prompt,
+        duration_seconds=duration_seconds,
+        fps=fps,
+        width=width,
+        height=height,
+        backend=backend,
+    )
+    digest = hashlib.sha256(video_bytes).hexdigest()[:12]
+    target = _write_binary_tool_artifact(video_bytes, ".mp4", workdir, output_path, prefix="generated_video")
+    return (
+        f"✅ Generated video for prompt: {prompt[:160]}\n"
+        f"Saved: `{target}`\n"
+        f"Backend: `{backend}`\n"
+        f"Bytes: {len(video_bytes)}\n"
+        f"SHA256: `{digest}`"
+    )
+
+
+def tool_ocr(image_b64: str = "", image_url: str = "") -> str:
+    from .vision import capture_screenshot, ocr_image_bytes
+
+    if image_b64:
+        image_bytes = b64lib.b64decode(image_b64)
+        mime_type = "image/png"
+    elif image_url:
+        if image_url.startswith("http://") or image_url.startswith("https://"):
+            image_bytes = capture_screenshot(image_url) if image_url.endswith("/") or "." not in Path(image_url).name else _fetch_binary_tool_input(image_url)
+        else:
+            image_bytes = capture_screenshot(image_url)
+        mime_type = "image/png"
+    else:
+        raise ValueError("image_b64 or image_url is required")
+    return ocr_image_bytes(image_bytes, mime_type=mime_type)
+
+
+def tool_vision_understand(
+    image_b64: str = "",
+    image_url: str = "",
+    prompt: str = "Describe this image in detail.",
+) -> str:
+    from .vision import capture_screenshot, describe_image
+
+    if image_b64:
+        image_bytes = b64lib.b64decode(image_b64)
+        mime_type = "image/png"
+    elif image_url:
+        if image_url.startswith("http://") or image_url.startswith("https://"):
+            image_bytes = capture_screenshot(image_url) if image_url.endswith("/") or "." not in Path(image_url).name else _fetch_binary_tool_input(image_url)
+        else:
+            image_bytes = capture_screenshot(image_url)
+        mime_type = "image/png"
+    else:
+        raise ValueError("image_b64 or image_url is required")
+    return describe_image(image_bytes, mime_type=mime_type, prompt=prompt)
+
+
+def tool_stt(
+    audio_b64: str = "",
+    audio_url: str = "",
+    language: str | None = None,
+    backend: str = "auto",
+) -> str:
+    from .audio import transcribe_audio
+
+    if audio_b64:
+        audio_bytes = b64lib.b64decode(audio_b64)
+    elif audio_url:
+        audio_bytes = _fetch_binary_tool_input(audio_url)
+    else:
+        raise ValueError("audio_b64 or audio_url is required")
+
+    transcript = transcribe_audio(audio_bytes, language=language, backend=backend)
+    return json.dumps(transcript, ensure_ascii=False, indent=2)
+
+
+def tool_tts(
+    text: str,
+    voice: str = "alloy",
+    speed: float = 1.0,
+    format: str = "mp3",
+    backend: str = "auto",
+    workdir: str = "/tmp",
+    output_path: str = "",
+) -> str:
+    from .audio import synthesize_speech
+
+    audio_bytes = synthesize_speech(text, voice=voice, speed=speed, format=format, backend=backend)
+    suffix = f".{format or 'mp3'}"
+    digest = hashlib.sha256(audio_bytes).hexdigest()[:12]
+    target = _write_binary_tool_artifact(audio_bytes, suffix, workdir, output_path, prefix="speech")
+    return (
+        f"✅ Synthesized speech\n"
+        f"Saved: `{target}`\n"
+        f"Voice: `{voice}`\n"
+        f"Bytes: {len(audio_bytes)}\n"
+        f"SHA256: `{digest}`"
+    )
+
+
+def tool_audio_analyse(
+    audio_b64: str = "",
+    audio_url: str = "",
+    analyses: list[str] | None = None,
+) -> str:
+    from .audio import analyse_audio
+
+    if audio_b64:
+        audio_bytes = b64lib.b64decode(audio_b64)
+    elif audio_url:
+        audio_bytes = _fetch_binary_tool_input(audio_url)
+    else:
+        raise ValueError("audio_b64 or audio_url is required")
+
+    result = analyse_audio(audio_bytes, analyses=analyses)
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
 
 # ── YOUTUBE TRANSCRIPT ────────────────────────────────────────────────────────
@@ -736,40 +1039,60 @@ def tool_youtube_transcript(url: str) -> str:
         return f"YouTube transcript failed: {e}"
 
 
-# ── YOUTUBE TRANSCRIPT ────────────────────────────────────────────────────────
+# ── YOUTUBE SUMMARY ───────────────────────────────────────────────────────────
 def tool_youtube(url: str) -> str:
-    """Fetch YouTube transcript via youtube-transcript-api or scrape description."""
+    """Fetch YouTube metadata and include transcript context when available."""
+    if not url.strip():
+        return "❌ url is required."
     try:
-        from youtube_transcript_api import YouTubeTranscriptApi
-        import re as _re
-        vid_match = _re.search(r'(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})', url)
-        if not vid_match:
-            return f"❌ Could not extract video ID from URL: {url}"
-        vid_id = vid_match.group(1)
-        transcript = YouTubeTranscriptApi.get_transcript(vid_id)
-        text = " ".join(t["text"] for t in transcript)
-        # Truncate to ~4000 chars
-        if len(text) > 4000:
-            text = text[:4000] + f"\n… (transcript truncated, {len(text)} total chars)"
-        return f"**YouTube transcript** ({vid_id}):\n\n{text}"
-    except ImportError:
-        # Fallback: yt-dlp metadata only
-        try:
-            import subprocess, json as _json
-            r = subprocess.run(
-                ["yt-dlp", "--dump-json", "--no-download", url],
-                capture_output=True, text=True, timeout=20
-            )
-            if r.returncode == 0:
-                d = _json.loads(r.stdout)
-                return (f"**{d.get('title','')}** ({d.get('uploader','')})\n"
-                        f"Duration: {d.get('duration_string','?')}\n\n"
-                        f"{d.get('description','No description')[:1500]}")
-        except Exception:
-            pass
-        return "❌ youtube-transcript-api not installed. Run: pip install youtube-transcript-api"
+        import yt_dlp
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "skip_download": True}) as ydl:
+            info = ydl.extract_info(url, download=False)
+        title = info.get("title", "")
+        uploader = info.get("uploader", "")
+        duration = info.get("duration_string") or info.get("duration") or "?"
+        description = (info.get("description") or "").strip()
+        webpage_url = info.get("webpage_url") or url
+        transcript_preview = tool_youtube_transcript(webpage_url)
+        transcript_text = transcript_preview
+        if transcript_preview.startswith("**"):
+            parts = transcript_preview.split("\n\n", 1)
+            if len(parts) == 2:
+                transcript_text = parts[1]
+        if transcript_text.startswith("YouTube transcript failed") or transcript_text.startswith("No English subtitles"):
+            transcript_text = "Transcript unavailable."
+        return (
+            f"**{title or 'YouTube video'}**\n"
+            f"Uploader: {uploader or 'unknown'}\n"
+            f"Duration: {duration}\n"
+            f"URL: {webpage_url}\n\n"
+            f"Description:\n{description[:1500] or 'No description available.'}\n\n"
+            f"Transcript preview:\n{transcript_text[:2000]}"
+        )
+        # LLM summarization when transcript is available.
+        summary_text = transcript_text[:2000]
+        if transcript_text and transcript_text != "Transcript unavailable.":
+            try:
+                from .agent import call_llm_with_fallback as _clf
+                _sum_prompt = (
+                    f"Summarize this YouTube video transcript concisely.\n"
+                    f"Provide: 1-sentence TLDR, key points as bullets.\n\n"
+                    f"Title: {title}\nTranscript:\n{transcript_text[:4000]}"
+                )
+                _sum_resp, _ = _clf([{"role": "user", "content": _sum_prompt}], task="summarize")
+                summary_text = _sum_resp.get("content", transcript_text[:2000])
+            except Exception:
+                pass
+        return (
+            f"**{title or 'YouTube video'}**\n"
+            f"Uploader: {uploader or 'unknown'}\n"
+            f"Duration: {duration}\n"
+            f"URL: {webpage_url}\n\n"
+            f"Description:\n{description[:1500] or 'No description available.'}\n\n"
+            f"Summary:\n{summary_text}"
+        )
     except Exception as e:
-        return f"❌ YouTube transcript failed: {e}"
+        return f"❌ YouTube summary failed: {e}"
 
 
 # ── PDF READER ────────────────────────────────────────────────────────────────
@@ -1017,10 +1340,35 @@ def tool_read_page(url: str) -> str:
 
 # ── FILESYSTEM + GIT HELPERS ────────────────────────────────────────────────
 def _resolve_path(path: str, workdir: str = "/tmp") -> Path:
+    """Resolve path relative to workdir with traversal prevention.
+    
+    Args:
+        path: relative or absolute path
+        workdir: base directory (all ops must stay within it)
+        
+    Returns:
+        Resolved Path object (guaranteed to be within workdir)
+        
+    Raises:
+        ValueError: if path attempts to traverse outside workdir
+    """
+    workdir_path = Path(workdir).resolve()
     candidate = Path(path)
-    if not candidate.is_absolute():
-        candidate = Path(workdir) / candidate
-    return candidate.resolve()
+    
+    # If absolute path is given, reject it (must use relative paths within workdir)
+    if candidate.is_absolute():
+        raise ValueError(f"Absolute paths not allowed. Use paths relative to workdir: {workdir}")
+    
+    # Join relative path with workdir and resolve
+    full = (workdir_path / candidate).resolve()
+    
+    # Validate that resolved path is within workdir (prevent ../../../etc/passwd)
+    try:
+        full.relative_to(workdir_path)
+    except ValueError:
+        raise ValueError(f"Path traversal blocked: {path} resolves outside workdir {workdir}")
+    
+    return full
 
 
 def tool_search_in_files(pattern: str, include_glob: str = "*", workdir: str = "/tmp", max_results: int = 200) -> str:
@@ -1952,7 +2300,10 @@ def tool_write_file(path: str, content: str, workdir: str = "/tmp", mode: str = 
     """Write text content to a file. mode='w' overwrites, mode='a' appends."""
     if not path.strip():
         return "❌ path is required."
-    target = _resolve_path(path, workdir)
+    try:
+        target = _resolve_path(path, workdir)
+    except ValueError as e:
+        return f"❌ Path protection: {e}"
     target.parent.mkdir(parents=True, exist_ok=True)
     write_mode = "a" if mode == "a" else "w"
     try:
@@ -1969,7 +2320,10 @@ def tool_read_file(path: str, workdir: str = "/tmp",
     """Read a text file from the working directory."""
     if not path.strip():
         return "❌ path is required."
-    target = _resolve_path(path, workdir)
+    try:
+        target = _resolve_path(path, workdir)
+    except ValueError as e:
+        return f"❌ Path protection: {e}"
     if not target.exists():
         return f"❌ File not found: {path}"
     try:
@@ -2011,7 +2365,10 @@ def tool_delete_file(path: str, workdir: str = "/tmp") -> str:
     """Delete a file from the working directory."""
     if not path.strip():
         return "❌ path is required."
-    target = _resolve_path(path, workdir)
+    try:
+        target = _resolve_path(path, workdir)
+    except ValueError as e:
+        return f"❌ Path protection: {e}"
     if not target.exists():
         return f"❌ File not found: {path}"
     if target.is_dir():
@@ -2084,9 +2441,7 @@ def tool_clone_repo(url: str, dest: str = "", workdir: str = "/tmp",
 def tool_run_command(command: str, workdir: str = "/tmp",
                      timeout: int = 30, allow_write: bool = False) -> str:
     """
-    Run a sandboxed shell command.
-    Blocked by default: rm -rf, mkfs, dd, sudo, curl|wget piped to bash.
-    allow_write=False prevents commands that modify files outside workdir.
+    Run a sandboxed shell command with CPU, memory, and file-size limits.
     """
     BLOCKED_PATTERNS = [
         r"rm\s+-rf\s+/", r"mkfs", r"dd\s+if=", r"\bsudo\b",
@@ -2095,19 +2450,51 @@ def tool_run_command(command: str, workdir: str = "/tmp",
         r"shutdown", r"reboot", r"halt", r"poweroff",
         r"iptables", r"ufw\s+disable",
     ]
+    WRITE_PATTERNS = [
+        r">", r">>", r"\btee\b", r"\bmv\b", r"\bcp\b", r"\brm\b", r"\bmkdir\b",
+        r"\btouch\b", r"\btruncate\b", r"\binstall\b", r"\bchmod\b", r"\bchown\b",
+        r"\bgit\s+checkout\b", r"\bgit\s+clean\b", r"\bsed\s+-i\b", r"\bperl\s+-pi\b",
+    ]
     import re as _re
     for pat in BLOCKED_PATTERNS:
         if _re.search(pat, command, _re.I):
             return f"❌ Blocked: command matches safety pattern `{pat}`"
-    cwd = str(_resolve_path(".", workdir))
+    if not allow_write:
+        for pat in WRITE_PATTERNS:
+            if _re.search(pat, command, _re.I):
+                return "❌ Blocked: command appears to modify files. Re-run with allow_write=true if this write is intended."
+
+    try:
+        cwd_path = _resolve_path(".", workdir)
+    except ValueError as e:
+        return f"❌ Path protection: {e}"
+    if not cwd_path.exists() or not cwd_path.is_dir():
+        return f"❌ Invalid workdir: {workdir}"
+
+    soft_timeout = max(1, min(int(timeout), 120))
+    cpu_limit = max(1, min(soft_timeout, int(os.getenv("TOOL_RUN_COMMAND_CPU_SECONDS", "10"))))
+    max_memory_mb = max(64, int(os.getenv("TOOL_RUN_COMMAND_MAX_MEMORY_MB", "512")))
+    max_file_mb = max(1, int(os.getenv("TOOL_RUN_COMMAND_MAX_FILE_MB", "32")))
+
+    def _limit_resources() -> None:
+        try:
+            max_memory = max_memory_mb * 1024 * 1024
+            max_file = max_file_mb * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS, (max_memory, max_memory))
+            resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (max_file, max_file))
+        except Exception:
+            pass
+
     try:
         proc = subprocess.run(
             command,
             shell=True,
-            cwd=cwd,
+            cwd=str(cwd_path),
             capture_output=True,
             text=True,
-            timeout=min(int(timeout), 120),
+            timeout=soft_timeout,
+            preexec_fn=_limit_resources,
         )
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
@@ -2115,11 +2502,14 @@ def tool_run_command(command: str, workdir: str = "/tmp",
         if out:
             result += f"**stdout:**\n```\n{out[:3000]}\n```"
         if err:
-            result += f"\n**stderr:**\n```\n{err[:1000]}\n```"
-        result += f"\n\nExit code: `{proc.returncode}`"
+            result += f"\n**stderr:**\n```\n{err[:1500]}\n```"
+        result += (
+            f"\n\nExit code: `{proc.returncode}`"
+            f"\nResource limits: memory={max_memory_mb}MB cpu={cpu_limit}s file={max_file_mb}MB"
+        )
         return result.strip() or f"Exit code: `{proc.returncode}` (no output)"
     except subprocess.TimeoutExpired:
-        return f"❌ Command timed out after {timeout}s"
+        return f"❌ Command timed out after {soft_timeout}s"
     except Exception as e:
         return f"❌ run_command failed: {e}"
 
@@ -2559,12 +2949,15 @@ _TOOL_SCHEMAS: dict[str, dict] = {
     "youtube_transcript":   {"required": ["url"],                    "types": {"url": "str"}},
     "youtube":              {"required": ["url"],                    "types": {"url": "str"}},
     "web_search":           {"required": ["query"],                  "optional": ["max_results", "engine"], "types": {"query": "str"}},
-    "screenshot":           {"required": ["url"],                    "types": {"url": "str"}},
+    "screenshot":           {"required": ["url"],                    "optional": ["width", "height", "workdir", "output_path"], "types": {"url": "str"}},
     "web_scrape_structured":{"required": ["url"],                    "optional": ["selectors", "output_format"], "types": {"url": "str"}},
     "rss_fetch":            {"required": ["url"],                    "optional": ["max_items"], "types": {"url": "str"}},
     "sitemap_crawl":        {"required": ["url"],                    "optional": ["max_urls"], "types": {"url": "str"}},
     "check_url_status":     {"required": ["urls"],                   "optional": ["timeout"]},
     "generate_image":       {"required": ["prompt"],                 "optional": ["width", "height", "model"], "types": {"prompt": "str"}},
+    "generate_image_local": {"required": ["prompt"],                 "optional": ["negative_prompt", "width", "height", "steps", "backend", "model", "workdir", "output_path"], "types": {"prompt": "str"}},
+    "generate_video":       {"required": ["prompt"],                 "optional": ["duration_seconds", "fps", "width", "height", "backend", "workdir", "output_path"], "types": {"prompt": "str"}},
+    "image_edit":           {"required": ["prompt"],                 "optional": ["image_b64", "image_url", "mask_b64", "backend", "workdir", "output_path"], "types": {"prompt": "str"}},
     "rag_ingest":           {"required": [],                         "optional": ["text", "path", "metadata", "doc_id_prefix", "workdir"]},
     "rag_query":            {"required": ["query"],                  "optional": ["top_k", "filter_metadata"], "types": {"query": "str"}},
     "rag_status":           {"required": [],                         "types": {}},
@@ -2586,10 +2979,11 @@ _TOOL_SCHEMAS: dict[str, dict] = {
     "read_xlsx":            {"required": ["path"],                   "optional": ["workdir"], "types": {"path": "str"}},
     "read_pptx":            {"required": ["path"],                   "optional": ["workdir"], "types": {"path": "str"}},
     "inspect_sqlite":       {"required": [],                         "optional": ["query", "db_path"]},
+    "sqlite_query":         {"required": [],                         "optional": ["sql", "query", "db_path"]},
     "inspect_postgres":     {"required": [],                         "optional": ["query", "database_url"]},
-    "stt":                  {"required": [],                         "optional": ["audio_b64", "audio_url", "model", "language"]},
-    "tts":                  {"required": ["text"],                   "types": {"text": "str"}},
-    "audio_analyse":        {"required": [],                         "optional": ["audio_b64", "audio_url"]},
+    "stt":                  {"required": [],                         "optional": ["audio_b64", "audio_url", "backend", "language"]},
+    "tts":                  {"required": ["text"],                   "optional": ["voice", "speed", "format", "backend", "workdir", "output_path"], "types": {"text": "str"}},
+    "audio_analyse":        {"required": [],                         "optional": ["audio_b64", "audio_url", "analyses"]},
     "vision_understand":    {"required": [],                         "optional": ["image_b64", "image_url", "prompt"]},
     "ocr":                  {"required": [],                         "optional": ["image_b64", "image_url"]},
 }
