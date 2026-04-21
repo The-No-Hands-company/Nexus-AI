@@ -1777,7 +1777,7 @@ def _estimate_tokens(text: str) -> int:
     len(text)//4 heuristic which could be off by ±30%.
     """
     if not text:
-        return 0
+        return 1  # floor: always ≥ 1 token
     enc = _get_tiktoken_enc()
     if enc and enc is not False:
         try:

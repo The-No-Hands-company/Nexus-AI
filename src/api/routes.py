@@ -14283,3 +14283,602 @@ async def api_task_session_cancel(session_id: str, request: Request):
     if result.get("cancelled", 0) == 0:
         return _api_error("No cancellable tasks found for session", status_code=404)
     return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Section 26 gap-fill routes
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ── 26.1 Security: field encryption, IP filter ───────────────────────────────
+
+@router.get("/admin/security/ip-filter")
+async def api_ip_filter_status(request: Request):
+    _require_admin(request)
+    try:
+        from ..security.ip_filter import get_filter_status
+        return get_filter_status()
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/admin/security/ip-filter/allowlist")
+async def api_ip_allowlist_add(request: Request):
+    _require_admin(request)
+    body = await request.json()
+    cidr = str(body.get("cidr", "")).strip()
+    if not cidr:
+        return _api_error("cidr is required", status_code=400)
+    try:
+        from ..security.ip_filter import add_to_allowlist
+        ok = add_to_allowlist(cidr)
+        return {"added": ok, "cidr": cidr}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.delete("/admin/security/ip-filter/allowlist/{cidr:path}")
+async def api_ip_allowlist_remove(request: Request, cidr: str):
+    _require_admin(request)
+    try:
+        from ..security.ip_filter import remove_from_allowlist
+        ok = remove_from_allowlist(cidr)
+        return {"removed": ok, "cidr": cidr}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/admin/security/ip-filter/blocklist")
+async def api_ip_blocklist_add(request: Request):
+    _require_admin(request)
+    body = await request.json()
+    cidr = str(body.get("cidr", "")).strip()
+    if not cidr:
+        return _api_error("cidr is required", status_code=400)
+    try:
+        from ..security.ip_filter import add_to_blocklist
+        ok = add_to_blocklist(cidr)
+        return {"added": ok, "cidr": cidr}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/admin/security/check-ip")
+async def api_check_ip(request: Request):
+    _require_admin(request)
+    body = await request.json()
+    ip = str(body.get("ip", "")).strip()
+    if not ip:
+        return _api_error("ip is required", status_code=400)
+    try:
+        from ..security.ip_filter import is_ip_allowed
+        allowed, reason = is_ip_allowed(ip)
+        return {"ip": ip, "allowed": allowed, "reason": reason}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+# ── 26.3 Safety: hallucination detection, watermarking, copyright, bias ──────
+
+@router.post("/safety/hallucination/check")
+async def api_hallucination_check(request: Request):
+    body = await request.json()
+    response_text = str(body.get("response", ""))
+    context = str(body.get("context", ""))
+    if not response_text:
+        return _api_error("response is required", status_code=400)
+    try:
+        from ..safety.hallucination import check_grounding
+        result = check_grounding(response_text, context)
+        return {
+            "grounded": result.grounded, "score": result.score, "method": result.method,
+            "ungrounded_sentences": result.ungrounded_sentences,
+            "evidence_sentences": result.evidence_sentences, "details": result.details,
+        }
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/safety/watermark/embed")
+async def api_watermark_embed(request: Request):
+    body = await request.json()
+    text = str(body.get("text", ""))
+    session_id = str(body.get("session_id", ""))
+    if not text:
+        return _api_error("text is required", status_code=400)
+    try:
+        from ..safety.watermark import watermark_text
+        marked = watermark_text(text, session_id=session_id)
+        return {"watermarked_text": marked, "session_id": session_id}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/safety/watermark/detect")
+async def api_watermark_detect(request: Request):
+    body = await request.json()
+    text = str(body.get("text", ""))
+    session_id = str(body.get("session_id", ""))
+    if not text:
+        return _api_error("text is required", status_code=400)
+    try:
+        from ..safety.watermark import detect_watermark, verify_watermark
+        detection = detect_watermark(text)
+        if session_id:
+            verification = verify_watermark(text, session_id)
+            detection["verification"] = verification
+        return detection
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/safety/copyright/check")
+async def api_copyright_check(request: Request):
+    body = await request.json()
+    text = str(body.get("text", ""))
+    if not text:
+        return _api_error("text is required", status_code=400)
+    try:
+        from ..safety.copyright import check_copyright
+        result = check_copyright(text)
+        return {
+            "flagged": result.flagged, "matches": result.matches,
+            "notice_detected": result.notice_detected,
+            "notice_patterns": result.notice_patterns,
+            "highest_similarity": result.highest_similarity,
+        }
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/safety/copyright/register")
+async def api_copyright_register(request: Request):
+    _require_admin(request)
+    body = await request.json()
+    work_id = str(body.get("work_id", "")).strip()
+    title = str(body.get("title", "")).strip()
+    text = str(body.get("text", "")).strip()
+    if not all([work_id, title, text]):
+        return _api_error("work_id, title, and text are required", status_code=400)
+    try:
+        from ..safety.copyright import register_protected_work
+        register_protected_work(work_id, title, text, metadata=body.get("metadata", {}))
+        return {"registered": True, "work_id": work_id}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/safety/copyright/works")
+async def api_copyright_works(request: Request):
+    _require_admin(request)
+    try:
+        from ..safety.copyright import list_protected_works
+        return {"works": list_protected_works()}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/safety/bias/evaluate")
+async def api_bias_evaluate(request: Request):
+    body = await request.json()
+    text = str(body.get("text", ""))
+    if not text:
+        return _api_error("text is required", status_code=400)
+    try:
+        from ..safety.bias_eval import evaluate_bias
+        report = evaluate_bias(text)
+        return {
+            "flagged": report.flagged, "bias_score": report.bias_score,
+            "summary": report.summary,
+            "stereotype_matches": report.stereotype_matches,
+            "gender_disparity": report.gender_disparity,
+            "race_sentiment_scores": report.race_sentiment_scores,
+            "religion_sentiment_scores": report.religion_sentiment_scores,
+            "text_snippet": report.text_snippet,
+        }
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+# ── 26.4 Evaluation: A/B testing, human eval ─────────────────────────────────
+
+@router.get("/evals/experiments")
+async def api_list_experiments(request: Request):
+    try:
+        from ..evals.ab_testing import list_experiments
+        return {"experiments": list_experiments()}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/evals/experiments")
+async def api_create_experiment(request: Request):
+    body = await request.json()
+    name = str(body.get("name", "")).strip()
+    variants = body.get("variants", [])
+    if not name or not variants:
+        return _api_error("name and variants are required", status_code=400)
+    try:
+        from ..evals.ab_testing import create_experiment
+        exp = create_experiment(
+            name=name, variants=variants,
+            metric=str(body.get("metric", "quality_score")),
+            description=str(body.get("description", "")),
+        )
+        return {"experiment_id": exp.experiment_id, "name": exp.name, "status": exp.status}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/evals/experiments/{experiment_id}/start")
+async def api_start_experiment(request: Request, experiment_id: str):
+    try:
+        from ..evals.ab_testing import start_experiment
+        ok = start_experiment(experiment_id)
+        return {"started": ok, "experiment_id": experiment_id}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/evals/experiments/{experiment_id}/pause")
+async def api_pause_experiment(request: Request, experiment_id: str):
+    try:
+        from ..evals.ab_testing import pause_experiment
+        ok = pause_experiment(experiment_id)
+        return {"paused": ok, "experiment_id": experiment_id}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/evals/experiments/{experiment_id}/analysis")
+async def api_analyze_experiment(request: Request, experiment_id: str):
+    try:
+        from ..evals.ab_testing import analyze_experiment
+        return analyze_experiment(experiment_id)
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/admin/human-eval/tasks")
+async def api_human_eval_tasks(request: Request, limit: int = 20):
+    _require_admin(request)
+    try:
+        from ..evals.human_eval_pipeline import get_pending_tasks
+        return {"tasks": get_pending_tasks(limit=min(int(limit), 100))}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/admin/human-eval/tasks/{task_id}/rate")
+async def api_human_eval_rate(request: Request, task_id: str):
+    _require_admin(request)
+    body = await request.json()
+    rating = body.get("rating")
+    rater_id = str(body.get("rater_id", "admin"))
+    notes = str(body.get("notes", ""))
+    if rating is None:
+        return _api_error("rating is required", status_code=400)
+    try:
+        from ..evals.human_eval_pipeline import submit_rating
+        ok = submit_rating(task_id, rating, rater_id, notes)
+        return {"submitted": ok, "task_id": task_id}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/admin/human-eval/stats")
+async def api_human_eval_stats(request: Request):
+    _require_admin(request)
+    try:
+        from ..evals.human_eval_pipeline import get_eval_stats
+        return get_eval_stats()
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+# ── 26.6 Operational Excellence: retention, cost anomaly, alerting ───────────
+
+@router.get("/admin/retention/policies")
+async def api_retention_policies(request: Request):
+    _require_admin(request)
+    try:
+        from ..retention import list_policies
+        return {"policies": list_policies()}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.put("/admin/retention/policies/{data_type}")
+async def api_retention_set_policy(request: Request, data_type: str):
+    _require_admin(request)
+    body = await request.json()
+    days = int(body.get("retention_days", 0))
+    if days <= 0:
+        return _api_error("retention_days must be > 0", status_code=400)
+    try:
+        from ..retention import set_policy
+        set_policy(data_type, days)
+        return {"set": True, "data_type": data_type, "retention_days": days}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/admin/retention/purge")
+async def api_retention_purge(request: Request):
+    _require_admin(request)
+    try:
+        from ..retention import run_purge_cycle
+        results = run_purge_cycle()
+        return {"purged": results}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/admin/retention/history")
+async def api_retention_history(request: Request, limit: int = 10):
+    _require_admin(request)
+    try:
+        from ..retention import get_purge_history
+        return {"history": get_purge_history(limit=min(int(limit), 100))}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/admin/cost-anomaly/history")
+async def api_cost_anomaly_history(request: Request, team: str = "", limit: int = 50):
+    _require_admin(request)
+    try:
+        from ..cost_anomaly import get_anomaly_history
+        return {"anomalies": get_anomaly_history(team=team or None, limit=min(int(limit), 500))}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/admin/cost-anomaly/check")
+async def api_cost_anomaly_check(request: Request):
+    _require_admin(request)
+    try:
+        from ..cost_anomaly import check_all_teams
+        return {"anomalies": check_all_teams()}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+# ── 26.5 Developer Ecosystem: webhook delivery ────────────────────────────────
+
+@router.get("/admin/webhooks/delivery/stats")
+async def api_webhook_delivery_stats(request: Request):
+    _require_admin(request)
+    try:
+        from ..webhooks_delivery import get_webhook_stats
+        return get_webhook_stats()
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/admin/webhooks/delivery/dlq")
+async def api_webhook_dlq(request: Request):
+    _require_admin(request)
+    try:
+        from ..webhooks_delivery import list_dlq
+        return {"dlq": list_dlq()}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/admin/webhooks/delivery/{delivery_id}/retry")
+async def api_webhook_retry(request: Request, delivery_id: str):
+    _require_admin(request)
+    try:
+        from ..webhooks_delivery import retry_dlq_delivery
+        ok = retry_dlq_delivery(delivery_id)
+        return {"retried": ok, "delivery_id": delivery_id}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/webhooks/outbound")
+async def api_enqueue_webhook(request: Request):
+    body = await request.json()
+    url = str(body.get("url", "")).strip()
+    event_type = str(body.get("event_type", "generic")).strip()
+    payload = body.get("payload", {})
+    if not url:
+        return _api_error("url is required", status_code=400)
+    try:
+        from ..webhooks_delivery import enqueue_webhook
+        delivery = enqueue_webhook(url=url, event_type=event_type, payload=payload)
+        return {"delivery_id": delivery.delivery_id, "status": delivery.status, "url": url}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+# ── 26.7 Agent Capabilities: persistent state, tool policies, structured output
+
+@router.post("/agents/state")
+async def api_create_agent_state(request: Request):
+    body = await request.json()
+    objective = str(body.get("objective", "")).strip()
+    if not objective:
+        return _api_error("objective is required", status_code=400)
+    user = body.get("username", "") or ""
+    try:
+        from ..agent_state import create_agent_state
+        state = create_agent_state(
+            objective=objective,
+            session_id=str(body.get("session_id", "")),
+            username=user,
+            persona_id=str(body.get("persona_id", "")),
+            metadata=body.get("metadata", {}),
+        )
+        return {"agent_id": state.agent_id, "objective": state.objective, "status": state.status}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/agents/state/{agent_id}")
+async def api_get_agent_state(request: Request, agent_id: str):
+    try:
+        from ..agent_state import get_agent_state, get_plan_summary
+        state = get_agent_state(agent_id)
+        if not state:
+            return _api_error("Agent state not found", status_code=404)
+        summary = get_plan_summary(state)
+        return {
+            "agent_id": state.agent_id, "status": state.status,
+            "objective": state.objective, "plan_summary": summary,
+            "step_count": state.step_count, "updated_at": state.updated_at,
+            "working_memory": state.working_memory,
+        }
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/agents/active")
+async def api_list_active_agents(request: Request, username: str = ""):
+    try:
+        from ..agent_state import list_active_agents
+        return {"agents": list_active_agents(username=username or None)}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/admin/tool-policies")
+async def api_list_tool_policies(request: Request):
+    _require_admin(request)
+    try:
+        from ..agent_tool_policy import list_policies
+        return {"policies": list_policies()}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/admin/tool-policies")
+async def api_set_tool_policy(request: Request):
+    _require_admin(request)
+    body = await request.json()
+    persona_id = str(body.get("persona_id", "")).strip()
+    if not persona_id:
+        return _api_error("persona_id is required", status_code=400)
+    try:
+        from ..agent_tool_policy import ToolPolicy, set_policy
+        policy = ToolPolicy(
+            persona_id=persona_id,
+            mode=str(body.get("mode", "unrestricted")),
+            allowed_tools=body.get("allowed_tools", []),
+            denied_tools=body.get("denied_tools", []),
+            max_calls_per_session=int(body.get("max_calls_per_session", 0)),
+            require_approval_for=body.get("require_approval_for", []),
+            description=str(body.get("description", "")),
+        )
+        set_policy(policy)
+        return {"set": True, "persona_id": persona_id}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/structured-output/generate")
+async def api_structured_generate(request: Request):
+    body = await request.json()
+    prompt = str(body.get("prompt", "")).strip()
+    schema = body.get("schema", {})
+    if not prompt or not schema:
+        return _api_error("prompt and schema are required", status_code=400)
+    try:
+        from ..structured_output import generate_structured
+        result = generate_structured(
+            prompt=prompt, schema=schema,
+            model_name=str(body.get("model", "")),
+            max_tokens=int(body.get("max_tokens", 2048)),
+            temperature=float(body.get("temperature", 0.1)),
+        )
+        return result
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/structured-output/validate")
+async def api_structured_validate(request: Request):
+    body = await request.json()
+    output = str(body.get("output", ""))
+    schema = body.get("schema", {})
+    if not output or not schema:
+        return _api_error("output and schema are required", status_code=400)
+    try:
+        from ..structured_output import validate_output
+        return validate_output(output, schema)
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+# ── 26.8 Data & Knowledge: citation, incremental index ───────────────────────
+
+@router.post("/rag/cite")
+async def api_rag_cite(request: Request):
+    body = await request.json()
+    response_text = str(body.get("response", "")).strip()
+    chunks = body.get("chunks", [])
+    if not response_text:
+        return _api_error("response is required", status_code=400)
+    try:
+        from ..rag.citation import attribute_response
+        result = attribute_response(
+            response=response_text, chunks=chunks,
+            method=str(body.get("method", "auto")),
+            min_confidence=float(body.get("min_confidence", 0.1)),
+        )
+        return {
+            "inline_text": result.inline_text,
+            "footnotes": result.footnotes,
+            "sources": result.sources,
+            "method": result.method,
+        }
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/rag/index/{collection}/stats")
+async def api_rag_index_stats(request: Request, collection: str):
+    try:
+        from ..rag.incremental_index import get_index_stats
+        return get_index_stats(collection)
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/rag/index/{collection}/invalidate/{doc_id}")
+async def api_rag_invalidate_doc(request: Request, collection: str, doc_id: str):
+    _require_admin(request)
+    try:
+        from ..rag.incremental_index import invalidate_document
+        ok = invalidate_document(doc_id, collection)
+        return {"invalidated": ok, "doc_id": doc_id, "collection": collection}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+# ── Memory forgetting ─────────────────────────────────────────────────────────
+
+@router.get("/admin/memory/health")
+async def api_memory_health(request: Request):
+    _require_admin(request)
+    try:
+        from ..memory.forgetting import get_memory_health_report
+        return get_memory_health_report()
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/admin/memory/consolidate")
+async def api_memory_consolidate(request: Request):
+    _require_admin(request)
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    dry_run = bool(body.get("dry_run", False))
+    try:
+        from ..memory.forgetting import run_consolidation
+        return run_consolidation(dry_run=dry_run)
+    except Exception as exc:
+        return _api_error(str(exc))
