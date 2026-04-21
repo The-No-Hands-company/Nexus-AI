@@ -2510,31 +2510,113 @@ def tool_run_command(command: str, workdir: str = "/tmp",
     if not cwd_path.exists() or not cwd_path.is_dir():
         return f"❌ Invalid workdir: {workdir}"
 
-    soft_timeout = max(1, min(int(timeout), 120))
-    cpu_limit = max(1, min(soft_timeout, int(os.getenv("TOOL_RUN_COMMAND_CPU_SECONDS", "10"))))
-    max_memory_mb = max(64, int(os.getenv("TOOL_RUN_COMMAND_MAX_MEMORY_MB", "512")))
-    max_file_mb = max(1, int(os.getenv("TOOL_RUN_COMMAND_MAX_FILE_MB", "32")))
+    soft_timeout    = max(1, min(int(timeout), 120))
+    cpu_limit       = max(1, min(soft_timeout, int(os.getenv("TOOL_RUN_COMMAND_CPU_SECONDS", "10"))))
+    max_memory_mb   = max(64,  int(os.getenv("TOOL_RUN_COMMAND_MAX_MEMORY_MB", "512")))
+    max_file_mb     = max(1,   int(os.getenv("TOOL_RUN_COMMAND_MAX_FILE_MB",   "32")))
+    sandbox_enabled = os.getenv("TOOL_RUN_COMMAND_SANDBOX", "auto").strip().lower()
 
-    def _limit_resources() -> None:
+    def _preexec_limits() -> None:
+        """Apply rlimits inside the child process."""
         try:
             max_memory = max_memory_mb * 1024 * 1024
-            max_file = max_file_mb * 1024 * 1024
-            resource.setrlimit(resource.RLIMIT_AS, (max_memory, max_memory))
-            resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit))
-            resource.setrlimit(resource.RLIMIT_FSIZE, (max_file, max_file))
+            max_file   = max_file_mb   * 1024 * 1024
+            resource.setrlimit(resource.RLIMIT_AS,    (max_memory, max_memory))
+            resource.setrlimit(resource.RLIMIT_CPU,   (cpu_limit,  cpu_limit))
+            resource.setrlimit(resource.RLIMIT_FSIZE, (max_file,   max_file))
+            resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))  # limit fork bombs
         except Exception:
             pass
 
+    # ── Sandbox strategy ──────────────────────────────────────────────────────
+    # Priority: nsjail > bubblewrap > unshare > rlimit-only
+    # Each strategy wraps *command* in a more restrictive execution context.
+    # The fallback chain ensures the tool degrades gracefully when the
+    # namespace tools are not available (e.g., inside Docker without privileges).
+
+    def _wrap_nsjail(cmd: str) -> list[str] | None:
+        """Wrap with nsjail for hermetic process-level sandboxing."""
+        nsjail = "/usr/sbin/nsjail"
+        if not os.path.isfile(nsjail):
+            return None
+        return [
+            nsjail, "--mode", "o",
+            "--time_limit", str(cpu_limit),
+            "--max_cpus", "1",
+            "--rlimit_as",    str(max_memory_mb),
+            "--rlimit_fsize", str(max_file_mb),
+            "--rlimit_nproc", "64",
+            "--disable_clone_newnet",   # allow DNS in read-only mode
+            "--chroot", "/",
+            "--cwd", str(cwd_path),
+            "--", "/bin/sh", "-c", cmd,
+        ]
+
+    def _wrap_bwrap(cmd: str) -> list[str] | None:
+        """Wrap with bubblewrap (rootless container)."""
+        bwrap = "/usr/bin/bwrap"
+        if not os.path.isfile(bwrap):
+            return None
+        return [
+            bwrap,
+            "--ro-bind", "/usr", "/usr",
+            "--ro-bind", "/lib", "/lib",
+            "--ro-bind", "/lib64", "/lib64",
+            "--ro-bind", "/bin", "/bin",
+            "--tmpfs", "/tmp",
+            "--bind", str(cwd_path), str(cwd_path),
+            "--chdir", str(cwd_path),
+            "--unshare-all",
+            "--share-net",          # keep network for pip install etc.
+            "--die-with-parent",
+            "--",
+            "/bin/sh", "-c", cmd,
+        ]
+
+    def _wrap_unshare(cmd: str) -> list[str] | None:
+        """Wrap with unshare to isolate PID, IPC, and UTS namespaces."""
+        unshare = "/usr/bin/unshare"
+        if not os.path.isfile(unshare):
+            return None
+        return [
+            unshare,
+            "--pid", "--fork",
+            "--ipc", "--uts",
+            "--", "/bin/sh", "-c", cmd,
+        ]
+
+    # Choose wrapper
+    exec_args: list[str] | None = None
+    sandbox_method = "rlimit-only"
+    if sandbox_enabled not in ("off", "false", "0"):
+        for name, wrapper in [("nsjail", _wrap_nsjail), ("bwrap", _wrap_bwrap),
+                               ("unshare", _wrap_unshare)]:
+            args = wrapper(command)
+            if args is not None:
+                exec_args = args
+                sandbox_method = name
+                break
+
     try:
-        proc = subprocess.run(
-            command,
-            shell=True,
-            cwd=str(cwd_path),
-            capture_output=True,
-            text=True,
-            timeout=soft_timeout,
-            preexec_fn=_limit_resources,
-        )
+        if exec_args:
+            proc = subprocess.run(
+                exec_args,
+                cwd=str(cwd_path),
+                capture_output=True,
+                text=True,
+                timeout=soft_timeout,
+                preexec_fn=_preexec_limits,
+            )
+        else:
+            proc = subprocess.run(
+                command,
+                shell=True,
+                cwd=str(cwd_path),
+                capture_output=True,
+                text=True,
+                timeout=soft_timeout,
+                preexec_fn=_preexec_limits,
+            )
         out = (proc.stdout or "").strip()
         err = (proc.stderr or "").strip()
         result = ""
@@ -2544,7 +2626,8 @@ def tool_run_command(command: str, workdir: str = "/tmp",
             result += f"\n**stderr:**\n```\n{err[:1500]}\n```"
         result += (
             f"\n\nExit code: `{proc.returncode}`"
-            f"\nResource limits: memory={max_memory_mb}MB cpu={cpu_limit}s file={max_file_mb}MB"
+            f"\nSandbox: {sandbox_method} | memory={max_memory_mb}MB"
+            f" cpu={cpu_limit}s file={max_file_mb}MB"
         )
         return result.strip() or f"Exit code: `{proc.returncode}` (no output)"
     except subprocess.TimeoutExpired:

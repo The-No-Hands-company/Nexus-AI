@@ -214,60 +214,39 @@ def get_hardware_routing_hint() -> dict:
     }
 
 
-# ── Per-team budget ───────────────────────────────────────────────────────────
-
-_team_budgets:  dict[str, dict] = {}
-_team_spending: dict[str, dict] = {}
-_budget_alerts: list[dict]      = []
+# ── Per-team budget — DB-persisted ───────────────────────────────────────────
+# All budget state is stored in the DB via src/db.py db_* helpers so it
+# survives container restarts. In-memory dicts are gone.
 
 
 def set_team_budget(team_id: str, monthly_limit_usd: float,
                     daily_limit_usd: float = 0.0,
                     alert_threshold_pct: float = 80.0) -> dict:
-    _team_budgets[team_id] = {
-        "team_id":              team_id,
-        "monthly_limit_usd":    monthly_limit_usd,
-        "daily_limit_usd":      daily_limit_usd,
-        "alert_threshold_pct":  alert_threshold_pct,
-        "updated_at":           datetime.now(timezone.utc).isoformat(),
-    }
-    if team_id not in _team_spending:
-        _team_spending[team_id] = {"today_usd": 0.0, "month_usd": 0.0, "total_usd": 0.0}
+    from .db import db_set_team_budget
+    db_set_team_budget(team_id, monthly_limit_usd, daily_limit_usd, alert_threshold_pct)
     return get_team_budget(team_id)
 
 
 def record_team_spending(team_id: str, cost_usd: float, endpoint: str = "",
                          model: str = "") -> dict:
-    if team_id not in _team_spending:
-        _team_spending[team_id] = {"today_usd": 0.0, "month_usd": 0.0, "total_usd": 0.0}
-    spending = _team_spending[team_id]
-    spending["today_usd"]  = spending.get("today_usd", 0.0) + cost_usd
-    spending["month_usd"]  = spending.get("month_usd", 0.0) + cost_usd
-    spending["total_usd"]  = spending.get("total_usd", 0.0) + cost_usd
-
-    budget = _team_budgets.get(team_id)
+    from .db import db_add_team_spending, db_get_team_budget, db_add_budget_alert
+    spending = db_add_team_spending(team_id, cost_usd)
+    budget   = db_get_team_budget(team_id)
     if budget:
-        threshold = budget["alert_threshold_pct"] / 100.0
-        if budget["monthly_limit_usd"] > 0:
-            utilization = spending["month_usd"] / budget["monthly_limit_usd"]
+        threshold     = budget["alert_threshold_pct"] / 100.0
+        monthly_limit = budget.get("monthly_limit_usd", 0)
+        if monthly_limit > 0:
+            utilization = spending.get("month_usd", 0.0) / monthly_limit
             if utilization >= threshold:
-                alert = {
-                    "id":          str(uuid.uuid4())[:8],
-                    "team_id":     team_id,
-                    "type":        "monthly_budget_threshold",
-                    "utilization": round(utilization, 4),
-                    "threshold":   threshold,
-                    "ts":          datetime.now(timezone.utc).isoformat(),
-                }
-                _budget_alerts.append(alert)
-                logger.warning("Budget alert: team %s at %.1f%% of monthly budget", team_id, utilization * 100)
-
+                db_add_budget_alert(team_id, "monthly_budget_threshold", utilization, threshold)
+                logger.warning("Budget alert: team %s at %.1f%% of monthly limit", team_id, utilization * 100)
     return {"team_id": team_id, "spending": spending}
 
 
 def get_team_budget(team_id: str) -> dict:
-    budget   = _team_budgets.get(team_id, {})
-    spending = _team_spending.get(team_id, {})
+    from .db import db_get_team_budget, db_get_team_spending
+    budget   = db_get_team_budget(team_id) or {}
+    spending = db_get_team_spending(team_id)
     if budget:
         monthly_limit = budget.get("monthly_limit_usd", 0)
         month_used    = spending.get("month_usd", 0.0)
@@ -278,68 +257,50 @@ def get_team_budget(team_id: str) -> dict:
         utilization = None
     return {
         **budget,
-        "spending":                   spending,
-        "monthly_remaining_usd":      remaining,
-        "monthly_utilization_pct":    round((utilization or 0.0) * 100, 1),
+        "spending":                spending,
+        "monthly_remaining_usd":   remaining,
+        "monthly_utilization_pct": round((utilization or 0.0) * 100, 1),
     }
 
 
 def list_team_budgets() -> list[dict]:
-    return [get_team_budget(tid) for tid in _team_budgets]
+    from .db import db_list_team_budgets
+    return [get_team_budget(b["team_id"]) for b in db_list_team_budgets()]
 
 
 def list_budget_alerts(team_id: str | None = None, limit: int = 100) -> list[dict]:
-    items = _budget_alerts
-    if team_id:
-        items = [a for a in items if a["team_id"] == team_id]
-    return list(reversed(items[-limit:]))
+    from .db import db_list_budget_alerts
+    return db_list_budget_alerts(team_id=team_id, limit=limit)
 
 
-# ── Cost attribution / chargeback ─────────────────────────────────────────────
-
-_attribution_log: list[dict] = []
+# ── Cost attribution / chargeback — DB-persisted ─────────────────────────────
 
 
 def record_attribution(team_id: str, department: str, user: str,
                         cost_usd: float, tokens: int,
                         model: str = "", endpoint: str = "") -> dict:
-    entry = {
-        "id":          str(uuid.uuid4())[:8],
-        "ts":          datetime.now(timezone.utc).isoformat(),
-        "team_id":     team_id,
-        "department":  department,
-        "user":        user,
-        "cost_usd":    cost_usd,
-        "tokens":      tokens,
-        "model":       model,
-        "endpoint":    endpoint,
-    }
-    _attribution_log.append(entry)
-    if len(_attribution_log) > 10000:
-        _attribution_log.pop(0)
-    return entry
+    from .db import db_record_attribution
+    return db_record_attribution(team_id, department, user, cost_usd, tokens, model, endpoint)
 
 
 def get_attribution_report(team_id: str | None = None, department: str | None = None,
                             limit: int = 500) -> dict:
-    items = _attribution_log
-    if team_id:
-        items = [r for r in items if r["team_id"] == team_id]
-    if department:
-        items = [r for r in items if r["department"] == department]
-    items = items[-limit:]
+    from .db import db_get_attribution_report
+    items = db_get_attribution_report(team_id=team_id, department=department, limit=limit)
 
-    total_cost   = sum(r["cost_usd"] for r in items)
-    total_tokens = sum(r["tokens"]   for r in items)
+    total_cost   = sum(r.get("cost_usd", 0.0) for r in items)
+    total_tokens = sum(r.get("tokens", 0)   for r in items)
 
     by_department: dict[str, dict] = defaultdict(lambda: {"cost_usd": 0.0, "tokens": 0, "requests": 0})
     by_model:      dict[str, dict] = defaultdict(lambda: {"cost_usd": 0.0, "tokens": 0, "requests": 0})
     by_user:       dict[str, dict] = defaultdict(lambda: {"cost_usd": 0.0, "tokens": 0, "requests": 0})
 
     for r in items:
-        for agg, key in [(by_department, r["department"]), (by_model, r["model"]), (by_user, r["user"])]:
-            agg[key]["cost_usd"] += r["cost_usd"]
-            agg[key]["tokens"]   += r["tokens"]
+        for agg, key in [(by_department, r.get("department", "")),
+                         (by_model, r.get("model", "")),
+                         (by_user, r.get("user", ""))]:
+            agg[key]["cost_usd"] += r.get("cost_usd", 0.0)
+            agg[key]["tokens"]   += r.get("tokens", 0)
             agg[key]["requests"] += 1
 
     return {
@@ -353,11 +314,7 @@ def get_attribution_report(team_id: str | None = None, department: str | None = 
     }
 
 
-# ── Reserved Capacity + Spot/Preemptible Controls ───────────────────────────
-
-_reserved_capacity: dict[str, dict[str, Any]] = {}
-_spot_policies: dict[str, dict[str, Any]] = {}
-_spot_events: list[dict[str, Any]] = []
+# ── Reserved Capacity + Spot/Preemptible Controls — DB-persisted ─────────────
 
 
 def set_reserved_capacity(
@@ -367,8 +324,10 @@ def set_reserved_capacity(
     guarantee_tier: str = "standard",
     expires_at: str = "",
 ) -> dict[str, Any]:
+    from .db import _load_json_pref, _save_json_pref
     now = datetime.now(timezone.utc).isoformat()
-    _reserved_capacity[team_id] = {
+    caps = _load_json_pref("slo:reserved_capacity", {})
+    caps[team_id] = {
         "team_id": team_id,
         "reserved_rps": max(0.0, float(reserved_rps or 0.0)),
         "max_concurrency": max(0, int(max_concurrency or 0)),
@@ -376,16 +335,19 @@ def set_reserved_capacity(
         "expires_at": str(expires_at or "").strip(),
         "updated_at": now,
     }
-    return dict(_reserved_capacity[team_id])
+    _save_json_pref("slo:reserved_capacity", caps)
+    return dict(caps[team_id])
 
 
 def get_reserved_capacity(team_id: str) -> dict[str, Any] | None:
-    row = _reserved_capacity.get(team_id)
+    from .db import _load_json_pref
+    row = _load_json_pref("slo:reserved_capacity", {}).get(team_id)
     return dict(row) if row else None
 
 
 def list_reserved_capacity() -> list[dict[str, Any]]:
-    return [dict(item) for item in _reserved_capacity.values()]
+    from .db import _load_json_pref
+    return list(_load_json_pref("slo:reserved_capacity", {}).values())
 
 
 def check_rate_guarantee(
@@ -393,7 +355,7 @@ def check_rate_guarantee(
     requested_rps: float,
     requested_concurrency: int,
 ) -> dict[str, Any]:
-    cap = _reserved_capacity.get(team_id)
+    cap = get_reserved_capacity(team_id)
     if not cap:
         return {
             "team_id": team_id,
@@ -427,8 +389,10 @@ def set_spot_policy(
     fallback_on_preempt: bool = True,
     max_preemptions_per_hour: int = 2,
 ) -> dict[str, Any]:
+    from .db import _load_json_pref, _save_json_pref
     now = datetime.now(timezone.utc).isoformat()
-    _spot_policies[team_id] = {
+    policies = _load_json_pref("slo:spot_policies", {})
+    policies[team_id] = {
         "team_id": team_id,
         "enabled": bool(enabled),
         "max_discount_pct": max(0.0, min(95.0, float(max_discount_pct or 0.0))),
@@ -436,11 +400,13 @@ def set_spot_policy(
         "max_preemptions_per_hour": max(0, int(max_preemptions_per_hour or 0)),
         "updated_at": now,
     }
-    return dict(_spot_policies[team_id])
+    _save_json_pref("slo:spot_policies", policies)
+    return dict(policies[team_id])
 
 
 def get_spot_policy(team_id: str) -> dict[str, Any] | None:
-    row = _spot_policies.get(team_id)
+    from .db import _load_json_pref
+    row = _load_json_pref("slo:spot_policies", {}).get(team_id)
     return dict(row) if row else None
 
 
@@ -449,13 +415,10 @@ def record_spot_event(
     event_type: str = "preempted",
     details: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    policy = _spot_policies.get(team_id)
+    from .db import _load_json_pref, _save_json_pref
+    policy = get_spot_policy(team_id)
     if not policy:
-        return {
-            "ok": False,
-            "error": "spot_policy_not_found",
-            "team_id": team_id,
-        }
+        return {"ok": False, "error": "spot_policy_not_found", "team_id": team_id}
 
     entry = {
         "id": str(uuid.uuid4())[:8],
@@ -465,7 +428,7 @@ def record_spot_event(
         "details": details or {},
         "fallback_on_preempt": bool(policy.get("fallback_on_preempt", True)),
     }
-    _spot_events.append(entry)
-    if len(_spot_events) > 10000:
-        _spot_events.pop(0)
+    events = _load_json_pref("slo:spot_events", [])
+    events.append(entry)
+    _save_json_pref("slo:spot_events", events[-10000:])
     return {"ok": True, "event": entry}
