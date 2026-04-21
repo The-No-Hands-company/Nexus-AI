@@ -1,0 +1,83 @@
+[build-system]
+requires = ["hatchling>=1.21.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nexus-ai-sdk"
+dynamic = ["version"]
+description = "Official Python SDK for the Nexus AI API"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.9"
+authors = [
+    { name = "The No-Hands Company", email = "sdk@no-hands.ai" },
+]
+keywords = ["ai", "llm", "agent", "nexus", "api-client"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+dependencies = [
+    "requests>=2.28.0",
+    "typing_extensions>=4.0.0; python_version < '3.11'",
+]
+
+[project.optional-dependencies]
+async = ["httpx>=0.24.0"]
+all = ["httpx>=0.24.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "httpx>=0.24.0",
+    "mypy>=1.0.0",
+    "ruff>=0.1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/the-no-hands-company/nexus-ai"
+Documentation = "https://github.com/the-no-hands-company/nexus-ai/tree/main/sdk/python"
+Repository = "https://github.com/the-no-hands-company/nexus-ai"
+"Bug Tracker" = "https://github.com/the-no-hands-company/nexus-ai/issues"
+Changelog = "https://github.com/the-no-hands-company/nexus-ai/blob/main/sdk/python/CHANGELOG.md"
+
+[tool.hatch.version]
+path = "nexus_ai_sdk/_version.py"
+pattern = '__version__ = "(?P<version>[^"]+)"'
+
+[tool.hatch.build.targets.wheel]
+packages = ["nexus_ai_sdk"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "nexus_ai_sdk/",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "pyproject.toml",
+]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py39"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
