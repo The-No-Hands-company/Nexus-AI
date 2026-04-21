@@ -6389,6 +6389,7 @@ async def agent_stream(request: Request):
                 if event is None: break
                 payload = {k:v for k,v in event.items() if k not in ("history","workdir")}
                 yield f"data: {json.dumps(payload)}\n\n"
+            yield "data: [DONE]\n\n"
         except asyncio.CancelledError:
             stop_evt.set()
 

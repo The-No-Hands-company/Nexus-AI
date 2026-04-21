@@ -968,6 +968,7 @@
       font-size:.58rem;font-weight:800;border-radius:99px;
       padding:1px 5px;margin-left:3px;vertical-align:middle}
     #approvals-badge.visible{display:inline}
+    .pill-safety, .pill-providers { display: none !important; }
   </style>
 </head>
 <body>
@@ -1032,7 +1033,8 @@
 
 <header>
   <button class="btn-icon" onclick="toggleSidebar()" title="History (Cmd+/)">☰</button>
-  <div class="logo">Claude <em>Alt</em></div>
+    <div class="logo">Nexus AI</div>
+    <button class="btn-ghost" onclick="newChat()" style="margin-left: 10px; font-size: 0.75rem; color: var(--accent); font-weight: 600;">+ New Chat</button>
   <div class="header-spacer"></div>
   <div id="autosave-dot" title="Auto-saving…"></div>
   <button class="pill pill-safety" id="safety-pill" title="Active safety profile — click Settings to change" onclick="openSettings()">
@@ -1391,7 +1393,7 @@
     <div id="chat">
       <div id="welcome">
         <div class="welcome-icon">⚡</div>
-        <h2>What can I <span>help</span> you build?</h2>
+        <h2>Your private, self-hosted <span>command center</span>.</h2>
         <p>Auto-fallback across free LLMs · web search · voice input · file upload · memory</p>
         <div class="chips">
           <div class="chip" onclick="fillTask('List all files in the repo')">📂 List files</div>

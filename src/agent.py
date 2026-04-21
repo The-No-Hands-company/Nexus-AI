@@ -2736,6 +2736,8 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
         if kind == "respond":
             final = action.get("content", "")
+            if not final or not str(final).strip():
+                final = "*(No content received from AI provider. This may be due to a rate limit or internal error.)*"
             confidence = float(action.get("confidence", 1.0) or 1.0)
 
             # Self-critique loop: if confidence below threshold, ask the model to
