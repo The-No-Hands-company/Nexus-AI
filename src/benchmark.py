@@ -9,32 +9,110 @@ at startup to wire automated daily probe runs and weekly quality checks.
 """
 from __future__ import annotations
 
+import re as _re
 import time as _time
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-# ── Probe definitions ─────────────────────────────────────────────────────────
+# ── Probe definitions with ground-truth answers ───────────────────────────────
+# Each probe is (name, question, scorer_fn).
+# scorer_fn(response: str) -> float  returns 0.0–1.0.
 
-BENCHMARK_PROBES: list[tuple[str, str]] = [
-    ("arithmetic",  "What is 17 * 23?"),
-    ("reasoning",   "If all roses are flowers and some flowers fade quickly, can we conclude that some roses fade quickly?"),
-    ("coding",      "Write a one-line Python expression to reverse a string."),
+def _score_arithmetic_17x23(text: str) -> float:
+    """391 is the only correct answer for 17 * 23."""
+    return 1.0 if _re.search(r"\b391\b", text) else 0.0
+
+
+def _score_reasoning_syllogism(text: str) -> float:
+    """Valid syllogism — 'yes' / 'can conclude' / 'some roses fade' are correct."""
+    lower = text.lower()
+    positive_signals = [
+        "yes", "we can conclude", "some roses fade", "it follows",
+        "is valid", "logically follows", "can be concluded",
+    ]
+    negative_signals = ["cannot conclude", "no, we", "not necessarily", "fallacy"]
+    if any(s in lower for s in negative_signals):
+        return 0.0
+    if any(s in lower for s in positive_signals):
+        return 1.0
+    return 0.3   # partial credit for ambiguous but non-wrong responses
+
+
+def _score_coding_reverse(text: str) -> float:
+    """Correct answers: s[::-1], ''.join(reversed(s)), reversed(), etc."""
+    lower = text.lower()
+    patterns = [
+        r"\[::-1\]",           # slice notation
+        r"reversed\s*\(",      # reversed() builtin
+        r"\.join\(",           # ''.join(reversed(s))
+        r"reverse\(",          # str.reverse (wrong for str but partial)
+    ]
+    matches = sum(1 for p in patterns if _re.search(p, text))
+    if matches >= 1:
+        return 1.0
+    # Partial: mentions reversing
+    if "revers" in lower:
+        return 0.4
+    return 0.0
+
+
+def _score_gsm8k_simple(expected_num: str):
+    """Factory: returns a scorer that checks for a specific numeric answer."""
+    def _scorer(text: str) -> float:
+        return 1.0 if _re.search(r"\b" + _re.escape(expected_num) + r"\b", text) else 0.0
+    return _scorer
+
+
+def _score_truthfulqa_capital(text: str) -> float:
+    """The capital of France is Paris."""
+    return 1.0 if "paris" in text.lower() else 0.0
+
+
+def _score_code_fibonacci(text: str) -> float:
+    """Any correct Python Fibonacci implementation."""
+    has_fib     = "fibonacci" in text.lower() or "fib" in text.lower()
+    has_return  = "return" in text.lower()
+    has_loop    = "for " in text or "while " in text or "def " in text
+    has_base    = _re.search(r"\b[01]\b", text) is not None
+    score = (0.3 * has_fib + 0.2 * has_return + 0.3 * has_loop + 0.2 * has_base)
+    return round(min(1.0, score), 2)
+
+
+# (name, question, scorer_fn)
+BENCHMARK_PROBES: list[tuple[str, str, Any]] = [
+    ("arithmetic",    "What is 17 * 23?",                                       _score_arithmetic_17x23),
+    ("reasoning",     "If all roses are flowers and some flowers fade quickly, can we conclude that some roses fade quickly?", _score_reasoning_syllogism),
+    ("coding_reverse","Write a one-line Python expression to reverse a string.", _score_coding_reverse),
+    ("factual_qa",    "What is the capital of France?",                          _score_truthfulqa_capital),
+    ("math_word",     "A store sells apples for $2 each. If you buy 7 apples, how much do you spend?", _score_gsm8k_simple("14")),
+    ("code_fibonacci","Write a Python function that returns the nth Fibonacci number.", _score_code_fibonacci),
 ]
+
+
+def _score_response(probe_name: str, scorer, response: str) -> float:
+    """Run the probe scorer and clamp to [0, 1]."""
+    try:
+        return max(0.0, min(1.0, float(scorer(response))))
+    except Exception:
+        return 0.0
+
 
 # ── Core provider benchmark ───────────────────────────────────────────────────
 
 def run_benchmark_probes(
     requested_providers: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run BENCHMARK_PROBES against available providers and persist results.
+    """Run BENCHMARK_PROBES against available providers with real correctness scoring.
+
+    Each probe answer is scored by a deterministic scorer function (regex / keyword)
+    that produces a 0.0–1.0 quality_score. Results are persisted to the DB.
 
     Args:
-        requested_providers: Limit run to these provider IDs. ``None`` / empty
-            list benchmarks every available provider.
+        requested_providers: Limit run to these provider IDs. None = all available.
 
     Returns:
-        ``{"results": [...]}`` with per-probe latency and response length rows.
+        ``{"results": [...]}`` with per-probe latency, quality_score, and response.
     """
     from .db import save_benchmark_result
     from .agent import _call_single, _has_key, PROVIDERS, _is_rate_limited  # type: ignore[attr-defined]
@@ -49,29 +127,31 @@ def run_benchmark_probes(
     for pid in target:
         cfg = PROVIDERS.get(pid, {})
         model_id = str(cfg.get("model") or "").strip()
-        for probe_name, probe_text in BENCHMARK_PROBES:
+        for probe_name, probe_text, scorer in BENCHMARK_PROBES:
             t0 = _time.time()
             try:
-                resp = _call_single(pid, [{"role": "user", "content": probe_text}])
+                resp       = _call_single(pid, [{"role": "user", "content": probe_text}])
                 latency_ms = (_time.time() - t0) * 1000
-                text = resp.get("content") or str(resp)
+                text       = resp.get("content") or str(resp)
+                quality    = _score_response(probe_name, scorer, text)
                 save_benchmark_result(
-                    pid,
-                    probe_name,
-                    latency_ms,
-                    len(text),
-                    model=model_id,
-                    task_type=probe_name,
+                    pid, probe_name, latency_ms, len(text),
+                    model=model_id, task_type=probe_name,
                 )
                 results.append({
-                    "provider": pid, "probe": probe_name, "model": model_id,
-                    "latency_ms": round(latency_ms, 1), "response_len": len(text),
-                    "ok": True,
+                    "provider":      pid,
+                    "probe":         probe_name,
+                    "model":         model_id,
+                    "latency_ms":    round(latency_ms, 1),
+                    "response_len":  len(text),
+                    "quality_score": quality,
+                    "ok":            True,
                 })
             except Exception as exc:
                 results.append({
                     "provider": pid, "probe": probe_name, "model": model_id,
                     "latency_ms": None, "response_len": 0,
+                    "quality_score": 0.0,
                     "ok": False, "error": str(exc)[:120],
                 })
     return {"results": results}

@@ -418,6 +418,76 @@ class SQLiteBackend(DatabaseBackend):
                 expires_at  REAL NOT NULL
             );
         """)
+        # ── Budget / attribution / department / safety audit tables ──────────
+        c.executescript("""
+            CREATE TABLE IF NOT EXISTS team_budgets (
+                team_id              TEXT PRIMARY KEY,
+                monthly_limit_usd    REAL NOT NULL DEFAULT 0,
+                daily_limit_usd      REAL NOT NULL DEFAULT 0,
+                alert_threshold_pct  REAL NOT NULL DEFAULT 80,
+                updated_at           TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_spending (
+                team_id       TEXT PRIMARY KEY,
+                today_usd     REAL NOT NULL DEFAULT 0,
+                month_usd     REAL NOT NULL DEFAULT 0,
+                total_usd     REAL NOT NULL DEFAULT 0,
+                reset_date    TEXT NOT NULL DEFAULT '',
+                reset_month   TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS budget_alerts (
+                id          TEXT PRIMARY KEY,
+                team_id     TEXT NOT NULL,
+                alert_type  TEXT NOT NULL DEFAULT 'monthly_budget_threshold',
+                utilization REAL NOT NULL DEFAULT 0,
+                threshold   REAL NOT NULL DEFAULT 0,
+                ts          TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS attribution_log (
+                id         TEXT PRIMARY KEY,
+                ts         TEXT NOT NULL,
+                team_id    TEXT NOT NULL DEFAULT '',
+                department TEXT NOT NULL DEFAULT '',
+                username   TEXT NOT NULL DEFAULT '',
+                cost_usd   REAL NOT NULL DEFAULT 0,
+                tokens     INTEGER NOT NULL DEFAULT 0,
+                model      TEXT NOT NULL DEFAULT '',
+                endpoint   TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS department_quotas (
+                department          TEXT PRIMARY KEY,
+                daily_tokens        INTEGER NOT NULL DEFAULT 0,
+                monthly_cost_cap    REAL NOT NULL DEFAULT 0,
+                updated_at          TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS department_usage (
+                department      TEXT PRIMARY KEY,
+                tokens_today    INTEGER NOT NULL DEFAULT 0,
+                cost_this_month REAL NOT NULL DEFAULT 0,
+                users           INTEGER NOT NULL DEFAULT 0,
+                reset_date      TEXT NOT NULL DEFAULT '',
+                reset_month     TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS safety_audit_events (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts          TEXT NOT NULL,
+                event_type  TEXT NOT NULL,
+                session_id  TEXT NOT NULL DEFAULT '',
+                username    TEXT NOT NULL DEFAULT '',
+                severity    TEXT NOT NULL DEFAULT 'info',
+                details     TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_safety_audit_ts
+                ON safety_audit_events (ts);
+            CREATE INDEX IF NOT EXISTS idx_safety_audit_event_type
+                ON safety_audit_events (event_type);
+            CREATE INDEX IF NOT EXISTS idx_attribution_log_ts
+                ON attribution_log (ts);
+            CREATE INDEX IF NOT EXISTS idx_attribution_log_team
+                ON attribution_log (team_id);
+            CREATE INDEX IF NOT EXISTS idx_budget_alerts_team
+                ON budget_alerts (team_id);
+        """)
         c.commit()
         # Migrate existing databases
         for col_sql in [
@@ -4182,3 +4252,223 @@ def load_architecture_registry(name: str, version: int | None = None) -> dict | 
     """Load a registry entry (alias for load_architecture_blueprint for now)."""
     return load_architecture_blueprint(name, version)
 
+
+
+
+
+# ── Team budget / spending — DB-persisted functions ──────────────────────────
+# Uses _load_json_pref/_save_json_pref so data survives container restarts.
+# Keys are namespaced to avoid collisions with other prefs.
+
+def db_set_team_budget(team_id: str, monthly_limit_usd: float,
+                       daily_limit_usd: float = 0.0,
+                       alert_threshold_pct: float = 80.0) -> None:
+    from datetime import datetime, timezone
+    budgets = _load_json_pref("slo:team_budgets", {})
+    budgets[team_id] = {
+        "team_id": team_id,
+        "monthly_limit_usd": float(monthly_limit_usd),
+        "daily_limit_usd": float(daily_limit_usd),
+        "alert_threshold_pct": float(alert_threshold_pct),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _save_json_pref("slo:team_budgets", budgets)
+    # Ensure spending row exists
+    spending = _load_json_pref("slo:team_spending", {})
+    if team_id not in spending:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        month  = datetime.now(timezone.utc).strftime("%Y-%m")
+        spending[team_id] = {"team_id": team_id, "today_usd": 0.0, "month_usd": 0.0,
+                             "total_usd": 0.0, "reset_date": today, "reset_month": month}
+        _save_json_pref("slo:team_spending", spending)
+
+
+def db_get_team_budget(team_id: str) -> dict | None:
+    budgets = _load_json_pref("slo:team_budgets", {})
+    return budgets.get(team_id)
+
+
+def db_list_team_budgets() -> list[dict]:
+    return list(_load_json_pref("slo:team_budgets", {}).values())
+
+
+def db_get_team_spending(team_id: str) -> dict:
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    spending = _load_json_pref("slo:team_spending", {})
+    row = spending.get(team_id, {"team_id": team_id, "today_usd": 0.0, "month_usd": 0.0,
+                                 "total_usd": 0.0, "reset_date": today, "reset_month": month})
+    changed = False
+    if row.get("reset_date") != today:
+        row["today_usd"] = 0.0
+        row["reset_date"] = today
+        changed = True
+    if row.get("reset_month") != month:
+        row["month_usd"] = 0.0
+        row["reset_month"] = month
+        changed = True
+    if changed:
+        spending[team_id] = row
+        _save_json_pref("slo:team_spending", spending)
+    return dict(row)
+
+
+def db_add_team_spending(team_id: str, cost_usd: float) -> dict:
+    row = db_get_team_spending(team_id)   # handles auto-reset
+    row["today_usd"] = round(row.get("today_usd", 0.0) + cost_usd, 6)
+    row["month_usd"] = round(row.get("month_usd", 0.0) + cost_usd, 6)
+    row["total_usd"] = round(row.get("total_usd", 0.0) + cost_usd, 6)
+    spending = _load_json_pref("slo:team_spending", {})
+    spending[team_id] = row
+    _save_json_pref("slo:team_spending", spending)
+    return dict(row)
+
+
+def db_add_budget_alert(team_id: str, alert_type: str,
+                        utilization: float, threshold: float) -> dict:
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    aid = str(_uuid.uuid4())[:8]
+    now = datetime.now(timezone.utc).isoformat()
+    alerts = _load_json_pref("slo:budget_alerts", [])
+    entry = {"id": aid, "team_id": team_id, "alert_type": alert_type,
+             "utilization": round(utilization, 4), "threshold": round(threshold, 4), "ts": now}
+    alerts.append(entry)
+    _save_json_pref("slo:budget_alerts", alerts[-5000:])
+    return entry
+
+
+def db_list_budget_alerts(team_id: str | None = None, limit: int = 100) -> list[dict]:
+    alerts = _load_json_pref("slo:budget_alerts", [])
+    if team_id:
+        alerts = [a for a in alerts if a.get("team_id") == team_id]
+    return list(reversed(alerts))[:max(1, min(int(limit), 5000))]
+
+
+# ── Attribution log — DB-persisted ───────────────────────────────────────────
+
+def db_record_attribution(team_id: str, department: str, username: str,
+                           cost_usd: float, tokens: int,
+                           model: str = "", endpoint: str = "") -> dict:
+    import uuid as _uuid
+    from datetime import datetime, timezone
+    aid = str(_uuid.uuid4())[:8]
+    now = datetime.now(timezone.utc).isoformat()
+    entry = {"id": aid, "ts": now, "team_id": team_id, "department": department,
+             "user": username, "cost_usd": cost_usd, "tokens": tokens,
+             "model": model, "endpoint": endpoint}
+    log = _load_json_pref("slo:attribution_log", [])
+    log.append(entry)
+    _save_json_pref("slo:attribution_log", log[-10000:])
+    return entry
+
+
+def db_get_attribution_report(team_id: str | None = None,
+                               department: str | None = None,
+                               limit: int = 500) -> list[dict]:
+    items = _load_json_pref("slo:attribution_log", [])
+    if team_id:
+        items = [r for r in items if r.get("team_id") == team_id]
+    if department:
+        items = [r for r in items if r.get("department") == department]
+    return list(reversed(items))[:max(1, min(int(limit), 5000))]
+
+
+# ── Department quota / usage — DB-persisted ───────────────────────────────────
+
+def db_set_department_quota(department: str, daily_tokens: int = 0,
+                             monthly_cost_cap: float = 0.0) -> dict:
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    quotas = _load_json_pref("tp:department_quotas", {})
+    quotas[department] = {"department": department, "daily_tokens": int(daily_tokens),
+                           "monthly_cost_cap": float(monthly_cost_cap), "updated_at": now}
+    _save_json_pref("tp:department_quotas", quotas)
+    # ensure usage row exists
+    usage = _load_json_pref("tp:department_usage", {})
+    if department not in usage:
+        usage[department] = {"department": department, "tokens_today": 0,
+                              "cost_this_month": 0.0, "users": 0}
+        _save_json_pref("tp:department_usage", usage)
+    return dict(quotas[department])
+
+
+def db_get_department_quota(department: str) -> dict | None:
+    from datetime import datetime, timezone
+    quota = _load_json_pref("tp:department_quotas", {}).get(department)
+    if not quota:
+        return None
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    month  = datetime.now(timezone.utc).strftime("%Y-%m")
+    usage_all = _load_json_pref("tp:department_usage", {})
+    row = usage_all.get(department, {"tokens_today": 0, "cost_this_month": 0.0})
+    changed = False
+    if row.get("reset_date") != today:
+        row["tokens_today"] = 0
+        row["reset_date"] = today
+        changed = True
+    if row.get("reset_month") != month:
+        row["cost_this_month"] = 0.0
+        row["reset_month"] = month
+        changed = True
+    if changed:
+        usage_all[department] = row
+        _save_json_pref("tp:department_usage", usage_all)
+    return {**quota, "usage": dict(row)}
+
+
+def db_list_department_quotas() -> list[dict]:
+    quotas = _load_json_pref("tp:department_quotas", {})
+    return [db_get_department_quota(d) for d in quotas if d]
+
+
+def db_add_department_usage(department: str, tokens: int, cost_usd: float = 0.0) -> dict:
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    month  = datetime.now(timezone.utc).strftime("%Y-%m")
+    db_get_department_quota(department)   # trigger auto-reset if needed
+    usage_all = _load_json_pref("tp:department_usage", {})
+    row = usage_all.get(department, {"department": department, "tokens_today": 0,
+                                      "cost_this_month": 0.0, "users": 0,
+                                      "reset_date": today, "reset_month": month})
+    row["tokens_today"] = int(row.get("tokens_today", 0)) + int(tokens)
+    row["cost_this_month"] = round(float(row.get("cost_this_month", 0.0)) + float(cost_usd), 6)
+    usage_all[department] = row
+    _save_json_pref("tp:department_usage", usage_all)
+    return db_get_department_quota(department) or {}
+
+
+# ── Safety audit log — DB-persisted via existing add_safety_audit_entry ───────
+# Thin wrappers that call the existing hash-chained audit log.
+
+def db_log_safety_event(event_type: str, session_id: str, username: str,
+                         severity: str, details: dict) -> None:
+    from datetime import datetime, timezone
+    add_safety_audit_entry({
+        "event_type":  event_type,
+        "session_id":  session_id,
+        "username":    username,
+        "severity":    severity,
+        "details":     details,
+        "created_at":  datetime.now(timezone.utc).isoformat(),
+    })
+
+
+def db_query_safety_events(event_type: str | None = None,
+                            username: str | None = None,
+                            since: str | None = None,
+                            limit: int = 100) -> list[dict]:
+    events = _load_json_pref("safety_audit_log", [])
+    if not isinstance(events, list):
+        return []
+    filtered = []
+    for ev in events:
+        if event_type and ev.get("event_type") != event_type:
+            continue
+        if username and ev.get("username") != username:
+            continue
+        if since and (ev.get("created_at") or ev.get("ts") or "") < since:
+            continue
+        filtered.append(ev)
+    return list(reversed(filtered))[:max(1, min(int(limit), 5000))]

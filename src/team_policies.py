@@ -369,44 +369,54 @@ def list_policy_alerts(team_id: str | None = None, status: str | None = None, li
 
 def set_department_quota(department: str, daily_tokens: int = 0,
                          monthly_cost_usd: float = 0.0, max_users: int = 0) -> dict[str, Any]:
-    _department_quotas[department] = {
-        "department": department,
-        "daily_tokens": daily_tokens,
-        "monthly_cost_usd": monthly_cost_usd,
-        "max_users": max_users,
-        "updated_at": _utc_now(),
-    }
-    if department not in _department_usage:
-        _department_usage[department] = {"tokens_today": 0, "cost_this_month": 0.0, "users": 0}
-    return _department_quotas[department]
+    from .db import db_set_department_quota
+    record = db_set_department_quota(department, daily_tokens=daily_tokens,
+                                     monthly_cost_cap=monthly_cost_usd)
+    # persist max_users in the quota record via pref extension
+    from .db import _load_json_pref, _save_json_pref
+    ext = _load_json_pref("tp:dept_quota_ext", {})
+    ext[department] = {"max_users": max_users}
+    _save_json_pref("tp:dept_quota_ext", ext)
+    return {**record, "monthly_cost_usd": monthly_cost_usd, "max_users": max_users,
+            "updated_at": _utc_now()}
 
 
 def get_department_quota(department: str) -> dict[str, Any] | None:
-    quota = _department_quotas.get(department)
-    usage = _department_usage.get(department, {})
-    if quota is None:
+    from .db import db_get_department_quota, _load_json_pref
+    record = db_get_department_quota(department)
+    if record is None:
         return None
-    return {**quota, "usage": usage}
+    ext = _load_json_pref("tp:dept_quota_ext", {}).get(department, {})
+    return {**record, "monthly_cost_usd": record.get("monthly_cost_cap", 0.0),
+            "max_users": ext.get("max_users", 0)}
 
 
 def list_department_quotas() -> list[dict[str, Any]]:
-    return [{**quota, "usage": _department_usage.get(quota["department"], {})} for quota in _department_quotas.values()]
+    from .db import db_list_department_quotas, _load_json_pref
+    records = db_list_department_quotas()
+    ext_all = _load_json_pref("tp:dept_quota_ext", {})
+    result = []
+    for rec in records:
+        if not rec:
+            continue
+        ext = ext_all.get(rec.get("department", ""), {})
+        result.append({**rec, "monthly_cost_usd": rec.get("monthly_cost_cap", 0.0),
+                       "max_users": ext.get("max_users", 0)})
+    return result
 
 
 def record_department_usage(department: str, tokens: int, cost_usd: float = 0.0) -> dict[str, Any]:
-    if department not in _department_usage:
-        _department_usage[department] = {"tokens_today": 0, "cost_this_month": 0.0, "users": 0}
-    usage = _department_usage[department]
-    usage["tokens_today"] = usage.get("tokens_today", 0) + tokens
-    usage["cost_this_month"] = usage.get("cost_this_month", 0.0) + cost_usd
-
-    quota = _department_quotas.get(department)
+    from .db import db_add_department_usage, db_get_department_quota
+    db_add_department_usage(department, tokens, cost_usd)
+    quota = get_department_quota(department) or {}
+    usage = (quota.get("usage") or {})
     alerts = []
-    if quota:
-        if quota["daily_tokens"] > 0 and usage["tokens_today"] > quota["daily_tokens"]:
-            alerts.append({"type": "daily_tokens_exceeded", "department": department, "used": usage["tokens_today"], "limit": quota["daily_tokens"]})
-        if quota["monthly_cost_usd"] > 0 and usage["cost_this_month"] > quota["monthly_cost_usd"]:
-            alerts.append({"type": "monthly_cost_exceeded", "department": department, "used": usage["cost_this_month"], "limit": quota["monthly_cost_usd"]})
+    if quota.get("daily_tokens", 0) > 0 and usage.get("tokens_today", 0) > quota["daily_tokens"]:
+        alerts.append({"type": "daily_tokens_exceeded", "department": department,
+                       "used": usage.get("tokens_today", 0), "limit": quota["daily_tokens"]})
+    if quota.get("monthly_cost_usd", 0) > 0 and usage.get("cost_this_month", 0.0) > quota["monthly_cost_usd"]:
+        alerts.append({"type": "monthly_cost_exceeded", "department": department,
+                       "used": usage.get("cost_this_month", 0.0), "limit": quota["monthly_cost_usd"]})
     return {"usage": usage, "alerts": alerts}
 
 

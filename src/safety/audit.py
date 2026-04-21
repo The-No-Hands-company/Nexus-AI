@@ -1,19 +1,19 @@
 """
-src/safety/audit.py — Safety audit log stub
+src/safety/audit.py — Safety audit log
 
-Appends structured safety events to the audit log for compliance
-and incident review. All safety decisions (allow/warn/block) can be logged.
+All safety events are persisted to the DB via src/db.py (add_safety_audit_entry /
+_load_json_pref with hash-chain integrity). This replaces the previous /tmp flat-file
+approach which was wiped on every container restart.
+
+The hash-chain maintained by db.add_safety_audit_entry provides tamper evidence:
+each entry includes the SHA-256 hash of its content + the previous entry's hash,
+allowing offline verification via db.verify_safety_audit_entries().
 """
 
 from __future__ import annotations
 
-import json
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-
-
-AUDIT_LOG_PATH = os.environ.get("SAFETY_AUDIT_LOG", "/tmp/nexus_safety_audit.jsonl")
 
 
 @dataclass
@@ -27,25 +27,24 @@ class AuditEvent:
 
 
 def log_event(event: AuditEvent) -> None:
-    """
-    Append *event* to the safety audit log (JSONL format).
+    """Persist *event* to the DB-backed hash-chained audit log.
 
-    FUNCTIONAL: basic file append.
-    Implementation plan: replace with structured DB logging + alerting on critical severity.
+    Uses src/db.add_safety_audit_entry which stores entries in the user_prefs
+    table with SHA-256 hash chaining for tamper evidence. Never raises — a
+    failure to log must not abort the request pipeline.
     """
     try:
-        record = {
-            "timestamp": event.timestamp,
-            "event_type": event.event_type,
-            "session_id": event.session_id,
-            "username": event.username,
-            "severity": event.severity,
-            "details": event.details,
-        }
-        with open(AUDIT_LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
-    except OSError:
-        pass  # never crash the request pipeline due to audit failure
+        from src.db import add_safety_audit_entry
+        add_safety_audit_entry({
+            "event_type":  event.event_type,
+            "session_id":  event.session_id,
+            "username":    event.username,
+            "severity":    event.severity,
+            "details":     event.details,
+            "created_at":  event.timestamp,
+        })
+    except Exception:
+        pass
 
 
 def query_audit_log(
@@ -54,13 +53,24 @@ def query_audit_log(
     since: str | None = None,
     limit: int = 100,
 ) -> list[dict]:
-    """
-    Query the audit log.
+    """Query safety audit events from the DB.
 
-    STUB: raises NotImplementedError.
-    Implementation plan: read from DB (not flat file) with indexed query.
+    Filters by event_type, username, or since (ISO-8601 timestamp).
+    Returns most-recent-first up to *limit* entries.
     """
-    raise NotImplementedError(
-        "query_audit_log is not yet implemented. "
-        "Planned: DB-backed query with indexed event_type, username, timestamp."
+    from src.db import db_query_safety_events
+    return db_query_safety_events(
+        event_type=event_type,
+        username=username,
+        since=since,
+        limit=limit,
     )
+
+
+def verify_integrity() -> dict:
+    """Verify the hash-chain integrity of the audit log.
+
+    Returns {"ok": bool, "checked": int, "broken_at": int | None, "head_hash": str | None}.
+    """
+    from src.db import verify_safety_audit_entries
+    return verify_safety_audit_entries()

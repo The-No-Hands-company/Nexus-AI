@@ -598,7 +598,17 @@ class AdaptiveRetriever:
         return RetrievalStrategy.HYBRID
     
     def _get_all_documents(self, filter_metadata: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Get all documents from vector store (for BM25)."""
-        # This is a simplified implementation
-        # In production, maintain a separate document index
-        return []
+        """Retrieve all documents from the vector store for BM25 corpus construction."""
+        try:
+            all_docs = self.vector_store.get_all_documents()
+        except Exception:
+            return []
+        if not filter_metadata:
+            return all_docs
+        return [
+            doc for doc in all_docs
+            if all(
+                doc.get("metadata", {}).get(k) == v
+                for k, v in filter_metadata.items()
+            )
+        ]
