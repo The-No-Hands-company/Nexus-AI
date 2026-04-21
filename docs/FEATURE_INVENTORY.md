@@ -1211,7 +1211,7 @@ harden these to full production level:
 - [ ] **[CRITICAL]** Penetration testing program and CVE response SLA — Requires external pentest vendor and published security@company process. Organizational process.
 - [ ] **[HIGH]** VPC / private network deployment — Requires cloud networking configuration (VPC peering, private endpoints). Infrastructure-level; Kubernetes manifests in `deploy/k8s/` support NetworkPolicy but VPC setup is cloud-specific.
 - [x] **[HIGH]** GDPR / CCPA data deletion and portability — Cascade delete implemented: `DELETE /admin/users/{username}/data` and `DELETE /orgs/{org_id}/data` cascade across DB tables, ChromaDB, Redis, and RAG corpus. Data retention automation: `src/retention.py` with configurable TTL per data type and daily purge worker.
-- [ ] **[HIGH]** SBOM generation and signed container images — Requires CI/CD integration (syft, cosign). Dockerfile exists; SBOM generation requires CI pipeline addition.
+- [x] **[HIGH]** SBOM generation and signed container images — Supply-chain workflow added in `.github/workflows/supply-chain-sbom-sign.yml`: image build/push to GHCR, SPDX SBOM generation via Syft, artifact upload, keyless cosign signing and SBOM attestation.
 - [x] **[HIGH]** Secrets rotation automation — `src/secrets_manager.py`: Vault KV v2 and AWS Secrets Manager integration with in-process cache TTL (`SECRET_CACHE_TTL`). `start_secret_rotation_daemon()` called at startup.
 - [x] **[HIGH]** Multi-factor authentication (MFA) enforcement — `pyotp` TOTP and WebAuthn/passkeys implemented in `src/auth.py`. MFA enforcement policy configurable per workspace via team_policies.
 - [x] **[HIGH]** IP allowlisting and geo-blocking controls — `src/security/ip_filter.py`: CIDR-based allowlist/blocklist, country-level geo-blocking via MaxMind DB (optional), trusted proxy support for X-Forwarded-For. `IPFilterMiddleware` loaded in `src/app.py` when `IP_ALLOWLIST` or `GEO_BLOCKED_COUNTRIES` is set. Admin API: `GET /admin/security/ip-filter`, `POST /admin/security/ip-filter/allowlist`, `POST /admin/security/ip-filter/blocklist`.
@@ -1228,7 +1228,7 @@ harden these to full production level:
 - [x] **[HIGH]** Auto-scaling based on queue depth — Kubernetes HPA manifest in `deploy/k8s/` with CPU/memory triggers. Backpressure middleware rejects requests when queue depth exceeds threshold.
 - [x] **[HIGH]** Database read replicas and connection pooling — asyncpg pool (`init_async_pool`), PgBouncer DSN support (`PGBOUNCER_DSN`), `DB_POOL_MODE` env var. Read replica routing available via `PG_READ_REPLICA_URL`.
 - [ ] **[MEDIUM]** Global load balancing with latency-based routing — GeoDNS/Anycast requires cloud DNS configuration. Infrastructure process.
-- [ ] **[MEDIUM]** Chaos engineering / fault injection testing — No automated chaos test pipeline.
+- [x] **[MEDIUM]** Chaos engineering / fault injection testing — Automated chaos/fault-injection workflow added in `.github/workflows/chaos-fault-injection.yml` running `tests/test_chaos_fault_injection.py` with retry/DLQ/success-path injection cases against webhook delivery runtime.
 
 ### 26.3 Safety and Alignment Quality
 
@@ -1238,31 +1238,31 @@ harden these to full production level:
 - [x] **[HIGH]** Hallucination detection and grounding verification — `src/safety/hallucination.py`: NLI cross-encoder (sentence-transformers, DeBERTa-v3) for per-sentence entailment scoring; BM25 + n-gram Jaccard lexical fallback; LLM-as-judge fallback. `check_grounding(response, context)` + `verify_rag_response(response, chunks)`. API: `POST /safety/hallucination/check`.
 - [x] **[HIGH]** Output watermarking / provenance tagging — `src/safety/watermark.py`: Unicode variation selector watermark (imperceptible, EU AI Act Article 50 compliant). `watermark_text(text, session_id)`, `detect_watermark(text)`, `verify_watermark(text, session_id)`, `strip_watermark(text)`. API: `POST /safety/watermark/embed`, `POST /safety/watermark/detect`.
 - [x] **[HIGH]** Human-in-the-loop escalation — `src/approvals.py`: DB-persisted HITL approval queue with `create_hitl_approval`, `list_hitl_approvals`, `update_hitl_approval_decision`. `src/evals/human_eval_pipeline.py`: human eval task routing with absolute/pairwise/safety rating modes. Admin API: `GET /admin/human-eval/tasks`, `POST /admin/human-eval/tasks/{id}/rate`.
-- [ ] **[HIGH]** Red-teaming and adversarial robustness program — No automated red-team pipeline.
+- [x] **[HIGH]** Red-teaming and adversarial robustness program — Automated red-team workflow added in `.github/workflows/red-team-suite.yml` running adversarial corpus checks in `tests/test_red_team_pipeline.py` for direct and indirect prompt-injection attack patterns.
 - [x] **[MEDIUM]** Copyright / IP infringement detection — `src/safety/copyright.py`: Rabin n-gram fingerprinting with Jaccard similarity, explicit copyright notice regex detection, DB-persisted work registry. `check_copyright(text)`, `register_protected_work(...)`. API: `POST /safety/copyright/check`, `POST /safety/copyright/register`, `GET /safety/copyright/works`.
 - [x] **[MEDIUM]** Bias and fairness evaluation pipeline — `src/safety/bias_eval.py`: counterfactual gender test (swap pronouns, measure sentiment disparity), stereotype phrase detection (gender/race/occupational), demographic mention sentiment analysis across race/religion groups. `evaluate_bias(text)` → `BiasReport`. API: `POST /safety/bias/evaluate`.
 
 ### 26.4 Evaluation and Benchmarking Quality
 
-- [x] **[CRITICAL]** Real benchmark execution against standard datasets — `src/benchmark.py`: 6 scored probes with deterministic scorers (arithmetic, syllogism, coding reverse, TruthfulQA capital, GSM8K math, Fibonacci code). `src/eval_pipeline.py`: full eval suite runner supporting humaneval, gsm8k, arc, rag, safety suites with `n_samples`, baseline regression detection, and persisted scores.
+- [x] **[CRITICAL]** Real benchmark execution against standard datasets — `src/benchmark.py`: 6 scored probes with deterministic scorers (arithmetic, syllogism, coding reverse, TruthfulQA capital, GSM8K math, Fibonacci code). `src/eval_pipeline.py`: full eval suite runner supporting humaneval, gsm8k, arc, rag, safety, advglue, and multilingual suites with `n_samples`, baseline regression detection, and persisted scores.
 - [x] **[HIGH]** Automated evals CI pipeline — `src/eval_pipeline.py`: baseline score persistence, regression detection (`regression: bool` field). Benchmark schedules registered via `register_benchmark_schedules()` in `src/benchmark.py`. SLO breach gates via `src/alerting.py`.
 - [x] **[HIGH]** A/B testing framework — `src/evals/ab_testing.py`: experiment lifecycle (create/start/pause/complete), deterministic hash-based traffic splitting, Welch's t-test + chi-squared significance testing (scipy fallback to normal approximation), automatic winner declaration. API: `GET/POST /evals/experiments`, `POST /evals/experiments/{id}/start`, `GET /evals/experiments/{id}/analysis`.
 - [x] **[HIGH]** Human evaluation pipeline — `src/evals/human_eval_pipeline.py`: 1% sample rate (configurable via `HUMAN_EVAL_SAMPLE_RATE`), absolute (1–5 Likert) / pairwise (A/B/tie) / safety rating modes, DB-persisted task queue, feeds results back to A/B experiments. API: `GET /admin/human-eval/tasks`, `POST /admin/human-eval/tasks/{id}/rate`.
 - [x] **[HIGH]** Bias and demographic fairness benchmarks — `src/safety/bias_eval.py` integrates into eval pipeline. Counterfactual fairness, stereotype detection, demographic sentiment disparity across race/religion groups.
-- [ ] **[MEDIUM]** Adversarial robustness benchmarks (ANLI, AdvGLUE) — No adversarial evaluation datasets.
-- [ ] **[MEDIUM]** Multilingual evaluation — No multilingual benchmark datasets.
+- [x] **[MEDIUM]** Adversarial robustness benchmarks (ANLI, AdvGLUE) — `src/eval_pipeline.py` now includes `advglue` suite probes with task-level scoring and regression compatibility through `POST /benchmark/eval-suite` and `POST /benchmark/regression`.
+- [x] **[MEDIUM]** Multilingual evaluation — `src/eval_pipeline.py` now includes `multilingual` suite probes (Spanish/French/German signals) with baseline/regression tracking through benchmark eval endpoints.
 
 ### 26.5 Developer Ecosystem
 
 - [ ] **[CRITICAL]** Published SDK packages (PyPI, npm, pkg.go.dev) — SDKs exist in repo but require CI/CD publishing pipeline to registries. Organizational process.
-- [ ] **[HIGH]** Interactive API playground — No browser-based playground UI.
+- [x] **[HIGH]** Interactive API playground — Browser-based playground implemented at `GET /playground` with one-click calls for `/v1/models`, `/v1/chat/completions`, `/v1/agent`, and `/v1/autonomy/plan`.
 - [x] **[HIGH]** OpenAPI / Swagger spec — FastAPI auto-generates `/openapi.json` and `/docs` (Swagger UI) / `/redoc`. Versioned via `X-API-Version` header. SCIM spec available at `/scim/v2/ServiceProviderConfig`.
 - [x] **[HIGH]** Outbound webhooks with delivery guarantees — `src/webhooks_delivery.py`: at-least-once delivery with exponential backoff (max 5 attempts, configurable), dead-letter queue, HMAC-SHA256 signatures, DB-persisted delivery receipts, background worker (4 concurrent). Admin API: `GET /admin/webhooks/delivery/stats`, `GET /admin/webhooks/delivery/dlq`, `POST /admin/webhooks/delivery/{id}/retry`, `POST /webhooks/outbound`.
 - [x] **[HIGH]** SCIM 2.0 provisioning — `src/api/scim.py`: RFC 7643/7644 compliant. Endpoints: Users (GET list, POST create, GET/PUT/PATCH/DELETE by ID), Groups, ResourceTypes, ServiceProviderConfig. Bearer token auth (`SCIM_BEARER_TOKEN`). Mounted at `/scim/v2/`.
-- [ ] **[HIGH]** Developer sandbox / test environment — No isolated mock-LLM tier.
-- [ ] **[MEDIUM]** CLI tool — No CLI binary.
+- [x] **[HIGH]** Developer sandbox / test environment — Isolated mock-LLM tier implemented via `GET /dev/sandbox/status` and `POST /dev/sandbox/chat` gated by `NEXUS_DEV_SANDBOX=1`.
+- [x] **[MEDIUM]** CLI tool — `scripts/nexus_cli.py` adds a local CLI for health/models/chat/agent/autonomy-plan flows.
 - [ ] **[MEDIUM]** Terraform / Pulumi modules — No published IaC modules.
-- [ ] **[MEDIUM]** GraphQL API — REST-only.
+- [x] **[MEDIUM]** GraphQL API — Minimal GraphQL read-model endpoint implemented via `GET/POST /graphql` in `src/api/routes.py` supporting root fields `health`, `models`, `providers`, and `usage` (admin-gated for usage field).
 
 ### 26.6 Operational Excellence
 
@@ -1274,20 +1274,20 @@ harden these to full production level:
 - [x] **[HIGH]** Automated data retention and purge policies — `src/retention.py`: configurable retention per data type (chat: 90d, usage: 365d, audit: 2555d, safety: 365d, agent_state: 30d), daily purge worker (`start_retention_worker()`), dry-run mode, purge history. Admin API: `GET/PUT /admin/retention/policies`, `POST /admin/retention/purge`, `GET /admin/retention/history`.
 - [ ] **[HIGH]** Runbook automation — No auto-remediation playbooks.
 - [x] **[MEDIUM]** Cost anomaly detection and alerting — `src/cost_anomaly.py`: Z-score (configurable threshold, 30-day rolling window), IQR bounds, hard cap check. `check_team_anomaly()`, `check_all_teams()`, hourly background worker (`start_cost_anomaly_worker()`). Fires alerts via `src/alerting.py`. Admin API: `GET /admin/cost-anomaly/history`, `POST /admin/cost-anomaly/check`.
-- [ ] **[MEDIUM]** Capacity planning reports — No capacity projection.
+- [x] **[MEDIUM]** Capacity planning reports — `GET /admin/capacity/planning` provides usage-trend projection, daily peaks, forecast horizon totals, and recommended daily capacity.
 - [x] **[MEDIUM]** Log aggregation — `src/observability.py`: structlog JSON structured logging. OTLP export to Jaeger/Tempo/Datadog when `OTLP_ENDPOINT` set. Prometheus scrape endpoint when `PROMETHEUS_PORT` set.
 
 ### 26.7 Agent Capabilities
 
 - [x] **[CRITICAL]** Long-horizon planning with persistent state — `src/agent_state.py`: DB-persisted agent state (planning graph, working memory, execution history, checkpoints). `create_agent_state()`, `add_plan_node()`, `record_step()`, `set_working_memory()`. Automatic checkpoint every N steps. API: `POST /agents/state`, `GET /agents/state/{id}`, `GET /agents/active`.
 - [x] **[CRITICAL]** BM25 sparse retrieval fix — `src/rag/retriever.py`: `_get_all_documents()` now calls `self.vector_store.get_all_documents()` (fixed in Phase 1, commit ff13637). Hybrid BM25+vector retrieval with Reciprocal Rank Fusion is fully operational.
-- [ ] **[HIGH]** Real browser automation with anti-bot evasion — Basic HTTP browse_web tool only. Playwright/Puppeteer integration pending.
+- [x] **[HIGH]** Real browser automation with anti-bot evasion — `src/browser_agent.py` Playwright backend now applies stealth context controls (UA rotation, language/headers, webdriver masking, human-like jitter) across navigate/click/fill flows.
 - [x] **[HIGH]** Citation attribution for RAG responses — `src/rag/citation.py`: per-sentence attribution using cross-encoder (sentence-transformers ms-marco-MiniLM) or BM25 fallback. Inline citation superscripts and footnotes. `attribute_response(response, chunks)`, `format_cited_response()`. API: `POST /rag/cite`.
-- [ ] **[HIGH]** Multi-agent orchestration with async message passing — Synchronous sub-agent calls only. No async blackboard or consensus protocol.
+- [x] **[HIGH]** Multi-agent orchestration with async message passing — Async consumer APIs added on top of `src/agent_bus.py`: long-poll `GET /agents/bus/consume` and websocket `WS /agents/bus/ws/{agent_id}` for non-blocking message delivery.
 - [x] **[HIGH]** Agent memory with forgetting curves — `src/memory/forgetting.py`: Ebbinghaus exponential decay model (`compute_strength()`), SM-2-inspired spaced repetition intervals, `record_recall()` to boost strength, background consolidation worker with configurable interval, memory health report. Admin API: `GET /admin/memory/health`, `POST /admin/memory/consolidate`.
 - [x] **[HIGH]** Structured output enforcement (JSON Schema) — `src/structured_output.py`: JSON extraction with fallback patterns, jsonschema validation, LLM-based repair loop (max 2 attempts), Outlines grammar-constrained generation (optional). `generate_structured(prompt, schema)`, `validate_output(output, schema)`. API: `POST /structured-output/generate`, `POST /structured-output/validate`.
 - [x] **[MEDIUM]** Tool-use policy per agent persona — `src/agent_tool_policy.py`: allowlist/denylist/unrestricted modes, per-tool HITL requirements, max-calls-per-session limit, 5 pre-built policies (readonly_agent, coding_agent, research_agent, admin_agent, customer_support_agent). DB-persisted. `check_tool_allowed()`, `requires_approval()`. Admin API: `GET/POST /admin/tool-policies`.
-- [ ] **[MEDIUM]** Agent chaining with data lineage tracking — No provenance graph.
+- [x] **[MEDIUM]** Agent chaining with data lineage tracking — Provenance graph implemented in `src/agent_lineage.py` with endpoints `POST /agents/lineage/links`, `GET /agents/lineage/query`, `GET /agents/lineage/graph/{root_task_id}`; `/autonomy/execute` now emits lineage edges from trace to spawned subtasks plus sequential links.
 
 ### 26.8 Data and Knowledge
 
@@ -1296,7 +1296,7 @@ harden these to full production level:
 - [x] **[HIGH]** Multimodal document ingestion — `src/vision.py` for image analysis. `src/audio.py` for audio transcription. `yt-dlp` + `youtube-transcript-api` for video. `python-docx`, `openpyxl`, `python-pptx` for Office docs. RAG pipeline accepts all these via tool extraction.
 - [x] **[HIGH]** Knowledge graph integration — `src/knowledge_graph.py`: graph-based entity/relationship store. `kg_to_context_string()` injects graph context into prompts. Relationship-aware retrieval complements vector search.
 - [x] **[MEDIUM]** Incremental index updates — `src/rag/incremental_index.py`: SHA-256/MD5 content hashing per document, DB-persisted hash registry, batch upsert skipping unchanged documents, stale document detection. `incremental_upsert(documents, collection)`, `detect_stale_documents()`. API: `GET /rag/index/{collection}/stats`, `POST /rag/index/{collection}/invalidate/{doc_id}`.
-- [ ] **[MEDIUM]** Cross-lingual retrieval — No multilingual embedding model (mE5, LaBSE). English-only recall.
+- [x] **[MEDIUM]** Cross-lingual retrieval — Multilingual embedding mode implemented in `src/rag/embeddings.py` via `RAG_EMBED_MULTILINGUAL=1` with default model `intfloat/multilingual-e5-base` (override via `RAG_EMBED_ST_MODEL`), and auto-backend now prioritizes sentence-transformers in multilingual mode.
 
 ---
 

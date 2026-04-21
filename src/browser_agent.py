@@ -15,6 +15,7 @@ import base64
 import json
 import logging
 import os
+import random
 import re
 import time
 import uuid
@@ -28,6 +29,37 @@ logger = logging.getLogger(__name__)
 BROWSER_BACKEND    = os.getenv("BROWSER_BACKEND", "auto")   # auto | playwright | selenium | requests
 BROWSER_HEADLESS   = os.getenv("BROWSER_HEADLESS", "true").lower() == "true"
 BROWSER_TIMEOUT_MS = int(os.getenv("BROWSER_TIMEOUT_MS", "30000"))
+BROWSER_STEALTH    = os.getenv("BROWSER_STEALTH", "true").lower() == "true"
+
+_STEALTH_USER_AGENTS = [
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+]
+
+
+async def _new_stealth_page(browser):
+    user_agent = random.choice(_STEALTH_USER_AGENTS)
+    context = await browser.new_context(
+        user_agent=user_agent,
+        locale="en-US",
+        viewport={"width": random.choice([1366, 1440, 1536]), "height": random.choice([768, 810, 864])},
+        extra_http_headers={
+            "Accept-Language": "en-US,en;q=0.9",
+            "DNT": "1",
+        },
+    )
+    page = await context.new_page()
+    if BROWSER_STEALTH:
+        await page.add_init_script(
+            """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = window.chrome || { runtime: {} };
+            Object.defineProperty(navigator, 'plugins', {get: () => [1,2,3]});
+            Object.defineProperty(navigator, 'languages', {get: () => ['en-US','en']});
+            """
+        )
+    return context, page
 
 
 # ── Session model ─────────────────────────────────────────────────────────────
@@ -95,11 +127,12 @@ async def _playwright_navigate(url: str) -> dict:
         from playwright.async_api import async_playwright  # type: ignore
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=BROWSER_HEADLESS)
-            page    = await browser.new_page()
+            context, page = await _new_stealth_page(browser)
             resp    = await page.goto(url, timeout=BROWSER_TIMEOUT_MS)
             title   = await page.title()
             content = await page.content()
             screenshot = await page.screenshot(type="jpeg", quality=70)
+            await context.close()
             await browser.close()
             return {
                 "ok":             True,
@@ -119,13 +152,15 @@ async def _playwright_click(url: str, selector: str) -> dict:
         from playwright.async_api import async_playwright  # type: ignore
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=BROWSER_HEADLESS)
-            page    = await browser.new_page()
+            context, page = await _new_stealth_page(browser)
             await page.goto(url, timeout=BROWSER_TIMEOUT_MS)
+            await page.wait_for_timeout(random.randint(120, 360))
             await page.click(selector, timeout=BROWSER_TIMEOUT_MS)
             await page.wait_for_load_state("networkidle")
             title      = await page.title()
             new_url    = page.url
             screenshot = await page.screenshot(type="jpeg", quality=70)
+            await context.close()
             await browser.close()
             return {
                 "ok":             True,
@@ -145,19 +180,22 @@ async def _playwright_fill_form(url: str, fields: dict[str, str],
         from playwright.async_api import async_playwright  # type: ignore
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=BROWSER_HEADLESS)
-            page    = await browser.new_page()
+            context, page = await _new_stealth_page(browser)
             await page.goto(url, timeout=BROWSER_TIMEOUT_MS)
             filled = []
             for selector, value in fields.items():
                 try:
+                    await page.wait_for_timeout(random.randint(80, 220))
                     await page.fill(selector, value, timeout=5000)
                     filled.append(selector)
                 except Exception as e:
                     logger.warning("Fill failed for %s: %s", selector, e)
             if submit_selector:
+                await page.wait_for_timeout(random.randint(150, 320))
                 await page.click(submit_selector, timeout=BROWSER_TIMEOUT_MS)
                 await page.wait_for_load_state("networkidle")
             screenshot = await page.screenshot(type="jpeg", quality=70)
+            await context.close()
             await browser.close()
             return {
                 "ok":             True,

@@ -180,27 +180,33 @@ def _worker_loop() -> None:
             time.sleep(min(2.0, delivery.next_attempt_at - now))
             continue
 
-        delivery.attempt += 1
-        success, error = _deliver_once(delivery)
-
-        if success:
-            delivery.status = "delivered"
-            delivery.delivered_at = datetime.now(timezone.utc).isoformat()
-            logger.info("Webhook delivered: %s → %s (attempt %d)",
-                        delivery.event_type, delivery.url, delivery.attempt)
-        else:
-            delivery.last_error = error
-            logger.warning("Webhook delivery failed: %s (attempt %d/%d): %s",
-                           delivery.delivery_id, delivery.attempt, delivery.max_attempts, error)
-            if delivery.attempt >= delivery.max_attempts:
-                delivery.status = "dlq"
-                logger.error("Webhook moved to DLQ: %s → %s", delivery.event_type, delivery.url)
-            else:
-                delivery.next_attempt_at = time.time() + _backoff(delivery.attempt)
-                _delivery_queue.put((delivery.next_attempt_at, delivery))
-
-        _save_delivery(delivery)
+        _process_delivery_once(delivery)
         _delivery_queue.task_done()
+
+
+def _process_delivery_once(delivery: WebhookDelivery) -> WebhookDelivery:
+    """Process one delivery attempt and mutate status/retry fields."""
+    delivery.attempt += 1
+    success, error = _deliver_once(delivery)
+
+    if success:
+        delivery.status = "delivered"
+        delivery.delivered_at = datetime.now(timezone.utc).isoformat()
+        logger.info("Webhook delivered: %s -> %s (attempt %d)",
+                    delivery.event_type, delivery.url, delivery.attempt)
+    else:
+        delivery.last_error = error
+        logger.warning("Webhook delivery failed: %s (attempt %d/%d): %s",
+                       delivery.delivery_id, delivery.attempt, delivery.max_attempts, error)
+        if delivery.attempt >= delivery.max_attempts:
+            delivery.status = "dlq"
+            logger.error("Webhook moved to DLQ: %s -> %s", delivery.event_type, delivery.url)
+        else:
+            delivery.next_attempt_at = time.time() + _backoff(delivery.attempt)
+            _delivery_queue.put((delivery.next_attempt_at, delivery))
+
+    _save_delivery(delivery)
+    return delivery
 
 
 # ── Public API ────────────────────────────────────────────────────────────────

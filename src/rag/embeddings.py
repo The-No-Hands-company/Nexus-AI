@@ -28,6 +28,9 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+_DEFAULT_ST_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+_DEFAULT_MULTILINGUAL_ST_MODEL = "intfloat/multilingual-e5-base"
+
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
@@ -45,7 +48,8 @@ class EmbeddingConfig:
     ollama_model: str = "nomic-embed-text"
 
     # sentence-transformers settings
-    st_model_name: str = "sentence-transformers/all-MiniLM-L6-v2"
+    st_model_name: str = _DEFAULT_ST_MODEL
+    multilingual_preferred: bool = False
     device: str = "cpu"
 
     # Shared settings
@@ -57,6 +61,23 @@ class EmbeddingConfig:
 
     # LRU cache for repeated texts (0 = disabled)
     cache_size: int = 4096
+
+    def __post_init__(self):
+        # Environment overrides keep runtime config simple and deployment-friendly.
+        backend_env = (os.getenv("RAG_EMBED_BACKEND") or "").strip().lower()
+        if backend_env:
+            self.backend = backend_env
+
+        st_model_env = (os.getenv("RAG_EMBED_ST_MODEL") or "").strip()
+        if st_model_env:
+            self.st_model_name = st_model_env
+
+        multilingual_env = (os.getenv("RAG_EMBED_MULTILINGUAL") or "").strip().lower()
+        if multilingual_env in {"1", "true", "yes", "on"}:
+            self.multilingual_preferred = True
+
+        if self.multilingual_preferred and self.st_model_name == _DEFAULT_ST_MODEL:
+            self.st_model_name = _DEFAULT_MULTILINGUAL_ST_MODEL
 
 
 # ---------------------------------------------------------------------------
@@ -201,19 +222,33 @@ class EmbeddingModel:
 
     def _try_auto(self):
         """Auto-detect the best available backend."""
-        # 1. Try Ollama (preferred — zero extra Python deps)
-        try:
-            self._init_ollama()
-            return
-        except Exception as exc:
-            logger.debug("Ollama embedding unavailable: %s", exc)
+        if self.config.multilingual_preferred:
+            # Cross-lingual mode prioritizes multilingual sentence-transformers models.
+            try:
+                self._init_st()
+                return
+            except Exception as exc:
+                logger.debug("multilingual sentence-transformers unavailable: %s", exc)
 
-        # 2. Try sentence-transformers
-        try:
-            self._init_st()
-            return
-        except Exception as exc:
-            logger.debug("sentence-transformers unavailable: %s", exc)
+            try:
+                self._init_ollama()
+                return
+            except Exception as exc:
+                logger.debug("Ollama embedding unavailable: %s", exc)
+        else:
+            # 1. Try Ollama (preferred — zero extra Python deps)
+            try:
+                self._init_ollama()
+                return
+            except Exception as exc:
+                logger.debug("Ollama embedding unavailable: %s", exc)
+
+            # 2. Try sentence-transformers
+            try:
+                self._init_st()
+                return
+            except Exception as exc:
+                logger.debug("sentence-transformers unavailable: %s", exc)
 
         # 3. Hash fallback (always available)
         logger.warning(
