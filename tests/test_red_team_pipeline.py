@@ -5,7 +5,17 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.safety.prompt_injection import detect_indirect_injection, detect_prompt_injection
+from fastapi.testclient import TestClient
+
+from src.app import app
+from src.safety.prompt_injection import (
+    benchmark_injection_detection,
+    detect_indirect_injection,
+    detect_prompt_injection,
+)
+
+
+client = TestClient(app)
 
 
 def test_red_team_direct_prompt_injection_corpus_detected():
@@ -36,3 +46,18 @@ def test_red_team_indirect_tool_output_injection_detected():
     assert res.detected is True
     assert res.risk_score > 0.0
     assert len(res.patterns_matched) >= 1
+
+
+def test_prompt_injection_benchmark_corpus_has_high_coverage():
+    result = benchmark_injection_detection()
+    assert result["total"] >= 8
+    assert result["coverage"] >= 0.9
+
+
+def test_prompt_injection_benchmark_endpoint_reports_release_gate():
+    response = client.post("/safety/prompt-injection/benchmark", json={})
+    assert response.status_code == 200
+    payload = response.json()
+    assert "benchmark" in payload
+    assert payload["threshold"] == 0.9
+    assert payload["release_gate_pass"] is True

@@ -2464,6 +2464,18 @@ def _ft_multitask_adapter_map_key() -> str:
     return "ft.multitask_adapter_map.v1"
 
 
+def _ft_adapter_proof_reports_key() -> str:
+    return "ft.adapter_proof_reports.v1"
+
+
+def _validation_reports_key() -> str:
+    return "validation.program.reports.v1"
+
+
+def _validation_baselines_key() -> str:
+    return "validation.program.baselines.v1"
+
+
 def _ft_sample_curation_key() -> str:
     return "ft.sample_curation.v1"
 
@@ -2486,14 +2498,84 @@ def save_lora_adapter_version(
     tags: list | None = None,
     status: str = "ready",
 ) -> dict:
+    import os
+    import shutil
+    import json as _json
+    import hashlib
+
+    def _materialize_adapter_artifact(
+        adapter_key: str,
+        version_key: str,
+        source_uri: str,
+        source_metrics: dict,
+        source_provenance: dict,
+    ) -> str:
+        def _local_source_path(raw_uri: str) -> Path | None:
+            raw = str(raw_uri or "").strip()
+            if not raw:
+                return None
+            if raw.startswith("file://"):
+                return Path(raw[7:])
+            if raw.startswith("inline://") or "://" in raw:
+                return None
+            return Path(raw)
+
+        root = os.getenv("ADAPTER_STORE_DIR", "/tmp/nexus_adapters")
+        target_dir = os.path.join(root, "registry", adapter_key.replace("/", "-"), version_key.replace("/", "-"))
+        os.makedirs(target_dir, exist_ok=True)
+        source_path = _local_source_path(source_uri)
+        copied_files = 0
+
+        # For local paths, snapshot checkpoint contents so version diffs can compare real artifacts.
+        if source_path is not None and source_path.exists():
+            payload_dir = os.path.join(target_dir, "payload")
+            if source_path.is_file():
+                os.makedirs(payload_dir, exist_ok=True)
+                shutil.copy2(source_path, os.path.join(payload_dir, source_path.name))
+                copied_files = 1
+            elif source_path.is_dir():
+                if os.path.isdir(payload_dir):
+                    shutil.rmtree(payload_dir)
+                shutil.copytree(source_path, payload_dir)
+                copied_files = sum(1 for candidate in Path(payload_dir).rglob("*") if candidate.is_file())
+
+        manifest = {
+            "adapter_id": adapter_key,
+            "version": version_key,
+            "source_checkpoint_uri": source_uri,
+            "metrics": source_metrics,
+            "provenance": source_provenance,
+            "materialized_at": _now_iso(),
+            "copied_files": copied_files,
+        }
+        payload = _json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        manifest["manifest_sha256"] = digest
+        with open(os.path.join(target_dir, "manifest.json"), "w", encoding="utf-8") as handle:
+            _json.dump(manifest, handle, ensure_ascii=False, sort_keys=True, indent=2)
+        return target_dir
+
     adapters = _load_json_pref(_ft_adapters_key(), [])
+    normalized_adapter_id = str(adapter_id).strip()
+    normalized_version = str(version).strip()
+    normalized_checkpoint_uri = str(checkpoint_uri).strip()
+    normalized_metrics = dict(metrics or {})
+    normalized_provenance = dict(provenance or {})
+    artifact_uri = _materialize_adapter_artifact(
+        adapter_key=normalized_adapter_id,
+        version_key=normalized_version,
+        source_uri=normalized_checkpoint_uri,
+        source_metrics=normalized_metrics,
+        source_provenance=normalized_provenance,
+    )
     rec = {
-        "adapter_id": str(adapter_id).strip(),
-        "version": str(version).strip(),
+        "adapter_id": normalized_adapter_id,
+        "version": normalized_version,
         "base_model": str(base_model).strip(),
-        "checkpoint_uri": str(checkpoint_uri).strip(),
-        "metrics": dict(metrics or {}),
-        "provenance": dict(provenance or {}),
+        "checkpoint_uri": normalized_checkpoint_uri,
+        "artifact_uri": artifact_uri,
+        "metrics": normalized_metrics,
+        "provenance": normalized_provenance,
         "tags": [str(t) for t in (tags or [])],
         "status": str(status or "ready"),
         "created_at": _now_iso(),
@@ -2531,14 +2613,104 @@ def get_lora_adapter_version(adapter_id: str, version: str = "") -> dict | None:
     return None
 
 
+def update_lora_adapter_version(adapter_id: str, version: str, updates: dict | None = None) -> dict | None:
+    adapters = _load_json_pref(_ft_adapters_key(), [])
+    normalized_adapter_id = str(adapter_id).strip()
+    normalized_version = str(version).strip()
+    payload = dict(updates or {})
+    updated_row = None
+    for idx, row in enumerate(adapters):
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("adapter_id") or "") != normalized_adapter_id:
+            continue
+        if str(row.get("version") or "") != normalized_version:
+            continue
+        merged = dict(row)
+        merged.update(payload)
+        merged["updated_at"] = _now_iso()
+        adapters[idx] = merged
+        updated_row = merged
+        break
+    if updated_row is None:
+        return None
+    _save_json_pref(_ft_adapters_key(), adapters[-5000:])
+    return updated_row
+
+
 def compare_lora_adapter_versions(adapter_id: str, left_version: str, right_version: str) -> dict | None:
+    import hashlib
+    from pathlib import Path
+
+    def _local_path_from_uri(uri: str) -> Path | None:
+        raw = str(uri or "").strip()
+        if not raw:
+            return None
+        if raw.startswith("file://"):
+            return Path(raw[7:])
+        if raw.startswith("inline://") or "://" in raw:
+            return None
+        return Path(raw)
+
+    def _sha256_file(path: Path) -> str:
+        hasher = hashlib.sha256()
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _artifact_manifest(uri: str) -> dict:
+        manifest = {
+            "checkpoint_uri": str(uri or ""),
+            "exists": False,
+            "kind": "unresolved",
+            "file_count": 0,
+            "total_bytes": 0,
+            "sha256": "",
+        }
+        path = _local_path_from_uri(uri)
+        if path is None:
+            manifest["kind"] = "non_local"
+            return manifest
+        if not path.exists():
+            manifest["kind"] = "missing"
+            return manifest
+        manifest["exists"] = True
+        if path.is_file():
+            manifest["kind"] = "file"
+            manifest["file_count"] = 1
+            manifest["total_bytes"] = int(path.stat().st_size)
+            manifest["sha256"] = _sha256_file(path)
+            return manifest
+
+        digest = hashlib.sha256()
+        total_bytes = 0
+        file_count = 0
+        for child in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
+            size = int(child.stat().st_size)
+            rel_path = child.relative_to(path).as_posix()
+            if rel_path == "manifest.json":
+                # Manifest metadata is bookkeeping, not adapter payload.
+                continue
+            file_hash = _sha256_file(child)
+            digest.update(f"{rel_path}:{size}:{file_hash}".encode("utf-8"))
+            file_count += 1
+            total_bytes += size
+        manifest["kind"] = "directory"
+        manifest["file_count"] = file_count
+        manifest["total_bytes"] = total_bytes
+        manifest["sha256"] = digest.hexdigest() if file_count else ""
+        return manifest
+
     left = get_lora_adapter_version(adapter_id, left_version)
     right = get_lora_adapter_version(adapter_id, right_version)
     if left is None or right is None:
         return None
 
-    left_metrics = left.get("metrics") if isinstance(left.get("metrics"), dict) else {}
-    right_metrics = right.get("metrics") if isinstance(right.get("metrics"), dict) else {}
+    left_metrics_raw = left.get("metrics")
+    right_metrics_raw = right.get("metrics")
+    left_metrics = left_metrics_raw if isinstance(left_metrics_raw, dict) else {}
+    right_metrics = right_metrics_raw if isinstance(right_metrics_raw, dict) else {}
     keys = sorted(set(left_metrics.keys()) | set(right_metrics.keys()))
     deltas = {}
     for key in keys:
@@ -2547,12 +2719,118 @@ def compare_lora_adapter_versions(adapter_id: str, left_version: str, right_vers
         if isinstance(lv, (int, float)) and isinstance(rv, (int, float)):
             deltas[key] = round(float(rv) - float(lv), 6)
 
+    left_artifact_uri = str(left.get("artifact_uri") or left.get("checkpoint_uri") or "")
+    right_artifact_uri = str(right.get("artifact_uri") or right.get("checkpoint_uri") or "")
+    left_manifest = _artifact_manifest(left_artifact_uri)
+    right_manifest = _artifact_manifest(right_artifact_uri)
+
     return {
         "adapter_id": adapter_id,
         "left": left,
         "right": right,
         "metric_delta": deltas,
+        "artifact_delta": {
+            "same_artifact": bool(left_manifest.get("sha256") and left_manifest.get("sha256") == right_manifest.get("sha256")),
+            "left": left_manifest,
+            "right": right_manifest,
+            "file_count_delta": int(right_manifest.get("file_count") or 0) - int(left_manifest.get("file_count") or 0),
+            "total_bytes_delta": int(right_manifest.get("total_bytes") or 0) - int(left_manifest.get("total_bytes") or 0),
+        },
     }
+
+
+def save_adapter_proof_report(report: dict) -> dict:
+    rows = _load_json_pref(_ft_adapter_proof_reports_key(), [])
+    item = dict(report or {})
+    item.setdefault("report_id", f"proof_{uuid.uuid4().hex[:12]}")
+    item.setdefault("created_at", _now_iso())
+    item["adapter_id"] = str(item.get("adapter_id") or "").strip()
+    item["adapter_version"] = str(item.get("adapter_version") or "").strip()
+    rows = [
+        row for row in rows
+        if not (
+            isinstance(row, dict)
+            and str(row.get("report_id") or "") == item["report_id"]
+        )
+    ]
+    rows.append(item)
+    _save_json_pref(_ft_adapter_proof_reports_key(), rows[-1000:])
+    return item
+
+
+def list_adapter_proof_reports(adapter_id: str = "", adapter_version: str = "", limit: int = 100) -> list[dict]:
+    rows = _load_json_pref(_ft_adapter_proof_reports_key(), [])
+    if not isinstance(rows, list):
+        return []
+    filtered = []
+    adapter_q = str(adapter_id or "").strip()
+    version_q = str(adapter_version or "").strip()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if adapter_q and str(row.get("adapter_id") or "") != adapter_q:
+            continue
+        if version_q and str(row.get("adapter_version") or "") != version_q:
+            continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    safe_limit = max(1, min(int(limit or 100), 1000))
+    return filtered[:safe_limit]
+
+
+def get_adapter_proof_report(report_id: str) -> dict | None:
+    rid = str(report_id or "").strip()
+    if not rid:
+        return None
+    for row in list_adapter_proof_reports(limit=1000):
+        if str(row.get("report_id") or "") == rid:
+            return row
+    return None
+
+
+def save_validation_report(report: dict) -> dict:
+    rows = _load_json_pref(_validation_reports_key(), [])
+    item = dict(report or {})
+    item.setdefault("report_id", f"validation_{uuid.uuid4().hex[:12]}")
+    item.setdefault("created_at", _now_iso())
+    rows = [
+        row for row in rows
+        if not (
+            isinstance(row, dict)
+            and str(row.get("report_id") or "") == item["report_id"]
+        )
+    ]
+    rows.append(item)
+    _save_json_pref(_validation_reports_key(), rows[-1000:])
+    return item
+
+
+def list_validation_reports(program: str = "", limit: int = 100) -> list[dict]:
+    rows = _load_json_pref(_validation_reports_key(), [])
+    if not isinstance(rows, list):
+        return []
+    filtered = []
+    program_q = str(program or "").strip().lower()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if program_q and str(row.get("program") or "").strip().lower() != program_q:
+            continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    safe_limit = max(1, min(int(limit or 100), 1000))
+    return filtered[:safe_limit]
+
+
+def load_validation_baselines() -> dict:
+    rows = _load_json_pref(_validation_baselines_key(), {})
+    return rows if isinstance(rows, dict) else {}
+
+
+def save_validation_baselines(baselines: dict) -> dict:
+    payload = baselines if isinstance(baselines, dict) else {}
+    _save_json_pref(_validation_baselines_key(), payload)
+    return payload
 
 
 def set_active_lora_adapter(adapter_id: str, version: str, target_model: str = "") -> dict:
@@ -2580,6 +2858,7 @@ def save_ft_dataset_version(
     row_count: int,
     provenance: dict | None = None,
     checksum: str = "",
+    preview_rows: list[dict] | None = None,
 ) -> dict:
     versions = _load_json_pref(_ft_dataset_versions_key(), [])
     rec = {
@@ -2589,6 +2868,7 @@ def save_ft_dataset_version(
         "row_count": int(row_count),
         "provenance": dict(provenance or {}),
         "checksum": str(checksum or ""),
+        "preview_rows": [dict(row) for row in (preview_rows or [])[:200] if isinstance(row, dict)],
         "created_at": _now_iso(),
     }
     versions = [v for v in versions if str(v.get("dataset_id") or "") != rec["dataset_id"]]

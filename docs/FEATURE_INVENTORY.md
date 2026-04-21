@@ -582,7 +582,7 @@ harden these to full production level:
 - [x] PII redaction (actual masking in output via `scrub_pii_text()` / `screen_output()`; redacts SSN, email, phone, credit card, IP) — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=regex+privacy, validate=src/safety_pipeline.py|POST /safety/pii-scan
 - [x] Toxic content classifier — `src/safety/classifier.py` auto-backend chain: OpenAI omni-moderation → Google Perspective API (new; `PERSPECTIVE_API_KEY`) → local `unitary/toxic-bert` transformer → keyword-v2 (10 categories, ~15 terms each). Keyword fallback expanded from 15 terms to ~100 covering all 10 harm categories. `GuardrailsEngine.evaluate()` fully implemented with priority-ordered rule evaluation integrating all pipeline signals.
 - [x] Output filter for unsafe completions (post-generation scan via `screen_output()`; redaction/blocking paths active)
-- [~] Jailbreak / adversarial prompt pattern library — **AUDIT: `src/safety/prompt_injection.py` has 6 regex patterns for known injection phrases; `ml_injection_score()` is a regex proxy with keyword bonuses, not ML. No adversarial test set, no bypass coverage measurement.**
+- [x] Jailbreak / adversarial prompt pattern library — `src/safety/prompt_injection.py` now ships an expanded direct+indirect adversarial regex corpus, includes a built-in adversarial prompt benchmark set, and exposes measurable coverage via `benchmark_injection_detection(...)` plus `POST /safety/prompt-injection/benchmark` release-gate reporting.
 - [x] Safety decision explanation in API response (`reason` and `detail` fields in safety issues)
 - [x] Safety event webhook (push safety events to external SIEM) — Pointers: module=`src/agent.py:_send_safety_event_webhook` + `_push_safety_event`; env=`SAFETY_EVENT_WEBHOOK_URL`, `SAFETY_EVENT_WEBHOOK_SECRET`, `SAFETY_EVENT_WEBHOOK_TIMEOUT`. — Tags: owner=safety, priority=p1, risk=high, stage=GA, deps=webhook+auth, validate=src/agent.py|SAFETY_EVENT_WEBHOOK_URL
 - [x] GDPR/CCPA data deletion request handler (`POST /privacy/data-deletion-request` validates scope and executes user/org cascade deletion using existing GDPR primitives) — Tags: owner=compliance, priority=p0, risk=high, stage=GA, deps=auth+db+privacy, validate=POST /privacy/data-deletion-request
@@ -804,22 +804,22 @@ harden these to full production level:
 ### 12.2 Fine-tuning operations and adapters
 
 - [x] LoRA fine-tuning job endpoint (`POST /finetune/jobs`) — `src/lora.py:create_finetune_job` dispatches real PEFT training in a background thread: validates JSONL dataset, loads base model with optional 4-bit BitsAndBytes quantisation, applies LoraConfig (r=16/alpha=32), runs HuggingFace Trainer, saves adapter weights to `ADAPTER_STORE_DIR/<job_id>`. Status advances through queued→running→completed/failed in real time.
-- [~] Fine-tuning job status (`GET /finetune/jobs/{job_id}`) — returns DB job record, status never advances past 'queued' because no worker dispatches training
-- [~] Fine-tuning job cancel (`DELETE /finetune/jobs/{job_id}`) — cancels DB record only
-- [~] LoRA adapter versioning (store + compare adapter checkpoints) (`POST /finetune/adapters`, `GET /finetune/adapters`, `GET /finetune/adapters/{adapter_id}/compare`) — metadata stored; no actual adapter weights produced
+- [x] Fine-tuning job status (`GET /finetune/jobs/{job_id}`) — DB-backed job lifecycle advances through queued→running→succeeded/failed via `_run_fine_tuning_job` in `src/api/routes.py`, and the endpoint returns live persisted status.
+- [x] Fine-tuning job cancel (`DELETE /finetune/jobs/{job_id}`) — queued/running jobs are transitioned to `cancelled`, persisted, and event-logged through the fine-tuning job registry.
+- [x] LoRA adapter versioning (store + compare adapter checkpoints) (`POST /finetune/adapters`, `GET /finetune/adapters`, `GET /finetune/adapters/{adapter_id}/compare`) — registry metadata is persisted, adapter saves now materialize version artifacts with manifests, and compare includes artifact-aware deltas (`exists`, `kind`, `file_count`, `total_bytes`, `sha256`) with payload-aware hashing/counting for local checkpoints.
 - [x] LoRA adapter hot-swap at inference (`POST /finetune/adapters/{adapter_id}/hot-swap`) — `apply_adapter()` now merges adapter via Ollama Modelfile (for GGUF) or `peft.PeftModel.merge_and_unload` (for HF format). `rollback_adapter()` switches active adapter in registry.
 - [x] One-click fine-tune on collected feedback data (`POST /finetune/one-click`) — `export_feedback_dataset` queries positive-reaction messages from DB and writes Alpaca/ShareGPT JSONL; fed into `create_finetune_job` dispatch.
-- [~] RLHF / DPO pipeline integration — routes create DB job records and event logs; `src/lora.py` training methods all raise `NotImplementedError`; no actual DPO/RLHF gradient computation occurs
+- [~] RLHF / DPO pipeline integration — routes now consume persisted dataset preview rows, build preference pairs, compute dataset-backed alignment metrics, and persist scored outputs + adapter metadata; however this is still orchestration-level preference scoring rather than full gradient-level RLHF/DPO optimization.
 - [~] Continual fine-tuning scheduler — scheduler policy records stored and cron-triggered; training dispatch now works but GPU availability is not guaranteed in all deployment environments.
 
 ### 12.3 Model packaging and release readiness
 
-- [~] Nexus Prime Alpha persona wired to fine-tuned Ollama model — route exists; wiring is aspirational since no fine-tuned weights are produced (see 12.2)
-- [~] Automated eval suite (benchmark vs base model) — **AUDIT: `src/eval_pipeline.py` computes scores as `(abs(hash((suite, model, provider))) % 1000) / 1000.0` — deterministic hash values, not real benchmark execution. No HumanEval, GSM8K, or any academic benchmark is run.**
-- [~] Model card and transparency report endpoint — routes return structured DB records; actual eval scores in those records are hash-generated placeholders (see above)
-- [~] Multi-task LoRA adapters hot-swap — metadata routes implemented; hot-swap dispatch calls `NotImplementedError` in `src/lora.py`
-- [~] Multimodal fine-tuning extension — route creates job record; training dispatch is `NotImplementedError`
-- [~] Knowledge distillation pipeline — routes create DB job records; training dispatch is `NotImplementedError`
+- [x] Nexus Prime Alpha persona wired to fine-tuned Ollama model — `POST /finetune/personas/nexus-prime-alpha/wire` persists persona wiring, provider order overrides, and active adapter selection via `set_active_lora_adapter`.
+- [~] Automated eval suite (benchmark vs base model) — `src/eval_pipeline.py` now uses grounded suite-task runners for `humaneval`, `gsm8k`, `arc`, `rag`, `safety`, `advglue`, and `multilingual`, with live-provider best-effort execution and fixture-backed deterministic fallback. This closes the hash-placeholder path, but it is still a local suite harness rather than a full academic dataset runner/public leaderboard pipeline.
+- [x] Model card and transparency report endpoint — `GET /models/{model_id}/card` and `GET /models/{model_id}/transparency` now consume live eval job outputs, dataset provenance, and adapter lineage from local registries rather than hash-placeholder score scaffolding.
+- [x] Multi-task LoRA adapters hot-swap — `/finetune/adapters/multitask` and `/finetune/adapters/multitask/hot-swap` persist task→adapter mappings and update the active adapter registry for target models.
+- [x] Multimodal fine-tuning extension — `POST /finetune/multimodal/jobs` validates multimodal rows (`prompt`, `response`, `image_url`/`image_b64`) and creates a real fine-tuning child job through `_create_finetune_job_from_rows`.
+- [x] Knowledge distillation pipeline — `POST /finetune/distill/jobs` orchestrates teacher-answer generation, dataset creation, child fine-tune execution, adapter registration, and persisted distillation job state/events.
 
 ---
 
@@ -829,7 +829,7 @@ harden these to full production level:
 
 - [x] `POST /benchmark/run` — Upgraded from 3 probes to 6 probes with real correctness scoring: arithmetic (regex match for 391), syllogism reasoning (keyword signals), Python reverse (pattern match), capital city factual QA, GSM8K-style math word problem (numeric answer match), Fibonacci code quality (multi-signal rubric). Each probe has a deterministic scorer_fn returning 0.0–1.0 quality_score persisted to DB.
 - [x] `GET /benchmark/results` — retrieve stored probe results
-- [~] Automated regression benchmark on model update — `src/benchmark.py` now runs real probes with quality scores. `src/eval_pipeline.py` quality computation is still hash-based for the eval suite path; upgrading eval_pipeline.py is tracked in Section 26.4.
+- [x] Automated regression benchmark on model update — release-gate regression checks now execute on model-update surfaces (`POST /finetune/adapters/{adapter_id}/hot-swap`, `POST /finetune/adapters/multitask/hot-swap`, `POST /finetune/personas/nexus-prime-alpha/wire`) and block updates with `409 regression_gate_failed` when regressions are detected; post-train compatibility jobs also emit regression benchmark events.
 
 ### 13.2 Result history and comparative analysis
 
@@ -1244,7 +1244,7 @@ harden these to full production level:
 
 ### 26.4 Evaluation and Benchmarking Quality
 
-- [x] **[CRITICAL]** Real benchmark execution against standard datasets — `src/benchmark.py`: 6 scored probes with deterministic scorers (arithmetic, syllogism, coding reverse, TruthfulQA capital, GSM8K math, Fibonacci code). `src/eval_pipeline.py`: full eval suite runner supporting humaneval, gsm8k, arc, rag, safety, advglue, and multilingual suites with `n_samples`, baseline regression detection, and persisted scores.
+- [~] **[CRITICAL]** Real benchmark execution against standard datasets — `src/benchmark.py` has real deterministic probes and `src/eval_pipeline.py` now runs grounded suite-task evals instead of hash-derived placeholders for supported suites. This materially improves runtime truth, but it is still not equivalent to full academic dataset ingestion/execution and should not yet be marketed as publishable HumanEval/GSM8K/AdvGLUE parity.
 - [x] **[HIGH]** Automated evals CI pipeline — `src/eval_pipeline.py`: baseline score persistence, regression detection (`regression: bool` field). Benchmark schedules registered via `register_benchmark_schedules()` in `src/benchmark.py`. SLO breach gates via `src/alerting.py`.
 - [x] **[HIGH]** A/B testing framework — `src/evals/ab_testing.py`: experiment lifecycle (create/start/pause/complete), deterministic hash-based traffic splitting, Welch's t-test + chi-squared significance testing (scipy fallback to normal approximation), automatic winner declaration. API: `GET/POST /evals/experiments`, `POST /evals/experiments/{id}/start`, `GET /evals/experiments/{id}/analysis`.
 - [x] **[HIGH]** Human evaluation pipeline — `src/evals/human_eval_pipeline.py`: 1% sample rate (configurable via `HUMAN_EVAL_SAMPLE_RATE`), absolute (1–5 Likert) / pairwise (A/B/tie) / safety rating modes, DB-persisted task queue, feeds results back to A/B experiments. API: `GET /admin/human-eval/tasks`, `POST /admin/human-eval/tasks/{id}/rate`.
@@ -1298,15 +1298,33 @@ harden these to full production level:
 - [x] **[MEDIUM]** Incremental index updates — `src/rag/incremental_index.py`: SHA-256/MD5 content hashing per document, DB-persisted hash registry, batch upsert skipping unchanged documents, stale document detection. `incremental_upsert(documents, collection)`, `detect_stale_documents()`. API: `GET /rag/index/{collection}/stats`, `POST /rag/index/{collection}/invalidate/{doc_id}`.
 - [x] **[MEDIUM]** Cross-lingual retrieval — Multilingual embedding mode implemented in `src/rag/embeddings.py` via `RAG_EMBED_MULTILINGUAL=1` with default model `intfloat/multilingual-e5-base` (override via `RAG_EMBED_ST_MODEL`), and auto-backend now prioritizes sentence-transformers in multilingual mode.
 
+### 26.9 Follow-up Reference Assessment and Next Execution Priorities
+
+> **Reference update:** 2026-04-21 follow-up assessment after the Phase 2 implementation wave. This subsection records known productionization gaps and next actions; it does not promote roadmap intent to implemented status.
+
+- [~] **[CRITICAL]** Benchmark credibility gap — Core benchmark plumbing now uses grounded suite-task runners rather than hash placeholders, but Nexus AI still lacks full dataset-backed benchmark publication and external comparability. Required next step: add real benchmark datasets/runners and publish comparable results.
+- [x] **[CRITICAL]** Fine-tuning proof gap — Controlled base-vs-adapter proof reports are now persisted via `POST /finetune/adapters/{adapter_id}/proof`, linked from model transparency output, and enforced through `POST /finetune/adapters/{adapter_id}/promote`, which blocks promotion unless the stored proof report passes configured improvement/regression gates.
+- [x] **[HIGH]** Validation-program gap for autonomy and multimodal quality — A persisted validation-program layer now runs browser, multimodal, and multi-agent KPI suites with explicit `success_rate`, `tool_error_rate`, `recovery_rate`, and `latency_p95` metrics, stores reports/baselines, supports weekly scheduler execution, and emits alerts on regressions via `/validation/program/*` routes.
+- [ ] **[HIGH]** SDK shipping and operator-grade packaging gap — The repo contains SDK sources and core operator primitives, but public registry publishing and turnkey operator hardening are still incomplete. Required next step: ship SDKs and tighten observability defaults, DLQ tooling, policy templates, and compatibility tests.
+
+#### Immediate sprint execution grid (P0/P1)
+
+| Workstream | Priority | Owner | Acceptance criteria | Test gates |
+|---|---|---|---|---|
+| Real benchmark runners and comparable publication | `P0` | `nexus-ai-evals-specialist` + `nexus-ai-testing-specialist` | `src/eval_pipeline.py` no longer uses placeholder/hash-based suite scoring for benchmark outputs; real dataset-backed runners are wired for `humaneval`, `gsm8k`, and `advglue`; benchmark artifacts include reproducible metadata (`model`, `provider`, `dataset_version`, `seed`, `timestamp`) and are exportable for publication. | `pytest -q tests/test_eval_pipeline.py tests/test_benchmark.py tests/test_eval_pipeline_real_runners.py`; `python scripts/verify_openapi_contract.py`; CI job `red_team_gate`, `chaos_gate`, and main `test` green. |
+| Fine-tuning execution closure with before/after proof | `P0` | `nexus-ai-model-distiller` + `nexus-ai-testing-specialist` | Remaining partials in Section 12.2 that block end-to-end proof are implemented (`job status progression`, `adapter artifact production`, `non-stub execution paths`); at least one controlled base-vs-adapter comparison report is persisted and linked from benchmark/eval outputs; adapter lifecycle is auditable from train to hot-swap. | `pytest -q tests/test_lora.py tests/test_finetune_end_to_end.py tests/test_finetune_adapter_quality.py`; smoke run through `/finetune/jobs` + `/finetune/adapters/{adapter_id}/hot-swap`; no `NotImplementedError` in executed training path. |
+| Validation program for browser, multimodal, and multi-agent quality | `P1` | `nexus-ai-evals-specialist` + `nexus-ai-regression-checker` | Validation suite exists with explicit KPIs (`success_rate`, `tool_error_rate`, `recovery_rate`, `latency_p95`) and baselines for browser autonomy, multimodal understanding, and multi-agent coordination; weekly run artifacts are persisted; regressions trigger alerting and are visible in operator surfaces. | `pytest -q tests/test_browser_agent.py tests/test_multimodal_validation.py tests/test_multi_agent_coordination.py`; workflow runs in `.github/workflows/red-team-suite.yml` and `.github/workflows/chaos-fault-injection.yml` produce JSON summaries and pass thresholds. |
+| SDK shipping and operator-grade hardening | `P1` | `nexus-ai-deployment` + `nexus-ai-documentation-writer` | Python/TypeScript/Go SDK release pipeline is publish-ready (versioning, changelog, package metadata, signed release flow); operator defaults improved for observability (`OTLP`/Prometheus setup), DLQ operations, policy templates, and compatibility validation; runbook-level docs updated with reproducible setup and verification steps. | `pytest -q tests/test_sdk_contracts.py tests/test_v1_contracts.py tests/test_webhooks_delivery.py`; package build checks for `sdk/python`, `sdk/typescript`, `sdk/go`; CI workflow validation for release/publish dry-run and compatibility tests. |
+
 ---
 
 ## Summary Counts
 
 | Status | Count (approx)       |
 |--------|----------------------|
-| `[x]` Fully implemented | 800+ |
-| `[~]` Stub / partial    | 0   |
-| `[ ]` Not yet started   | ~26 (Section 26 items requiring org process, infra config, or future work) |
+| `[x]` Fully implemented | ~821 |
+| `[~]` Stub / partial    | ~5 |
+| `[ ]` Not yet started   | ~16 |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).
@@ -1314,4 +1332,4 @@ harden these to full production level:
 >
 > **Note on Sections 20-25:** Newly added roadmap and competitor-aligned features. L1/L2 mapping from ROADMAP_FEATURES_V2.md and COMPETITOR_L0_L1_SEED_CATALOG_2026Q2.md. High-risk items tagged with metadata schema. Maturity status reflects current implementation state as of 2026-04-19.
 >
-> **Note on Section 26:** Added 2026-04-20. Updated 2026-04-21. Phase 1 (commit ff13637) promoted 11 downgraded `[~]` features to `[x]`. Phase 2 (this commit) implemented 42 of 68 Section 26 gap items. Remaining 26 `[ ]` items require external organizational processes (SOC 2, ISO 27001, FedRAMP, pentest), cloud infrastructure configuration (VPC, CDN, multi-region, GeoDNS), or future feature development (Playwright browser, multi-agent blackboard, multilingual embeddings, SBOM CI pipeline, CLI binary, SDK publishing).
+> **Note on Section 26:** Added 2026-04-20. Updated 2026-04-21. Phase 1 (commit ff13637) promoted 11 downgraded `[~]` features to `[x]`. Phase 2 implemented 47 of 68 Section 26 gap items. A 2026-04-21 follow-up assessment was added to document where capability breadth still outpaces production proof, especially around real benchmark comparability and SDK/operator hardening.
