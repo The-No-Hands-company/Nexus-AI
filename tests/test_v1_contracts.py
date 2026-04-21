@@ -2008,8 +2008,10 @@ class TestSprintC(unittest.TestCase):
 
     def test_estimate_tokens_basic(self):
         from src.agent import _estimate_tokens
-        self.assertEqual(_estimate_tokens(""), 1)          # floor: min 1
-        self.assertEqual(_estimate_tokens("a" * 400), 100)  # 400 chars / 4
+        self.assertEqual(_estimate_tokens(""), 1)           # floor: always >= 1
+        count = _estimate_tokens("a" * 400)
+        self.assertGreater(count, 0)                        # tiktoken BPE: positive count
+        self.assertLessEqual(count, 400)                    # never exceeds char count
 
     def test_messages_token_estimate(self):
         from src.agent import _messages_token_estimate
@@ -2017,7 +2019,9 @@ class TestSprintC(unittest.TestCase):
             {"role": "user",      "content": "a" * 400},
             {"role": "assistant", "content": "b" * 200},
         ]
-        self.assertEqual(_messages_token_estimate(msgs), 150)  # (400+200)//4
+        count = _messages_token_estimate(msgs)
+        self.assertGreater(count, 0)                        # tiktoken BPE: positive count
+        self.assertLessEqual(count, 600)                    # never exceeds total char count
 
     def test_done_event_has_token_counts(self):
         """run_agent_task result must carry ensemble field when ensemble ran;
@@ -5275,7 +5279,7 @@ class TestSafetyAuditPersistence(unittest.TestCase):
         os.environ,
         {
             "SAFETY_EVENT_WEBHOOK_URL": "https://siem.example.test/safety",
-            "SAFETY_EVENT_WEBHOOK_SECRET": "super-secret",
+            "SAFETY_EVENT_WEBHOOK_SECRET": "super-secret",  # pragma: allowlist secret
             "SAFETY_EVENT_WEBHOOK_TIMEOUT": "2",
         },
         clear=False,
@@ -5302,7 +5306,7 @@ class TestSafetyAuditPersistence(unittest.TestCase):
         os.environ,
         {
             "SAFETY_EVENT_WEBHOOK_URL": "https://siem.example.test/safety",
-            "SAFETY_EVENT_WEBHOOK_SECRET": "super-secret",
+            "SAFETY_EVENT_WEBHOOK_SECRET": "super-secret",  # pragma: allowlist secret
         },
         clear=False,
     )
@@ -5321,8 +5325,8 @@ class TestPrivacyDataDeletionRequest(unittest.TestCase):
         self.admin = "privacy_admin_req"
         self.org_id = "privacy-org-req"
 
-        client.post("/auth/register", params={"username": self.user, "password": "password123"})
-        client.post("/auth/register", params={"username": self.admin, "password": "password123"})
+        client.post("/auth/register", params={"username": self.user, "password": "password123"})  # pragma: allowlist secret
+        client.post("/auth/register", params={"username": self.admin, "password": "password123"})  # pragma: allowlist secret
 
         self.user_headers = {"Authorization": f"Bearer {_make_token(self.user, role='user')}"}
         self.admin_headers = {"Authorization": f"Bearer {_make_token(self.admin, role='admin')}"}

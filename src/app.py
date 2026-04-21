@@ -145,6 +145,50 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _logger.warning("async_pg_pool_init_failed error=%s", exc)
 
+    # Start background workers introduced in Section 26 gap-fill
+    try:
+        from .retention import start_retention_worker
+        start_retention_worker()
+        _logger.info("retention_worker_started")
+    except Exception as exc:
+        _logger.warning("retention_worker_start_failed error=%s", exc)
+
+    try:
+        from .cost_anomaly import start_cost_anomaly_worker
+        start_cost_anomaly_worker()
+        _logger.info("cost_anomaly_worker_started")
+    except Exception as exc:
+        _logger.warning("cost_anomaly_worker_start_failed error=%s", exc)
+
+    try:
+        from .webhooks_delivery import start_webhook_worker
+        start_webhook_worker()
+        _logger.info("webhook_delivery_worker_started")
+    except Exception as exc:
+        _logger.warning("webhook_delivery_worker_start_failed error=%s", exc)
+
+    try:
+        from .memory.forgetting import start_forgetting_worker
+        start_forgetting_worker()
+        _logger.info("memory_forgetting_worker_started")
+    except Exception as exc:
+        _logger.warning("memory_forgetting_worker_start_failed error=%s", exc)
+
+    # Load tool policies and copyright registry from DB
+    try:
+        from .agent_tool_policy import _load_policies_from_db
+        _load_policies_from_db()
+        _logger.info("agent_tool_policies_loaded")
+    except Exception as exc:
+        _logger.warning("agent_tool_policies_load_failed error=%s", exc)
+
+    try:
+        from .safety.copyright import load_registry_from_db
+        load_registry_from_db()
+        _logger.info("copyright_registry_loaded")
+    except Exception as exc:
+        _logger.warning("copyright_registry_load_failed error=%s", exc)
+
     yield
 
     # Graceful shutdown: wait briefly for in-flight requests to finish.
@@ -313,6 +357,22 @@ def create_app() -> FastAPI:
     # clients continue to work unchanged.  The X-API-Version response header
     # (set by the existing APIVersionMiddleware) still signals "v1" vs "legacy".
     app.include_router(api_router, prefix="/v1")
+
+    # SCIM 2.0 provisioning endpoints
+    try:
+        from .api.scim import router as scim_router
+        app.include_router(scim_router)
+    except Exception as exc:
+        _logger.warning("scim_router_load_failed error=%s", exc)
+
+    # IP allowlist/geo-blocking middleware (opt-in via IP_ALLOWLIST or GEO_BLOCKED_COUNTRIES)
+    if os.getenv("IP_ALLOWLIST") or os.getenv("GEO_BLOCKED_COUNTRIES") or os.getenv("IP_BLOCKLIST"):
+        try:
+            from .security.ip_filter import IPFilterMiddleware
+            app.add_middleware(IPFilterMiddleware)
+            _logger.info("ip_filter_middleware_enabled")
+        except Exception as exc:
+            _logger.warning("ip_filter_middleware_failed error=%s", exc)
 
     return app
 
