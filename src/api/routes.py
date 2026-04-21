@@ -862,6 +862,10 @@ def require_admin(request: Request) -> str:
         raise HTTPException(status_code=403, detail="Admin access required")
     return username
 
+
+def _require_admin(request: Request) -> str:
+    return require_admin(request)
+
 # ── auth endpoints ────────────────────────────────────────────────────────────
 @router.post("/auth/register")
 def auth_register(username: str = "", password: str = ""):
@@ -1043,6 +1047,202 @@ async def auth_refresh(request: Request):
 
 @router.get("/")
 def home(): return FileResponse("static/index.html")
+
+
+@router.get("/playground")
+def api_playground():
+        html = """
+        <!doctype html>
+        <html>
+            <head>
+                <meta charset=\"utf-8\" />
+                <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
+                <title>Nexus API Playground</title>
+            </head>
+            <body style=\"font-family: ui-monospace, SFMono-Regular, Menlo, monospace; margin: 20px;\">
+                <h1>Nexus API Playground</h1>
+                <p>Run quick requests against chat, agent, and autonomy endpoints from one page.</p>
+                <label>Base URL <input id=\"base\" value=\"\" placeholder=\"leave blank for same origin\" style=\"width: 420px\"></label>
+                <label style=\"margin-left: 8px\">Bearer token <input id=\"token\" placeholder=\"optional\" style=\"width: 340px\"></label>
+                <div style=\"margin-top: 12px;\">
+                    <button onclick=\"runModels()\">GET /v1/models</button>
+                    <button onclick=\"runChat()\">POST /v1/chat/completions</button>
+                    <button onclick=\"runAgent()\">POST /v1/agent</button>
+                    <button onclick=\"runPlan()\">POST /v1/autonomy/plan</button>
+                </div>
+                <h3>Request</h3>
+                <textarea id=\"req\" style=\"width: 100%; height: 190px;\">{
+    \"model\": \"nexus-ai/auto\",
+    \"messages\": [{\"role\": \"user\", \"content\": \"Say hello in one sentence.\"}],
+    \"stream\": false
+}</textarea>
+                <h3>Response</h3>
+                <pre id=\"out\" style=\"background:#111;color:#d8f2c2;padding:12px;overflow:auto;min-height:180px;\"></pre>
+                <script>
+                    const out = document.getElementById('out');
+                    const reqEl = document.getElementById('req');
+                    const baseEl = document.getElementById('base');
+                    const tokenEl = document.getElementById('token');
+                      function base() { return (baseEl.value || '').trim().replace(/\\/$/, ''); }
+                    function headers() {
+                        const h = {'Content-Type':'application/json'};
+                        const t = (tokenEl.value || '').trim();
+                        if (t) h.Authorization = `Bearer ${t}`;
+                        return h;
+                    }
+                    async function run(method, path, body) {
+                        const url = `${base()}${path}`;
+                        try {
+                            const res = await fetch(url, {
+                                method,
+                                headers: headers(),
+                                body: body ? JSON.stringify(body) : undefined,
+                            });
+                            const text = await res.text();
+                            let parsed;
+                            try { parsed = JSON.parse(text); } catch (_) { parsed = text; }
+                            out.textContent = JSON.stringify({status: res.status, path, body: parsed}, null, 2);
+                        } catch (e) {
+                            out.textContent = String(e);
+                        }
+                    }
+                    function parseRequest() {
+                        try { return JSON.parse(reqEl.value || '{}'); }
+                        catch (e) { out.textContent = `Invalid JSON: ${e}`; return null; }
+                    }
+                    async function runModels() { await run('GET', '/v1/models'); }
+                    async function runChat() {
+                        const body = parseRequest(); if (!body) return;
+                        await run('POST', '/v1/chat/completions', body);
+                    }
+                    async function runAgent() {
+                        const body = { task: 'Summarize this repository architecture in 3 bullets.', history: [] };
+                        await run('POST', '/v1/agent', body);
+                    }
+                    async function runPlan() {
+                        const body = { goal: 'Plan a safe production rollout with checkpoints.', max_subtasks: 6 };
+                        await run('POST', '/v1/autonomy/plan', body);
+                    }
+                </script>
+            </body>
+        </html>
+        """
+        return HTMLResponse(html)
+
+
+def _dev_sandbox_enabled() -> bool:
+        return os.getenv("NEXUS_DEV_SANDBOX", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+
+@router.get("/dev/sandbox/status")
+def dev_sandbox_status():
+        return {
+                "enabled": _dev_sandbox_enabled(),
+                "mode": "mock-llm",
+                "notes": "Set NEXUS_DEV_SANDBOX=1 to enable deterministic mock responses for test environments.",
+        }
+
+
+@router.post("/dev/sandbox/chat")
+async def dev_sandbox_chat(request: Request):
+        if not _dev_sandbox_enabled():
+                return _api_error("developer sandbox is disabled", "feature_disabled", 403)
+        body = await _read_json_body(request)
+        prompt = str(body.get("prompt") or "").strip()
+        if not prompt:
+                return _api_error("prompt is required", "validation_error", 422)
+
+        lower_prompt = prompt.lower()
+        if "json" in lower_prompt:
+                content = {"sandbox": True, "echo": prompt[:200], "status": "ok"}
+        elif "risk" in lower_prompt or "safety" in lower_prompt:
+                content = "Sandbox response: risk identified, recommend HITL approval before high-impact actions."
+        else:
+                content = f"Sandbox response: {prompt[:240]}"
+
+        return {
+                "id": f"sandbox-{secrets.token_hex(6)}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": "nexus-sandbox/mock-llm",
+                "choices": [
+                        {
+                                "index": 0,
+                                "message": {"role": "assistant", "content": content},
+                                "finish_reason": "stop",
+                        }
+                ],
+                "usage": {
+                        "prompt_tokens": max(1, len(prompt.split())),
+                        "completion_tokens": max(1, len(str(content).split())),
+                        "total_tokens": max(2, len(prompt.split()) + len(str(content).split())),
+                },
+                "sandbox": True,
+        }
+
+
+@router.get("/graphql")
+def graphql_help():
+    return {
+        "endpoint": "/graphql",
+        "method": "POST",
+        "body": {"query": "{ health models providers usage }"},
+        "notes": [
+            "Supported root fields: health, models, providers, usage",
+            "usage requires admin role in multi-user mode",
+        ],
+    }
+
+
+def _extract_graphql_fields(query: str) -> set[str]:
+    import re
+
+    allowed = {"health", "models", "providers", "usage"}
+    tokens = set(re.findall(r"\b[a-zA-Z_][a-zA-Z0-9_]*\b", str(query or "")))
+    return {token for token in tokens if token in allowed}
+
+
+@router.post("/graphql")
+async def graphql_query(request: Request):
+    body = await _read_json_body(request)
+    query = str(body.get("query") or "").strip()
+    if not query:
+        return JSONResponse({"errors": [{"message": "query is required"}]}, status_code=400)
+
+    wanted = _extract_graphql_fields(query)
+    if not wanted:
+        return JSONResponse(
+            {"errors": [{"message": "No supported fields requested (health, models, providers, usage)"}]},
+            status_code=400,
+        )
+
+    data: dict[str, Any] = {}
+    errors: list[dict[str, str]] = []
+
+    if "health" in wanted:
+        data["health"] = {
+            "status": "ok",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "version": "v1",
+        }
+    if "models" in wanted:
+        data["models"] = _v1_models_catalog()
+    if "providers" in wanted:
+        data["providers"] = get_provider_health()
+    if "usage" in wanted:
+        try:
+            require_admin(request)
+            data["usage"] = {
+                "summary": get_usage_stats(7),
+                "daily": get_usage_daily(7),
+            }
+        except HTTPException:
+            errors.append({"message": "usage field requires admin role"})
+
+    payload: dict[str, Any] = {"data": data}
+    if errors:
+        payload["errors"] = errors
+    return payload
 
 
 # ── Webhook trigger ─────────────────────────────────────────────────────────────
@@ -4872,6 +5072,34 @@ async def autonomy_execute(request: Request):
         orchestrator = Orchestrator(_orchestrator_llm, max_parallel=2)
         result = orchestrator.execute(goal, {"strategy": strategy, "max_subtasks": max_subtasks})
         result["trace_id"] = trace_id
+        try:
+            from ..agent_lineage import record_lineage_edge
+
+            previous_subtask_id = ""
+            for idx, subtask in enumerate(result.get("subtasks", []), 1):
+                subtask_id = str(subtask.get("id") or f"{trace_id}:subtask:{idx}")
+                record_lineage_edge(
+                    parent_task_id=trace_id,
+                    child_task_id=subtask_id,
+                    relation="spawned_by",
+                    source="autonomy_execute",
+                    metadata={
+                        "goal": goal,
+                        "strategy": strategy,
+                        "subtask_name": str(subtask.get("name") or ""),
+                    },
+                )
+                if previous_subtask_id:
+                    record_lineage_edge(
+                        parent_task_id=previous_subtask_id,
+                        child_task_id=subtask_id,
+                        relation="next",
+                        source="autonomy_execute",
+                        metadata={"goal": goal},
+                    )
+                previous_subtask_id = subtask_id
+        except Exception:
+            pass
         for idx, subtask in enumerate(result.get("subtasks", []), 1):
             checkpoint_events.append({"type": "subtask_done", "trace_id": trace_id, "subtask": subtask})
             _save_autonomy_checkpoint(trace_id, idx, goal, checkpoint_events)
@@ -7291,6 +7519,103 @@ def clear_bus_dlq():
     return {"cleared": cleared}
 
 
+@router.get("/agents/bus/consume")
+async def consume_agent_inbox_long_poll(
+    agent_id: str,
+    wait_seconds: float = 20.0,
+    limit: int = 20,
+    topic: str = "",
+):
+    """Long-poll consumer API for asynchronous bus reads."""
+    from ..agent_bus import read_messages, unread_count
+
+    aid = str(agent_id or "").strip()
+    if not aid:
+        return _api_error("agent_id is required", "validation_error", 422)
+
+    timeout_s = max(0.0, min(float(wait_seconds), 60.0))
+    safe_limit = max(1, min(int(limit), 200))
+    start = time.monotonic()
+
+    while True:
+        msgs = read_messages(
+            aid,
+            limit=safe_limit,
+            unread_only=True,
+            mark_read=True,
+            topic=topic if topic else None,
+        )
+        if msgs:
+            return {
+                "agent_id": aid,
+                "messages": [m.to_dict() for m in msgs],
+                "unread_count": unread_count(aid),
+                "waited_seconds": round(time.monotonic() - start, 3),
+                "timed_out": False,
+            }
+
+        if (time.monotonic() - start) >= timeout_s:
+            return {
+                "agent_id": aid,
+                "messages": [],
+                "unread_count": unread_count(aid),
+                "waited_seconds": round(time.monotonic() - start, 3),
+                "timed_out": True,
+            }
+        await asyncio.sleep(0.25)
+
+
+@router.websocket("/agents/bus/ws/{agent_id}")
+async def consume_agent_inbox_ws(websocket: WebSocket, agent_id: str):
+    """WebSocket consumer API that streams unread bus messages."""
+    from ..agent_bus import read_messages, unread_count
+
+    await websocket.accept()
+    topic = str(websocket.query_params.get("topic") or "").strip()
+    try:
+        poll_ms = int(websocket.query_params.get("poll_ms") or 300)
+    except Exception:
+        poll_ms = 300
+    poll_s = max(0.1, min(poll_ms / 1000.0, 2.0))
+
+    heartbeat_every = 10.0
+    last_heartbeat = time.monotonic()
+
+    try:
+        while True:
+            msgs = read_messages(
+                agent_id,
+                limit=100,
+                unread_only=True,
+                mark_read=True,
+                topic=topic if topic else None,
+            )
+            for msg in msgs:
+                await websocket.send_json({"type": "message", "message": msg.to_dict()})
+
+            now = time.monotonic()
+            if now - last_heartbeat >= heartbeat_every:
+                await websocket.send_json(
+                    {
+                        "type": "heartbeat",
+                        "agent_id": agent_id,
+                        "unread_count": unread_count(agent_id),
+                        "ts": time.time(),
+                    }
+                )
+                last_heartbeat = now
+
+            try:
+                incoming = await asyncio.wait_for(websocket.receive_text(), timeout=poll_s)
+                if incoming.strip().lower() in {"close", "disconnect", "quit"}:
+                    await websocket.close()
+                    break
+            except asyncio.TimeoutError:
+                continue
+    except WebSocketDisconnect:
+        return
+
+
 @router.get("/agents/bus/{agent_id}")
 def read_agent_inbox(
     agent_id: str,
@@ -7351,6 +7676,52 @@ async def post_agent_message(request: Request):
     from ..agent_bus import post_message
     msg = post_message(from_id, to_id, content, topic=topic)
     return msg.to_dict()
+
+
+@router.post("/agents/lineage/links", status_code=201)
+async def create_agent_lineage_link(request: Request):
+    body = await _read_json_body(request)
+    parent_task_id = str(body.get("parent_task_id") or "").strip()
+    child_task_id = str(body.get("child_task_id") or "").strip()
+    relation = str(body.get("relation") or "depends_on").strip()
+    source = str(body.get("source") or "api").strip()
+    metadata = body.get("metadata") if isinstance(body.get("metadata"), dict) else {}
+
+    if not parent_task_id or not child_task_id:
+        return _api_error("parent_task_id and child_task_id are required", "validation_error", 422)
+    try:
+        from ..agent_lineage import record_lineage_edge
+
+        edge = record_lineage_edge(
+            parent_task_id=parent_task_id,
+            child_task_id=child_task_id,
+            relation=relation,
+            source=source,
+            metadata=metadata,
+        )
+        return edge
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.get("/agents/lineage/query")
+def query_agent_lineage(task_id: str, direction: str = "both", limit: int = 500):
+    from ..agent_lineage import query_lineage
+
+    rows = query_lineage(task_id=task_id, direction=direction, limit=limit)
+    return {
+        "task_id": task_id,
+        "direction": direction,
+        "count": len(rows),
+        "edges": rows,
+    }
+
+
+@router.get("/agents/lineage/graph/{root_task_id}")
+def get_agent_lineage_graph(root_task_id: str, depth: int = 3, limit: int = 2000):
+    from ..agent_lineage import get_lineage_graph
+
+    return get_lineage_graph(root_task_id=root_task_id, depth=depth, limit=limit)
 
 
 @router.delete("/tasks/{trace_id}")
@@ -14639,6 +15010,56 @@ async def api_cost_anomaly_check(request: Request):
     try:
         from ..cost_anomaly import check_all_teams
         return {"anomalies": check_all_teams()}
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/admin/capacity/planning")
+async def api_capacity_planning_report(request: Request, days: int = 30, horizon_days: int = 14):
+    _require_admin(request)
+    safe_days = max(7, min(int(days), 365))
+    safe_horizon = max(1, min(int(horizon_days), 90))
+    try:
+        series = get_usage_daily(days=safe_days)
+        if not series:
+            return {
+                "days": safe_days,
+                "horizon_days": safe_horizon,
+                "history_points": 0,
+                "daily_avg_calls": 0,
+                "daily_avg_tokens": 0,
+                "projected_calls": 0,
+                "projected_tokens": 0,
+                "recommendation": "insufficient_data",
+            }
+
+        total_calls = sum(int(row.get("calls") or 0) for row in series)
+        total_tokens = sum(int(row.get("in_tok") or 0) + int(row.get("out_tok") or 0) for row in series)
+        day_count = max(1, len(series))
+        avg_calls = total_calls / day_count
+        avg_tokens = total_tokens / day_count
+
+        projected_calls = int(round(avg_calls * safe_horizon))
+        projected_tokens = int(round(avg_tokens * safe_horizon))
+
+        peak_calls = max(int(row.get("calls") or 0) for row in series)
+        peak_tokens = max(int(row.get("in_tok") or 0) + int(row.get("out_tok") or 0) for row in series)
+        recommended_daily_capacity = int(round(max(avg_calls * 1.3, peak_calls * 1.1)))
+
+        return {
+            "days": safe_days,
+            "horizon_days": safe_horizon,
+            "history_points": day_count,
+            "daily_avg_calls": round(avg_calls, 2),
+            "daily_avg_tokens": round(avg_tokens, 2),
+            "daily_peak_calls": peak_calls,
+            "daily_peak_tokens": peak_tokens,
+            "projected_calls": projected_calls,
+            "projected_tokens": projected_tokens,
+            "recommended_daily_capacity": recommended_daily_capacity,
+            "recommendation": "scale_up" if peak_calls > avg_calls * 1.2 else "steady",
+            "series": series,
+        }
     except Exception as exc:
         return _api_error(str(exc))
 
