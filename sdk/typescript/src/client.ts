@@ -215,6 +215,44 @@ export class NexusAIClient {
     return this.request("POST", "/benchmark/safety", { test_cases: testCases });
   }
 
+  benchmarkDataset(params: {
+    dataset: string;
+    provider?: string;
+    model?: string;
+    maxSamples?: number;
+  }): Promise<Record<string, unknown>> {
+    return this.request("POST", "/benchmark/dataset/run", {
+      dataset: params.dataset,
+      provider: params.provider ?? "",
+      model: params.model ?? "",
+      max_samples: params.maxSamples ?? 10,
+    });
+  }
+
+  benchmarkDatasetSuite(params: {
+    datasets?: string[];
+    provider?: string;
+    model?: string;
+    maxSamplesPerDataset?: number;
+  } = {}): Promise<Record<string, unknown>> {
+    return this.request("POST", "/benchmark/dataset/suite", {
+      datasets: params.datasets ?? null,
+      provider: params.provider ?? "",
+      model: params.model ?? "",
+      max_samples_per_dataset: params.maxSamplesPerDataset ?? 10,
+    });
+  }
+
+  benchmarkDatasetHistory(dataset = "", limit = 50): Promise<Record<string, unknown>> {
+    const qs = new URLSearchParams({ dataset, limit: String(limit) });
+    return this.request("GET", `/benchmark/dataset/history?${qs}`);
+  }
+
+  benchmarkExport(runId: string, formats?: string[]): Promise<Record<string, unknown>> {
+    const qs = formats ? `?formats=${formats.join(",")}` : "";
+    return this.request("GET", `/benchmark/export/${runId}${qs}`);
+  }
+
   // ── Compliance ─────────────────────────────────────────────────────────────
 
   getComplianceConfig(): Promise<Record<string, unknown>> {

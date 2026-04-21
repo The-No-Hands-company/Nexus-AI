@@ -1,9 +1,62 @@
 {
   "name": "@nexus-ai/sdk",
-  "version": "0.1.0",
-  "description": "Nexus AI TypeScript SDK",
+  "version": "0.2.0",
+  "description": "Official TypeScript/JavaScript SDK for the Nexus AI API",
   "type": "module",
-  "main": "src/client.ts",
-  "types": "src/client.ts",
-  "license": "MIT"
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./client": {
+      "import": "./dist/client.js",
+      "types": "./dist/client.d.ts"
+    },
+    "./operator": {
+      "import": "./dist/operator.js",
+      "types": "./dist/operator.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "build:watch": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src --ext .ts",
+    "test": "node --experimental-vm-modules node_modules/.bin/jest",
+    "prepublishOnly": "npm run build && npm run typecheck"
+  },
+  "keywords": [
+    "nexus-ai",
+    "ai",
+    "llm",
+    "agent",
+    "api-client",
+    "typescript",
+    "sdk"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/the-no-hands-company/nexus-ai.git",
+    "directory": "sdk/typescript"
+  },
+  "homepage": "https://github.com/the-no-hands-company/nexus-ai/tree/main/sdk/typescript",
+  "bugs": {
+    "url": "https://github.com/the-no-hands-company/nexus-ai/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0"
+  }
 }

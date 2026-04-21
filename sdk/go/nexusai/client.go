@@ -306,6 +306,47 @@ func (c *Client) BenchmarkSafety(testCases []map[string]any) (map[string]any, er
 	return out, c.do(http.MethodPost, "/benchmark/safety", map[string]any{"test_cases": testCases}, &out)
 }
 
+func (c *Client) BenchmarkDataset(dataset, provider, model string, maxSamples int) (map[string]any, error) {
+	if maxSamples <= 0 {
+		maxSamples = 10
+	}
+	out := map[string]any{}
+	return out, c.do(http.MethodPost, "/benchmark/dataset/run", map[string]any{
+		"dataset":     dataset,
+		"provider":    provider,
+		"model":       model,
+		"max_samples": maxSamples,
+	}, &out)
+}
+
+func (c *Client) BenchmarkDatasetSuite(datasets []string, provider, model string, maxSamplesPerDataset int) (map[string]any, error) {
+	if maxSamplesPerDataset <= 0 {
+		maxSamplesPerDataset = 10
+	}
+	out := map[string]any{}
+	return out, c.do(http.MethodPost, "/benchmark/dataset/suite", map[string]any{
+		"datasets":                datasets,
+		"provider":                provider,
+		"model":                   model,
+		"max_samples_per_dataset": maxSamplesPerDataset,
+	}, &out)
+}
+
+func (c *Client) BenchmarkDatasetHistory(dataset string, limit int) (map[string]any, error) {
+	path := fmt.Sprintf("/benchmark/dataset/history?dataset=%s&limit=%d", dataset, limit)
+	out := map[string]any{}
+	return out, c.do(http.MethodGet, path, nil, &out)
+}
+
+func (c *Client) BenchmarkExport(runID string, formats []string) (map[string]any, error) {
+	path := "/benchmark/export/" + runID
+	if len(formats) > 0 {
+		path += "?formats=" + strings.Join(formats, ",")
+	}
+	out := map[string]any{}
+	return out, c.do(http.MethodGet, path, nil, &out)
+}
+
 // ── Compliance ────────────────────────────────────────────────────────────────
 
 func (c *Client) GetComplianceConfig() (map[string]any, error) {

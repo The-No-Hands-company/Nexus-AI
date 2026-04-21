@@ -2177,6 +2177,21 @@ async def prompt_injection_scan(request: Request):
     return payload
 
 
+@router.post("/safety/prompt-injection/benchmark")
+async def prompt_injection_benchmark(request: Request):
+    from ..safety.prompt_injection import benchmark_injection_detection
+
+    data = await _read_json_body(request, "invalid JSON body")
+    corpus_in = data.get("corpus") if isinstance(data.get("corpus"), list) else []
+    corpus = tuple(str(item or "").strip() for item in corpus_in if str(item or "").strip())
+    result = benchmark_injection_detection(corpus=corpus if corpus else None)
+    return {
+        "benchmark": result,
+        "release_gate_pass": bool(float(result.get("coverage") or 0.0) >= 0.9),
+        "threshold": 0.9,
+    }
+
+
 # ── Scheduler API ─────────────────────────────────────────────────────────────
 
 @router.get("/scheduler/jobs")
@@ -2700,6 +2715,57 @@ async def benchmark_regression(request: Request):
         )
     except ValueError as exc:
         return _api_error(str(exc), "validation_error", 422)
+
+
+@router.post("/validation/program/run")
+async def validation_program_run(request: Request):
+    try:
+        body = await _read_json_body(request)
+    except HTTPException as exc:
+        return _api_error(str(exc.detail), "validation_error", exc.status_code)
+
+    try:
+        from ..validation_program import run_validation_program
+
+        return run_validation_program(
+            domains=body.get("domains") if isinstance(body.get("domains"), list) else None,
+            update_baseline=bool(body.get("update_baseline", False)),
+            alert_on_regression=bool(body.get("alert_on_regression", True)),
+        )
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.get("/validation/program/reports")
+def validation_program_reports(program: str = "core_quality", limit: int = 20):
+    from ..validation_program import get_validation_overview
+
+    return get_validation_overview(program=program, limit=limit)
+
+
+@router.get("/validation/program/baselines")
+def validation_program_baselines():
+    from ..db import load_validation_baselines
+
+    return {"baselines": load_validation_baselines()}
+
+
+@router.post("/validation/program/baselines")
+async def validation_program_update_baselines(request: Request):
+    body = await _read_json_body(request, "invalid JSON body")
+    from ..db import save_validation_baselines
+    from ..validation_program import run_validation_program
+
+    if isinstance(body.get("baselines"), dict):
+        saved = save_validation_baselines(body.get("baselines") or {})
+        return {"ok": True, "baselines": saved, "mode": "direct"}
+
+    report = run_validation_program(
+        domains=body.get("domains") if isinstance(body.get("domains"), list) else None,
+        update_baseline=True,
+        alert_on_regression=bool(body.get("alert_on_regression", False)),
+    )
+    return {"ok": True, "mode": "recomputed", "report": report, "baselines": report.get("baselines", {})}
 
 
 @router.post("/compute/contributed/register")
@@ -8161,6 +8227,15 @@ def _run_scheduled_task_extended(task: str) -> str:
         if not isinstance(payload, dict):
             return "continual policy payload must be an object"
         return _execute_continual_re_tune_task(payload)
+    if task == "__internal_validation_program__":
+        from ..validation_program import run_validation_program
+
+        report = run_validation_program(update_baseline=False, alert_on_regression=True)
+        summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+        return (
+            f"validation success_rate={summary.get('success_rate', 0.0)} "
+            f"tool_error_rate={summary.get('tool_error_rate', 0.0)}"
+        )
     return _run_scheduled_task(task)
 
 
@@ -8168,6 +8243,14 @@ def startup_event() -> None:
     set_run_function(_run_scheduled_task_extended)
     restore_from_db()
     _register_quota_reset_scheduler()
+    try:
+        from ..benchmark import register_benchmark_schedules
+        from ..validation_program import register_validation_program_schedules
+
+        register_benchmark_schedules(_run_scheduled_task_extended)
+        register_validation_program_schedules(_run_scheduled_task_extended)
+    except Exception:
+        pass
     asyncio.create_task(_register_with_nexus_cloud())
     asyncio.create_task(_heartbeat_loop())
 
@@ -9203,6 +9286,36 @@ def _run_fine_tuning_job(job_id: str):
             "Job completed successfully",
             data={"status": "succeeded", "fine_tuned_model": ft_model, "trained_tokens": trained_tokens},
         )
+        try:
+            from ..eval_pipeline import run_regression_benchmark
+
+            suites = ["gsm8k", "arc", "safety"]
+            hyperparams = job.get("hyperparameters") if isinstance(job.get("hyperparameters"), dict) else {}
+            regression_provider = str(hyperparams.get("regression_provider") or "offline").strip() or "offline"
+            regression = run_regression_benchmark(
+                model=str(job.get("model") or "nexus-prime-base"),
+                provider=regression_provider,
+                suites=suites,
+                threshold=0.05,
+                n_samples=8,
+            )
+            db_create_fine_tuning_job_event(
+                job_id,
+                "Post-train regression benchmark completed",
+                data={
+                    "suites": suites,
+                    "provider": regression_provider,
+                    "overall_regression": bool(regression.get("overall_regression")),
+                    "current_avg": regression.get("current_avg"),
+                },
+            )
+        except Exception as exc:
+            db_create_fine_tuning_job_event(
+                job_id,
+                "Post-train regression benchmark skipped",
+                level="warning",
+                data={"error": str(exc)[:300]},
+            )
     except Exception as exc:
         db_update_fine_tuning_job(
             job_id,
@@ -9465,6 +9578,7 @@ def _create_finetune_job_from_rows(
         row_count=len(rows),
         provenance=provenance,
         checksum=checksum,
+        preview_rows=rows,
     )
 
     training_file = f"inline://dataset/{dataset_id}"
@@ -9505,6 +9619,44 @@ def get_active_finetune_adapter():
     from ..db import get_active_lora_adapter
 
     return {"active_adapter": get_active_lora_adapter()}
+
+
+def _run_model_update_regression_gate(
+    model: str,
+    provider: str,
+    suites: list[str] | None,
+    threshold: float,
+    n_samples: int,
+    enforce: bool,
+) -> dict:
+    """Run regression benchmark for model-update actions and return gate metadata."""
+    from ..eval_pipeline import run_regression_benchmark
+
+    selected_suites = [str(s).strip() for s in (suites or ["gsm8k", "arc", "safety"]) if str(s).strip()]
+    result = run_regression_benchmark(
+        model=model,
+        provider=provider,
+        suites=selected_suites,
+        threshold=float(threshold),
+        n_samples=max(1, int(n_samples)),
+    )
+    rows = result.get("suite_results") if isinstance(result.get("suite_results"), list) else []
+    avg_score = 0.0
+    if rows:
+        avg_score = sum(float(r.get("score") or 0.0) for r in rows) / max(1, len(rows))
+    has_regression = not bool(result.get("ok", True))
+    return {
+        "enforced": bool(enforce),
+        "allowed": (not has_regression) or (not bool(enforce)),
+        "regression_count": int(result.get("regression_count") or 0),
+        "has_regression": has_regression,
+        "threshold": float(threshold),
+        "provider": provider,
+        "suites": selected_suites,
+        "n_samples": max(1, int(n_samples)),
+        "average_score": round(avg_score, 4),
+        "benchmark": result,
+    }
 
 
 @router.get("/finetune/adapters")
@@ -9581,6 +9733,85 @@ def compare_finetune_adapter_versions(adapter_id: str, left: str = "", right: st
     return diff
 
 
+@router.get("/finetune/adapters/{adapter_id}/proof-reports")
+def list_finetune_adapter_proof_reports(adapter_id: str, version: str = "", limit: int = 20):
+    from ..db import list_adapter_proof_reports
+
+    rows = list_adapter_proof_reports(adapter_id=adapter_id, adapter_version=version, limit=limit)
+    return {"proof_reports": rows, "count": len(rows)}
+
+
+@router.post("/finetune/adapters/{adapter_id}/proof")
+async def run_finetune_adapter_proof(adapter_id: str, request: Request):
+    from ..db import get_lora_adapter_version
+    from ..eval_pipeline import run_adapter_proof_report
+
+    body = await _read_json_body(request, "invalid JSON body")
+    version = str(body.get("version") or "").strip()
+    if not version:
+        return _api_error("version is required", "validation_error", 422)
+
+    row = get_lora_adapter_version(adapter_id=adapter_id, version=version)
+    if row is None:
+        return _api_error("adapter version not found", "not_found", 404)
+
+    try:
+        report = run_adapter_proof_report(
+            base_model=str(body.get("base_model") or row.get("base_model") or "nexus-prime-base"),
+            adapter_id=adapter_id,
+            adapter_version=version,
+            provider=str(body.get("provider") or "offline"),
+            suites=body.get("suites") if isinstance(body.get("suites"), list) else None,
+            n_samples=int(body.get("n_samples") or 20),
+            min_improvement=float(body.get("min_improvement") or 0.01),
+            max_regressions=int(body.get("max_regressions") or 0),
+            regression_threshold=float(body.get("regression_threshold") or 0.05),
+        )
+        return {"proof_report": report}
+    except ValueError as exc:
+        return _api_error(str(exc), "validation_error", 422)
+
+
+@router.post("/finetune/adapters/{adapter_id}/promote")
+async def promote_finetune_adapter(adapter_id: str, request: Request):
+    from ..db import (
+        get_adapter_proof_report,
+        get_lora_adapter_version,
+        list_adapter_proof_reports,
+        update_lora_adapter_version,
+    )
+
+    body = await _read_json_body(request, "invalid JSON body")
+    version = str(body.get("version") or "").strip()
+    if not version:
+        return _api_error("version is required", "validation_error", 422)
+
+    row = get_lora_adapter_version(adapter_id=adapter_id, version=version)
+    if row is None:
+        return _api_error("adapter version not found", "not_found", 404)
+
+    report_id = str(body.get("report_id") or "").strip()
+    proof_report = get_adapter_proof_report(report_id) if report_id else None
+    if proof_report is None:
+        reports = list_adapter_proof_reports(adapter_id=adapter_id, adapter_version=version, limit=1)
+        proof_report = reports[0] if reports else None
+    if proof_report is None:
+        return _api_error("no proof report found for adapter promotion", "proof_required", 409)
+    if not bool(proof_report.get("passes", False)):
+        return _api_error("adapter promotion blocked by proof gate", "proof_gate_failed", 409)
+
+    updated = update_lora_adapter_version(
+        adapter_id=adapter_id,
+        version=version,
+        updates={
+            "status": "promoted",
+            "promotion_report_id": proof_report.get("report_id"),
+            "promoted_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        },
+    )
+    return {"promoted": True, "adapter": updated, "proof_report": proof_report}
+
+
 @router.post("/finetune/adapters/{adapter_id}/hot-swap")
 async def hot_swap_finetune_adapter(adapter_id: str, request: Request):
     from ..db import get_lora_adapter_version, set_active_lora_adapter
@@ -9599,6 +9830,22 @@ async def hot_swap_finetune_adapter(adapter_id: str, request: Request):
         selected = get_lora_adapter_version(adapter_id=selected_adapter_id, version=selected_version)
         if selected is None:
             return _api_error("adapter version not found", "not_found", 404)
+
+        target_for_gate = target_model or str(selected.get("base_model") or "nexus-prime-base")
+        gate_enabled = bool(body.get("run_regression_gate", True))
+        gate_enforced = bool(body.get("enforce_regression_gate", True))
+        regression_gate = None
+        if gate_enabled:
+            regression_gate = _run_model_update_regression_gate(
+                model=target_for_gate,
+                provider=str(body.get("provider") or "ollama"),
+                suites=body.get("suites") if isinstance(body.get("suites"), list) else None,
+                threshold=float(body.get("threshold") or 0.05),
+                n_samples=int(body.get("n_samples") or 8),
+                enforce=gate_enforced,
+            )
+            if not bool(regression_gate.get("allowed", True)):
+                return _api_error("regression gate blocked multitask adapter hot-swap", "regression_gate_failed", 409)
 
         current = get_multitask_adapter_map()
         mapping = current.get("mapping") if isinstance(current.get("mapping"), dict) else {}
@@ -9619,6 +9866,7 @@ async def hot_swap_finetune_adapter(adapter_id: str, request: Request):
             "active_adapter": active,
             "multitask_adapters": multitask,
             "adapter": selected,
+            "regression_gate": regression_gate,
         }
 
     version = str(body.get("version") or "").strip()
@@ -9629,12 +9877,29 @@ async def hot_swap_finetune_adapter(adapter_id: str, request: Request):
     if row is None:
         return _api_error("adapter version not found", "not_found", 404)
 
+    target_for_gate = target_model or str(row.get("base_model") or "nexus-prime-base")
+    gate_enabled = bool(body.get("run_regression_gate", True))
+    gate_enforced = bool(body.get("enforce_regression_gate", True))
+    regression_gate = None
+    if gate_enabled:
+        regression_gate = _run_model_update_regression_gate(
+            model=target_for_gate,
+            provider=str(body.get("provider") or "ollama"),
+            suites=body.get("suites") if isinstance(body.get("suites"), list) else None,
+            threshold=float(body.get("threshold") or 0.05),
+            n_samples=int(body.get("n_samples") or 8),
+            enforce=gate_enforced,
+        )
+        if not bool(regression_gate.get("allowed", True)):
+            return _api_error("regression gate blocked adapter hot-swap", "regression_gate_failed", 409)
+
     active = set_active_lora_adapter(adapter_id=adapter_id, version=version, target_model=target_model)
     return {
         "swapped": True,
         "active_adapter": active,
         "adapter": row,
         "note": "Hot-swap state recorded. Runtime model application is provider-dependent.",
+        "regression_gate": regression_gate,
     }
 
 
@@ -10183,6 +10448,21 @@ async def wire_nexus_prime_alpha_persona(request: Request):
     adapter_version = str(body.get("adapter_version") or "").strip()
     provider_order = body.get("provider_order") if isinstance(body.get("provider_order"), list) else ["ollama", "llm7", "groq"]
 
+    gate_enabled = bool(body.get("run_regression_gate", True))
+    gate_enforced = bool(body.get("enforce_regression_gate", True))
+    regression_gate = None
+    if gate_enabled:
+        regression_gate = _run_model_update_regression_gate(
+            model=model,
+            provider=str(body.get("provider") or "ollama"),
+            suites=body.get("suites") if isinstance(body.get("suites"), list) else None,
+            threshold=float(body.get("threshold") or 0.05),
+            n_samples=int(body.get("n_samples") or 8),
+            enforce=gate_enforced,
+        )
+        if not bool(regression_gate.get("allowed", True)):
+            return _api_error("regression gate blocked nexus-prime-alpha wiring", "regression_gate_failed", 409)
+
     set_persona("nexus_prime_alpha")
     update_config(persona="nexus_prime_alpha", model=model)
     set_provider_persona_override("nexus_prime_alpha", [str(p).strip() for p in provider_order if str(p).strip()])
@@ -10199,6 +10479,7 @@ async def wire_nexus_prime_alpha_persona(request: Request):
         "model": model,
         "provider_order": provider_order,
         "active_adapter": active_adapter,
+        "regression_gate": regression_gate,
         "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
     }
     db_save_pref(_nexus_prime_alpha_wire_key(), json.dumps(wiring))
@@ -10233,7 +10514,7 @@ def get_model_card(model_id: str, markdown: bool = True):
 
 @router.get("/models/{model_id}/transparency")
 def get_model_transparency_report(model_id: str):
-    from ..db import list_ft_dataset_versions, list_lora_adapter_versions
+    from ..db import list_adapter_proof_reports, list_ft_dataset_versions, list_lora_adapter_versions
     from ..eval_pipeline import list_eval_jobs
 
     card = get_model_card(model_id=model_id, markdown=True)
@@ -10255,6 +10536,15 @@ def get_model_transparency_report(model_id: str):
         or str(d.get("source") or "") in {"feedback_trace", "synthetic"}
     ]
     adapters = [a for a in list_lora_adapter_versions() if str(a.get("base_model") or "") == model_id]
+    proof_reports = []
+    for adapter in adapters[:100]:
+        proof_reports.extend(
+            list_adapter_proof_reports(
+                adapter_id=str(adapter.get("adapter_id") or ""),
+                adapter_version=str(adapter.get("version") or ""),
+                limit=5,
+            )
+        )
 
     return {
         "model": model_id,
@@ -10272,6 +10562,10 @@ def get_model_transparency_report(model_id: str):
             "versions": adapters[:100],
             "count": len(adapters),
         },
+        "adapter_proof_reports": {
+            "reports": proof_reports[:100],
+            "count": len(proof_reports),
+        },
         "limitations": [
             "Transparency report is derived from local registries and may omit external trainer state.",
             "Adapter application at runtime depends on provider backend support.",
@@ -10287,6 +10581,71 @@ def _run_rlhf_dpo_job(job_id: str):
         save_lora_adapter_version,
         update_rlhf_dpo_job,
     )
+    from ..eval_pipeline import score_response
+
+    def _build_preference_pair(row: dict) -> dict | None:
+        prompt = str(row.get("prompt") or row.get("instruction") or "").strip()
+        if not prompt:
+            return None
+        chosen = str(row.get("chosen") or row.get("response") or row.get("output") or "").strip()
+        if not chosen:
+            return None
+        rejected = str(row.get("rejected") or "").strip()
+        synthetic_negative = False
+        if not rejected:
+            synthetic_negative = True
+            words = chosen.split()
+            if len(words) > 6:
+                rejected = " ".join(words[: max(3, len(words) // 3)])
+            else:
+                rejected = "Insufficient or incomplete answer."
+        return {
+            "prompt": prompt,
+            "chosen": chosen,
+            "rejected": rejected,
+            "synthetic_negative": synthetic_negative,
+        }
+
+    def _score_preference_pairs(pairs: list[dict]) -> dict:
+        scored_rows: list[dict] = []
+        chosen_total = 0.0
+        rejected_total = 0.0
+        margin_total = 0.0
+        synthetic_negative_count = 0
+        for idx, pair in enumerate(pairs, start=1):
+            prompt = str(pair.get("prompt") or "")
+            chosen = str(pair.get("chosen") or "")
+            rejected = str(pair.get("rejected") or "")
+            synthetic_negative = bool(pair.get("synthetic_negative"))
+            if synthetic_negative:
+                synthetic_negative_count += 1
+            chosen_score = float(score_response(prompt, chosen, reference=chosen).get("score") or 0.0)
+            rejected_score = float(score_response(prompt, rejected, reference=chosen).get("score") or 0.0)
+            margin = round(chosen_score - rejected_score, 6)
+            chosen_total += chosen_score
+            rejected_total += rejected_score
+            margin_total += margin
+            scored_rows.append(
+                {
+                    "pair_id": idx,
+                    "prompt": prompt,
+                    "chosen_score": round(chosen_score, 6),
+                    "rejected_score": round(rejected_score, 6),
+                    "margin": margin,
+                    "synthetic_negative": synthetic_negative,
+                    "passed": margin > 0,
+                }
+            )
+
+        pair_count = len(scored_rows)
+        return {
+            "pair_count": pair_count,
+            "synthetic_negative_count": synthetic_negative_count,
+            "chosen_avg": round(chosen_total / max(1, pair_count), 6),
+            "rejected_avg": round(rejected_total / max(1, pair_count), 6),
+            "preference_alignment_score": round(margin_total / max(1, pair_count), 6),
+            "rows": scored_rows,
+        }
 
     job = get_rlhf_dpo_job(job_id)
     if not job:
@@ -10313,14 +10672,31 @@ def _run_rlhf_dpo_job(job_id: str):
         append_rlhf_dpo_job_event(job_id, "Dataset not found", level="error", data={"dataset_version_id": dataset_version_id})
         return
 
+    preview_rows = dataset.get("preview_rows") if isinstance(dataset.get("preview_rows"), list) else []
+    preference_pairs = []
+    for row in preview_rows[:200]:
+        if isinstance(row, dict):
+            pair = _build_preference_pair(row)
+            if pair is not None:
+                preference_pairs.append(pair)
+    if not preference_pairs:
+        update_rlhf_dpo_job(job_id, status="failed", error={"message": "dataset_version_id contains no usable preference rows"})
+        append_rlhf_dpo_job_event(job_id, "No usable preference rows found", level="error", data={"dataset_version_id": dataset_version_id})
+        return
+
+    preference_metrics = _score_preference_pairs(preference_pairs)
+
     child = _create_finetune_job_from_rows(
         model=base_model,
         rows=[
             {
-                "prompt": f"Preference optimization seed from dataset {dataset_version_id}",
-                "response": f"{method.upper()} optimization target for {base_model}",
+                "prompt": pair["prompt"],
+                "response": pair["chosen"],
                 "source": "rlhf_dpo",
+                "preference_rejected": pair["rejected"],
+                "synthetic_negative": pair["synthetic_negative"],
             }
+            for pair in preference_pairs
         ],
         source="rlhf_dpo",
         provenance_extra={
@@ -10328,6 +10704,8 @@ def _run_rlhf_dpo_job(job_id: str):
             "dataset_version_id": dataset_version_id,
             "rlhf_dpo_job_id": job_id,
             "config": latest.get("config") if isinstance(latest.get("config"), dict) else {},
+            "pair_count": preference_metrics["pair_count"],
+            "synthetic_negative_count": preference_metrics["synthetic_negative_count"],
         },
     )
     fine_tune_job_id = str(child.get("job", {}).get("id") or "")
@@ -10361,7 +10739,6 @@ def _run_rlhf_dpo_job(job_id: str):
         append_rlhf_dpo_job_event(job_id, "Child fine-tune failed", level="error", data={"status": ft_status})
         return
 
-    pseudo_score = round((abs(hash((job_id, method, dataset_version_id))) % 1000) / 1000.0, 3)
     adapter_id = f"{base_model.replace('/', '-')}-{method}"
     adapter_version = f"v{int(time.time())}"
     adapter = save_lora_adapter_version(
@@ -10370,7 +10747,10 @@ def _run_rlhf_dpo_job(job_id: str):
         base_model=base_model,
         checkpoint_uri=f"inline://adapters/{adapter_id}/{adapter_version}",
         metrics={
-            "preference_alignment_score": pseudo_score,
+            "preference_alignment_score": float(preference_metrics["preference_alignment_score"]),
+            "preference_pair_count": int(preference_metrics["pair_count"]),
+            "chosen_avg": float(preference_metrics["chosen_avg"]),
+            "rejected_avg": float(preference_metrics["rejected_avg"]),
             "trained_tokens": int(ft_job.get("trained_tokens") or 0),
         },
         provenance={
@@ -10383,7 +10763,12 @@ def _run_rlhf_dpo_job(job_id: str):
         status="ready",
     )
     result = {
-        "preference_alignment_score": pseudo_score,
+        "preference_alignment_score": float(preference_metrics["preference_alignment_score"]),
+        "pair_count": int(preference_metrics["pair_count"]),
+        "chosen_avg": float(preference_metrics["chosen_avg"]),
+        "rejected_avg": float(preference_metrics["rejected_avg"]),
+        "synthetic_negative_count": int(preference_metrics["synthetic_negative_count"]),
+        "preference_rows": preference_metrics["rows"][:25],
         "method": method,
         "fine_tune_job_id": fine_tune_job_id,
         "dataset_version_id": dataset_version_id,
@@ -15303,3 +15688,106 @@ async def api_memory_consolidate(request: Request):
         return run_consolidation(dry_run=dry_run)
     except Exception as exc:
         return _api_error(str(exc))
+
+
+# ── Dataset-backed benchmark runners ─────────────────────────────────────────
+
+@router.post("/benchmark/dataset/run")
+async def api_benchmark_dataset_run(request: Request):
+    """Run a publishable dataset benchmark (gsm8k, truthfulqa, humaneval, mmlu, hellaswag)."""
+    body = await request.json()
+    dataset = str(body.get("dataset", "gsm8k")).strip()
+    provider = str(body.get("provider", "")).strip()
+    model = str(body.get("model", "")).strip()
+    max_samples = min(int(body.get("max_samples", 10)), 50)
+    try:
+        from ..benchmark import run_dataset_benchmark
+        return run_dataset_benchmark(dataset=dataset, provider=provider, model=model, max_samples=max_samples)
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/benchmark/dataset/suite")
+async def api_benchmark_dataset_suite(request: Request):
+    """Run a full suite of dataset benchmarks and return aggregated results."""
+    body = await request.json()
+    datasets = body.get("datasets") or None
+    provider = str(body.get("provider", "")).strip()
+    model = str(body.get("model", "")).strip()
+    max_samples = min(int(body.get("max_samples_per_dataset", 10)), 50)
+    try:
+        from ..benchmark import run_dataset_suite_benchmark
+        return run_dataset_suite_benchmark(datasets=datasets, provider=provider, model=model, max_samples_per_dataset=max_samples)
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/benchmark/dataset/history")
+async def api_benchmark_dataset_history(request: Request):
+    """Return persisted dataset benchmark history."""
+    dataset = str(request.query_params.get("dataset", "")).strip()
+    limit = min(int(request.query_params.get("limit", 50)), 500)
+    try:
+        from ..benchmark import get_dataset_benchmark_history
+        return get_dataset_benchmark_history(dataset=dataset, limit=limit)
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/benchmark/dataset/datasets")
+async def api_benchmark_dataset_list(request: Request):
+    """List available dataset benchmark runners."""
+    from ..evals.dataset_runners import DATASET_RUNNERS
+    return {
+        "datasets": list(DATASET_RUNNERS.keys()),
+        "hf_enabled": __import__("os").getenv("BENCHMARK_USE_HF_DATASETS", "false").lower() == "true",
+        "note": "Set BENCHMARK_USE_HF_DATASETS=true to load live samples from HuggingFace",
+    }
+
+
+# ── Benchmark artifact export ─────────────────────────────────────────────────
+
+@router.get("/benchmark/export/{run_id}")
+async def api_benchmark_export(request: Request, run_id: str):
+    """Export a benchmark run as publishable artifacts (JSONL, CSV, HTML, leaderboard JSON)."""
+    formats_raw = str(request.query_params.get("formats", "")).strip()
+    formats = [f.strip() for f in formats_raw.split(",") if f.strip()] or None
+    try:
+        from ..benchmark import export_benchmark_run
+        result = export_benchmark_run(run_id=run_id, formats=formats)
+        if "error" in result:
+            return _api_error(result["error"], status_code=404)
+        return result
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.post("/benchmark/export/suite")
+async def api_benchmark_export_suite(request: Request):
+    """Export a complete benchmark suite as publishable artifacts."""
+    body = await request.json()
+    suite_data = body.get("suite_data", {})
+    full_results = body.get("full_results", [])
+    formats_raw = str(body.get("formats", "")).strip()
+    formats = [f.strip() for f in formats_raw.split(",") if f.strip()] or None
+    if not suite_data or not full_results:
+        return _api_error("suite_data and full_results are required", status_code=400)
+    try:
+        from ..benchmark import export_dataset_suite_artifacts
+        return export_dataset_suite_artifacts(suite_data=suite_data, full_results=full_results, formats=formats)
+    except Exception as exc:
+        return _api_error(str(exc))
+
+
+@router.get("/benchmark/export/{run_id}/html")
+async def api_benchmark_export_html(request: Request, run_id: str):
+    """Return the HTML benchmark report directly (text/html content type)."""
+    from fastapi.responses import HTMLResponse
+    try:
+        from ..benchmark import export_benchmark_run
+        result = export_benchmark_run(run_id=run_id, formats=["html"])
+        if "error" in result:
+            return HTMLResponse(f"<h1>Not found</h1><p>{result['error']}</p>", status_code=404)
+        return HTMLResponse(content=result.get("html", "<p>No HTML output.</p>"))
+    except Exception as exc:
+        return HTMLResponse(f"<h1>Error</h1><p>{exc}</p>", status_code=500)

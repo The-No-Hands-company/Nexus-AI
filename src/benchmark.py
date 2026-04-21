@@ -605,3 +605,116 @@ def register_benchmark_schedules(run_fn: Any) -> None:
     for name, task, schedule in _JOBS:
         if name not in existing_names:
             _sched.schedule_job(name=name, task=task, schedule=schedule)
+
+
+# ── Dataset-backed benchmark runners ─────────────────────────────────────────
+
+def run_dataset_benchmark(
+    dataset: str,
+    provider: str = "",
+    model: str = "",
+    max_samples: int = 10,
+) -> dict[str, Any]:
+    """Run a single publishable dataset benchmark against a provider/model.
+
+    Args:
+        dataset:     One of gsm8k, truthfulqa, humaneval, mmlu, hellaswag.
+        provider:    Provider ID (falls back to first available).
+        model:       Model name (falls back to provider default).
+        max_samples: Max samples to evaluate (capped at dataset size).
+
+    Returns:
+        Full DatasetBenchmarkResult as dict, including sample_results.
+    """
+    from .evals.dataset_runners import DATASET_RUNNERS, DatasetBenchmarkResult  # type: ignore[attr-defined]
+    from .agent import _has_key, PROVIDERS, _is_rate_limited  # type: ignore[attr-defined]
+
+    runner = DATASET_RUNNERS.get(dataset)
+    if runner is None:
+        return {"error": f"Unknown dataset '{dataset}'. Available: {sorted(DATASET_RUNNERS.keys())}"}
+
+    if not provider:
+        available = [pid for pid, cfg in PROVIDERS.items() if _has_key(cfg) and not _is_rate_limited(pid)]
+        provider = available[0] if available else "openai"
+    if not model:
+        cfg = PROVIDERS.get(provider, {})
+        model = str(cfg.get("model") or provider)
+
+    try:
+        result: DatasetBenchmarkResult = runner(provider=provider, model=model, max_samples=max_samples)
+        return result.to_dict()
+    except Exception as exc:
+        return {"error": str(exc), "dataset": dataset, "provider": provider}
+
+
+def run_dataset_suite_benchmark(
+    datasets: list[str] | None = None,
+    provider: str = "",
+    model: str = "",
+    max_samples_per_dataset: int = 10,
+) -> dict[str, Any]:
+    """Run all (or selected) dataset benchmarks and return aggregated suite report."""
+    from .evals.dataset_runners import run_dataset_suite  # type: ignore[attr-defined]
+    from .agent import _has_key, PROVIDERS, _is_rate_limited  # type: ignore[attr-defined]
+
+    if not provider:
+        available = [pid for pid, cfg in PROVIDERS.items() if _has_key(cfg) and not _is_rate_limited(pid)]
+        provider = available[0] if available else "openai"
+    if not model:
+        cfg = PROVIDERS.get(provider, {})
+        model = str(cfg.get("model") or provider)
+
+    return run_dataset_suite(provider=provider, model=model, datasets=datasets, max_samples_per_dataset=max_samples_per_dataset)
+
+
+def get_dataset_benchmark_history(dataset: str = "", limit: int = 50) -> dict[str, Any]:
+    """Return persisted dataset benchmark history."""
+    from .evals.dataset_runners import load_dataset_history  # type: ignore[attr-defined]
+    return {"results": load_dataset_history(dataset=dataset, limit=limit)}
+
+
+# ── Benchmark artifact export ─────────────────────────────────────────────────
+
+def export_benchmark_run(
+    run_id: str,
+    formats: list[str] | None = None,
+) -> dict[str, Any]:
+    """Export a specific benchmark run by run_id in requested artifact formats.
+
+    Searches dataset history for the run; falls back to generating a fresh probe run.
+
+    Args:
+        run_id:   The run_id to look up, or 'latest' for the most recent.
+        formats:  List of formats: jsonl, csv, html, leaderboard, manifest.
+
+    Returns:
+        Dict with format → content plus manifest checksums.
+    """
+    from .evals.dataset_runners import load_dataset_history  # type: ignore[attr-defined]
+    from .evals.artifact_export import export_benchmark_artifacts  # type: ignore[attr-defined]
+
+    history = load_dataset_history(limit=500)
+    run_data: dict[str, Any] | None = None
+
+    if run_id == "latest" and history:
+        run_data = history[0]
+    else:
+        for row in history:
+            if row.get("run_id") == run_id:
+                run_data = row
+                break
+
+    if run_data is None:
+        return {"error": f"Run '{run_id}' not found in dataset benchmark history."}
+
+    return export_benchmark_artifacts(run_data=run_data, formats=formats)
+
+
+def export_dataset_suite_artifacts(
+    suite_data: dict[str, Any],
+    full_results: list[dict[str, Any]],
+    formats: list[str] | None = None,
+) -> dict[str, Any]:
+    """Export a completed suite run as publishable artifacts."""
+    from .evals.artifact_export import export_benchmark_artifacts  # type: ignore[attr-defined]
+    return export_benchmark_artifacts(suite_data=suite_data, full_results=full_results, formats=formats)
