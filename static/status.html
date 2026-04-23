@@ -97,6 +97,10 @@
         <div id="overall" class="value">Checking...</div>
       </div>
       <div class="card">
+        <div class="label">Uptime Target</div>
+        <div class="value">99.9% monthly</div>
+      </div>
+      <div class="card">
         <div class="label">API Health</div>
         <div id="api" class="value">Checking...</div>
       </div>
@@ -121,7 +125,7 @@
       <tbody id="rows"></tbody>
     </table>
 
-    <p class="foot">This page is local-first. For public hosted status products, wire this signal into an external status provider.</p>
+    <p class="foot">This page is local-first. For public hosted status products, wire this signal into an external status provider. Interpret yellow as degraded service and red as incident-level impact.</p>
   </main>
 
   <script>

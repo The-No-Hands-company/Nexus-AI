@@ -684,6 +684,13 @@
       color:var(--muted);cursor:pointer;transition:all .14s;background:var(--surface);
       -webkit-tap-highlight-color:transparent}
     .chip:hover,.chip:active{border-color:var(--accent);color:var(--text);background:var(--surface2)}
+    .welcome-checklist{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;width:min(680px,100%);margin:2px 0}
+    .welcome-step{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 11px;text-align:left}
+    .welcome-step-title{font-size:.7rem;color:var(--text);font-weight:700;margin-bottom:3px;letter-spacing:.03em;text-transform:uppercase}
+    .welcome-step-desc{font-size:.72rem;color:var(--muted);line-height:1.45}
+    .welcome-trust{display:flex;gap:12px;flex-wrap:wrap;justify-content:center;align-items:center;font-size:.72rem;color:var(--muted)}
+    .welcome-trust a{color:var(--teal);text-decoration:none}
+    .welcome-trust a:hover{text-decoration:underline}
 
     #messages{flex:1;overflow-y:auto;overflow-x:hidden;padding:18px 0 6px;
       display:flex;flex-direction:column;gap:14px;-webkit-overflow-scrolling:touch;
@@ -913,6 +920,9 @@
       .pill-providers span{display:none}.pill-providers{padding:4px 8px}
       .pill-safety span{display:none}.pill-safety{padding:4px 8px}
       #welcome h2{font-size:1.25rem}.bubble{font-size:.84rem}}
+    @media(max-width:760px){
+      .welcome-checklist{grid-template-columns:1fr;max-width:380px}
+    }
 
     @media (pointer: coarse) {
       button,
@@ -1397,6 +1407,25 @@
         <p style="font-size:.72rem;color:var(--muted);max-width:380px;opacity:.65;margin-bottom:20px">
           Part of the <a href="https://github.com/The-No-Hands-company" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">No Hands Company</a> Nexus Systems ecosystem
         </p>
+        <div class="welcome-checklist">
+          <div class="welcome-step">
+            <div class="welcome-step-title">1. Start Fast</div>
+            <div class="welcome-step-desc">Pick a starter prompt below or describe your goal in plain language.</div>
+          </div>
+          <div class="welcome-step">
+            <div class="welcome-step-title">2. Stay In Control</div>
+            <div class="welcome-step-desc">Use stop, safety profile, and persona controls exactly like mainstream AI chat tools.</div>
+          </div>
+          <div class="welcome-step">
+            <div class="welcome-step-title">3. Verify Trust</div>
+            <div class="welcome-step-desc">Check status and uptime commitments before mission-critical usage.</div>
+          </div>
+        </div>
+        <div class="welcome-trust">
+          <a href="/status" target="_blank" rel="noopener">Live status</a>
+          <span>Uptime target: 99.9%</span>
+          <span>Draft SLA credits available for publication workflow</span>
+        </div>
         <div class="chips">
           <div class="chip" onclick="fillTask('Search the web for the latest AI news today')">🔍 Web search</div>
           <div class="chip" onclick="fillTask('Write a Python script that sorts a list of files by date modified')">💻 Write code</div>
@@ -2229,6 +2258,25 @@ function setBusy(v){
   document.getElementById('send-btn').style.display=v?'none':'flex';
 }
 
+function normalizeFrontendErrorMessage(rawMsg){
+  const msg = String(rawMsg || '').trim();
+  const lower = msg.toLowerCase();
+  if(!msg) return 'The request could not be completed. Please try again.';
+  if(lower.includes('validation_error') || lower.includes('task is required')){
+    return 'Please enter a prompt before sending.';
+  }
+  if(lower.includes('rate limit') || lower.includes('429') || lower.includes('exhausted')){
+    return 'Providers are temporarily busy. Retry in a few seconds.';
+  }
+  if(lower.includes('streaming response body is unavailable') || lower.includes('unexpected response type')){
+    return 'Connection is unstable right now. Please retry this message.';
+  }
+  if(lower.includes('failed to fetch') || lower.includes('networkerror')){
+    return 'Network request failed. Check your connection and try again.';
+  }
+  return msg;
+}
+
 // ── STREAMING SEND ─────────────────────────────────────────────────────────────
 async function send(){
   const ta = document.getElementById('task');
@@ -2672,7 +2720,7 @@ async function send(){
 
         } else if(evt.type==='error'){
           sawTerminalEvent = true;
-          const msg = evt.message || '';
+          const msg = normalizeFrontendErrorMessage(evt.message || '');
           const isExhausted = msg.toLowerCase().includes('exhausted') ||
                               msg.toLowerCase().includes('rate limit') ||
                               msg.toLowerCase().includes('429');
@@ -2700,7 +2748,10 @@ async function send(){
   } catch(err){
     if(err.name!=='AbortError'){
       showTyping(false);
-      const errEl2=document.createElement('div');errEl2.style.cssText='color:var(--red);font-size:.82rem;margin-top:4px';errEl2.textContent='⚠️ '+esc(String(err));agentBub.appendChild(errEl2);
+      const errEl2=document.createElement('div');
+      errEl2.style.cssText='color:var(--red);font-size:.82rem;margin-top:4px';
+      errEl2.textContent='⚠️ '+normalizeFrontendErrorMessage(String(err));
+      agentBub.appendChild(errEl2);
     }
   }
 

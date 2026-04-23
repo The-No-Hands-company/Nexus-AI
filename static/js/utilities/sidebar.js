@@ -1,14 +1,33 @@
+const SIDEBAR_PREF_KEY = 'nexus.sidebar.open';
+
+function persistSidebarState(isOpen){
+  try{ localStorage.setItem(SIDEBAR_PREF_KEY, isOpen ? '1' : '0'); }catch(_){ }
+}
+
+function restoreSidebarState(){
+  const sidebar = document.getElementById('sidebar');
+  if(!sidebar) return;
+  let preferredOpen = false;
+  try{ preferredOpen = localStorage.getItem(SIDEBAR_PREF_KEY) === '1'; }catch(_){ }
+  const isMobile = window.matchMedia('(max-width: 700px)').matches;
+  sidebarOpen = preferredOpen && !isMobile;
+  sidebar.classList.toggle('hidden', !sidebarOpen);
+  document.getElementById('sidebar-overlay')?.classList.toggle('active', isMobile && sidebarOpen);
+}
+
 // ── SIDEBAR ────────────────────────────────────────────────────────────────────
 function toggleSidebar(){
   sidebarOpen=!sidebarOpen;
   document.getElementById('sidebar').classList.toggle('hidden',!sidebarOpen);
   const isMobile = window.matchMedia('(max-width: 700px)').matches;
   document.getElementById('sidebar-overlay').classList.toggle('active',isMobile && sidebarOpen);
+  persistSidebarState(sidebarOpen);
 }
 function closeSidebar(){
   sidebarOpen=false;
   document.getElementById('sidebar').classList.add('hidden');
   document.getElementById('sidebar-overlay').classList.remove('active');
+  persistSidebarState(false);
 }
 async function loadChatList(){
   const d=await fetch('/chats').then(r=>r.json()).catch(()=>({chats:[]}));
@@ -156,4 +175,21 @@ async function togglePin(cid, currentlyPinned) {
     headers:{'Content-Type':'application/json'},
     body: JSON.stringify({pinned: newVal})});
   await loadChatList();
+}
+
+window.addEventListener('resize', () => {
+  const isMobile = window.matchMedia('(max-width: 700px)').matches;
+  const sidebar = document.getElementById('sidebar');
+  if(!sidebar) return;
+  if(isMobile && sidebarOpen){
+    document.getElementById('sidebar-overlay')?.classList.add('active');
+  } else {
+    document.getElementById('sidebar-overlay')?.classList.remove('active');
+  }
+});
+
+if(document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', restoreSidebarState);
+} else {
+  restoreSidebarState();
 }

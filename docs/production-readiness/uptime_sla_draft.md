@@ -15,6 +15,13 @@
 - Measurement scope: production API request success and availability window
 - Exclusions: scheduled maintenance, force majeure, upstream provider outages beyond contractual control
 
+## User-Facing Communication Baseline
+
+- Status page must expose current operational state with clear labels: Operational, Degraded, Major Outage.
+- Incident communication should include impact scope, start time, mitigation status, and next update ETA.
+- Publish uptime target text consistently in user-facing surfaces so expectations match actual SLA draft.
+- Do not claim finalized SLA terms publicly until legal and finance approvals are complete.
+
 ## Measurement Inputs
 
 1. `/health` and deep-health probes

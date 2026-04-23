@@ -271,6 +271,21 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    @app.exception_handler(Exception)
+    async def unhandled_exception_fallback(request: Request, exc: Exception):
+        _logger.exception("unhandled_exception path=%s error=%s", request.url.path, exc)
+        path = request.url.path or ""
+        if path.startswith("/agent") or path.startswith("/v1/agent"):
+            return JSONResponse(
+                {
+                    "error": "Request could not be completed.",
+                    "type": "internal_error",
+                    "detail": "Please retry, or send a shorter task.",
+                },
+                status_code=500,
+            )
+        return JSONResponse({"error": "internal server error", "type": "internal_error"}, status_code=500)
+
     @app.middleware("http")
     async def add_security_headers(request: Request, call_next):
         accept = (request.headers.get("Accept") or "").lower()
