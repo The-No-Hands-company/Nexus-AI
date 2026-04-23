@@ -327,7 +327,7 @@ def set_session_safety_profile(sid: str, profile: str) -> None:
 # ── provider registry ─────────────────────────────────────────────────────────
 PROVIDERS: Dict[str, Dict] = {
     "llm7":    {"label":"LLM7.io","base_url":"https://api.llm7.io/v1",
-                "env_key":"LLM7_API_KEY","default_model":"deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+                "env_key":"LLM7_API_KEY","default_model":"meta-llama/Llama-3.2-3B-Instruct",
                 "openai_compat":True,"keyless":True},
     "groq":    {"label":"Groq","base_url":"https://api.groq.com/openai/v1",
                 "env_key":"GROQ_API_KEY","default_model":"llama-3.3-70b-versatile",
@@ -2242,6 +2242,39 @@ def _call_single(pid: str, messages: List[Dict]) -> Dict[str, Any]:
 class AllProvidersExhausted(Exception): pass
 
 
+_provider_attempt_state = threading.local()
+
+
+def _set_last_provider_attempts(attempts: List[Dict[str, Any]]) -> None:
+    _provider_attempt_state.attempts = list(attempts)
+
+
+def get_last_provider_attempts() -> List[Dict[str, Any]]:
+    return list(getattr(_provider_attempt_state, "attempts", []) or [])
+
+
+def _format_provider_attempt_chain(attempts: List[Dict[str, Any]]) -> str:
+    parts: List[str] = []
+    for item in attempts:
+        provider = str(item.get("provider") or item.get("provider_id") or "provider")
+        status = str(item.get("status") or "unknown")
+        parts.append(f"{provider}:{status}")
+    return " -> ".join(parts)
+
+
+def _attach_provider_diagnostics(
+    payload: Dict[str, Any],
+    attempts: List[Dict[str, Any]],
+    fallback_reason: str = "",
+) -> Dict[str, Any]:
+    out = dict(payload or {})
+    out.setdefault("provider_attempts", list(attempts))
+    out.setdefault("provider_attempt_chain", _format_provider_attempt_chain(attempts))
+    if fallback_reason:
+        out.setdefault("fallback_reason", fallback_reason)
+    return out
+
+
 def _provider_exhausted_error(scope: str, tried: List[str], last_error: str = "") -> Dict[str, Any]:
     """Structured 503 payload with scope tag and per-provider cooldown info."""
     now = time.time()
@@ -2282,6 +2315,8 @@ def call_llm_with_fallback(
         tracer = None
 
     resources = get_system_resources()
+    attempts: List[Dict[str, Any]] = []
+    _set_last_provider_attempts([])
     order = _smart_order(task or (messages[-1].get("content","") if messages else ""), resources)
     if provider_order:
         seen: set[str] = set()
@@ -2293,7 +2328,9 @@ def call_llm_with_fallback(
             seen.add(p)
             constrained.append(p)
         order = constrained
-    if not order: raise AllProvidersExhausted("No providers available.")
+    if not order:
+        _set_last_provider_attempts(attempts)
+        raise AllProvidersExhausted("No providers available.")
 
     # Vision routing: if any message contains image_url parts, promote
     # vision-capable providers to the front of the queue and select the
@@ -2316,6 +2353,12 @@ def call_llm_with_fallback(
     last_err = None
     for pid in order:
         if _provider_temporarily_unavailable(pid):
+            attempts.append({
+                "provider_id": pid,
+                "provider": PROVIDERS.get(pid, {}).get("label", pid),
+                "status": "cooldown_skip",
+                "error": "provider in cooldown window",
+            })
             continue
         started = time.time()
         try:
@@ -2335,9 +2378,24 @@ def call_llm_with_fallback(
                 llm_counter.labels(provider=pid, status="ok").inc()
             if llm_latency is not None:
                 llm_latency.labels(provider=pid).observe(elapsed)
+            attempts.append({
+                "provider_id": pid,
+                "provider": PROVIDERS.get(pid, {}).get("label", pid),
+                "status": "ok",
+                "latency_ms": int(elapsed * 1000),
+            })
+            _set_last_provider_attempts(attempts)
+            if isinstance(result, dict):
+                result = _attach_provider_diagnostics(result, attempts)
             return result, pid
         except CircuitBreakerOpen as e:
             last_err = e
+            attempts.append({
+                "provider_id": pid,
+                "provider": PROVIDERS.get(pid, {}).get("label", pid),
+                "status": "circuit_open",
+                "error": str(e),
+            })
             print(f"⛔ {pid} circuit open ({e.retry_after:.1f}s)")
         except Exception as e:
             last_err = e
@@ -2346,10 +2404,46 @@ def call_llm_with_fallback(
                 llm_counter.labels(provider=pid, status="error").inc()
             if llm_latency is not None:
                 llm_latency.labels(provider=pid).observe(elapsed)
-            if _is_rl_error(e): _mark_rate_limited(pid); print(f"↩️ {pid} rate-limited")
-            elif isinstance(e, (_r.ConnectionError, _r.Timeout)): print(f"⚠️ {pid} connection error")
-            else: print(f"⚠️ {pid}: {e}")
-    return _graceful_degraded_response(messages, task, str(last_err))
+            if _is_rl_error(e):
+                _mark_rate_limited(pid)
+                attempts.append({
+                    "provider_id": pid,
+                    "provider": PROVIDERS.get(pid, {}).get("label", pid),
+                    "status": "rate_limited",
+                    "error": str(e),
+                    "latency_ms": int(elapsed * 1000),
+                })
+                print(f"↩️ {pid} rate-limited")
+            elif isinstance(e, (_r.ConnectionError, _r.Timeout)):
+                attempts.append({
+                    "provider_id": pid,
+                    "provider": PROVIDERS.get(pid, {}).get("label", pid),
+                    "status": "connection_error",
+                    "error": str(e),
+                    "latency_ms": int(elapsed * 1000),
+                })
+                print(f"⚠️ {pid} connection error")
+            else:
+                attempts.append({
+                    "provider_id": pid,
+                    "provider": PROVIDERS.get(pid, {}).get("label", pid),
+                    "status": "error",
+                    "error": str(e),
+                    "latency_ms": int(elapsed * 1000),
+                })
+                print(f"⚠️ {pid}: {e}")
+
+    result, fallback_provider = _graceful_degraded_response(messages, task, str(last_err))
+    attempts.append({
+        "provider_id": fallback_provider,
+        "provider": fallback_provider,
+        "status": "degraded_fallback",
+    })
+    _set_last_provider_attempts(attempts)
+    if isinstance(result, dict):
+        reason_tag = "provider_unavailable" if fallback_provider in ("cache", "ollama_local") else ""
+        result = _attach_provider_diagnostics(result, attempts, fallback_reason=reason_tag)
+    return result, fallback_provider
 
 
 def _graceful_degraded_response(messages: List[Dict], task: str, reason: str) -> tuple[Dict, str]:
@@ -2885,6 +2979,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             try:
                 action, pid, _llm_meta = _next_action(messages, clean_task)
             except AllProvidersExhausted:
+                provider_attempts = get_last_provider_attempts()
                 fallback_text = (
                     "I could not reach a model provider for this turn, so I could not generate a full answer. "
                     "Please retry in a moment. If this keeps happening, verify at least one provider key is active "
@@ -2897,6 +2992,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     "content": fallback_text,
                     "provider": cfg.get("label", "Built-in"),
                     "model": _config["model"] or cfg.get("default_model", "fallback"),
+                    "fallback_reason": "provider_unavailable",
+                    "provider_attempt_chain": _format_provider_attempt_chain(provider_attempts),
+                    "provider_attempts": provider_attempts,
                     "history": messages,
                 }
                 return
@@ -3146,6 +3244,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "content": final,
                 "provider": cfg.get("label", "?"),
                 "model": model_name,
+                "fallback_reason": action.get("fallback_reason", ""),
+                "provider_attempt_chain": action.get("provider_attempt_chain", ""),
+                "provider_attempts": action.get("provider_attempts", []),
                 "history": messages,
                 "tokens": {
                     "input": input_token_estimate,
@@ -3809,6 +3910,12 @@ def run_agent_task(task, history, files=None, sid="", usage_principal: str = "")
         "provider": final["provider"],
         "model": final["model"],
     }
+    if final.get("fallback_reason"):
+        out["fallback_reason"] = final.get("fallback_reason")
+    if final.get("provider_attempt_chain"):
+        out["provider_attempt_chain"] = final.get("provider_attempt_chain")
+    if final.get("provider_attempts"):
+        out["provider_attempts"] = final.get("provider_attempts")
     if ensemble_meta:
         out["ensemble"] = ensemble_meta
     return out
