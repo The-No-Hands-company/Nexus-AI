@@ -2812,7 +2812,7 @@ async function send(){
     if(!hasRenderable){
       const incompleteEl=document.createElement('div');
       incompleteEl.style.cssText='color:var(--muted);font-size:.82rem;font-style:italic';
-      incompleteEl.textContent='Request finished without a final answer. Please retry.';
+      incompleteEl.textContent='The agent completed its steps but ran out of turns before summarising. The work shown above has been done — you can ask a follow-up or try again.';
       agentBub.appendChild(incompleteEl);
     }
   }

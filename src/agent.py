@@ -1247,6 +1247,18 @@ Rules:
 - image_gen for any request to generate, draw, create, or visualise an image.
 - write_file produces artifacts if it's HTML/SVG/CSS+JS — the UI will render them.
 - Never ask for info you can get with tools.
+
+GITHUB REPO WORKFLOW (critical — follow this exactly when given a GitHub URL):
+When the user mentions a GitHub URL with any development intent ("help", "develop", "continue",
+"improve", "fix", "build", "work on"), you MUST follow this sequence without asking:
+  1. clone_repo the URL immediately
+  2. list_files **/* to see the structure
+  3. read_file README.md (or the main entry point)
+  4. read_file 2-3 key source files to understand the current state
+  5. respond with: what the project is, current state, what you found, and concrete next steps
+Do NOT stop after cloning. Do NOT ask "what would you like to do?" — read the code and
+immediately provide a useful analysis and development plan.
+ALWAYS finish with a respond action — never leave the user without an answer.
 """
 
 # ── tool executors ────────────────────────────────────────────────────────────
@@ -3883,13 +3895,33 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         if trace_id:
             _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
 
-    # Hit MAX_LOOP
-    cfg = PROVIDERS.get(providers_used[-1] if providers_used else "",{})
-    final = "Reached max steps."
-    messages.append({"role":"assistant","content":final})
-    yield {"type":"done","content":final,"provider":cfg.get("label","?"),
-           "model":_config["model"] or cfg.get("default_model","?"),"history":messages,
-           "tokens":{"input":input_token_estimate,"output":1,"total":input_token_estimate+1}}
+    # Hit MAX_LOOP — do one final forced-respond call so the user always gets an answer
+    cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+    forced_messages = list(messages) + [{
+        "role": "user",
+        "content": (
+            "You have reached the step limit. "
+            "Based on everything you have done so far, produce a FINAL respond action now. "
+            "Summarise what you found, what you built or changed, and what the recommended next steps are. "
+            "You MUST reply with: {\"action\":\"respond\",\"content\":\"...\",\"confidence\":0.8}"
+        )
+    }]
+    try:
+        forced_action, forced_pid = call_llm_with_fallback(forced_messages, clean_task)
+        if forced_action.get("action") == "respond":
+            final = forced_action.get("content", "Analysis complete — see tool steps above for details.")
+        else:
+            final = forced_action.get("content", "Reached step limit. See tool steps above for details.")
+        if forced_pid not in providers_used:
+            providers_used.append(forced_pid)
+    except Exception:
+        final = "Reached the step limit. See the tool steps above — the work has been done but I ran out of turns to summarise it."
+
+    messages.append({"role": "assistant", "content": final})
+    yield {"type": "done", "content": final, "provider": cfg.get("label", "?"),
+           "model": _config["model"] or cfg.get("default_model", "?"), "history": messages,
+           "tokens": {"input": input_token_estimate, "output": len(final)//4,
+                      "total": input_token_estimate + len(final)//4}}
 
 # ── non-streaming wrapper ─────────────────────────────────────────────────────
 def run_agent_task(task, history, files=None, sid="", usage_principal: str = ""):
