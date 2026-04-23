@@ -4,6 +4,7 @@ from functools import lru_cache
 from datetime import datetime, timezone
 from contextlib import nullcontext
 from typing import Dict, Any, List, Iterator, Optional
+from pathlib import Path
 from .tools_builtin import dispatch_builtin
 from .autonomy import Orchestrator, classify_subtask, PlanningSystem
 from .personas import build_system_prompt, get_active_persona_name, get_persona, get_allowed_tools
@@ -28,6 +29,54 @@ from .memory import add_memory, summarize_history as _summarize_history, get_mem
 from .profile_loader import load_profile_pack
 from .secrets_manager import get_secret, inject_request_credentials, secret_access_context
 from .circuit_breaker import CircuitBreakerOpen, CircuitState, get_circuit_breaker
+
+
+def _load_local_env_files() -> None:
+    """Best-effort .env loader for local/dev runs.
+
+    Uses python-dotenv when available, otherwise falls back to a small parser.
+    Existing environment variables are never overridden.
+    """
+    env_paths = [Path(".env"), Path(".env.local")]
+    try:
+        from dotenv import load_dotenv  # type: ignore
+        for p in env_paths:
+            if p.exists():
+                load_dotenv(dotenv_path=p, override=False)
+        return
+    except Exception:
+        pass
+
+    for p in env_paths:
+        if not p.exists():
+            continue
+        try:
+            for raw_line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip()
+                if not key or key in os.environ:
+                    continue
+                if key.startswith("export "):
+                    key = key[len("export "):].strip()
+                if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
+                    value = value[1:-1]
+                else:
+                    # Strip inline comments in unquoted values (e.g. KEY=abc # note).
+                    # This avoids accidentally including human-readable comments in secrets.
+                    hash_idx = value.find(" #")
+                    if hash_idx != -1:
+                        value = value[:hash_idx].rstrip()
+                os.environ[key] = value
+        except Exception:
+            pass
+
+
+_load_local_env_files()
+
 try:
     init_usage_table()
 except Exception:
@@ -187,8 +236,11 @@ def _send_safety_event_webhook(entry: Dict[str, Any]) -> None:
         headers=headers,
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=webhook_timeout):
-        return
+    try:
+        with urllib.request.urlopen(req, timeout=webhook_timeout):
+            return
+    except Exception as e:
+        print(f"Failed to send safety event webhook: {e}")
 
 def _push_safety_event(event_type: str, detail: Dict) -> None:
     """Append a safety audit event.  event_type: 'block' | 'profile_change' | 'pii_scrub'."""
@@ -287,6 +339,10 @@ PROVIDERS: Dict[str, Dict] = {
                 "base_url":"https://generativelanguage.googleapis.com/v1beta/openai",
                 "env_key":"GEMINI_API_KEY","default_model":"gemini-2.0-flash",
                 "openai_compat":True},
+    "gemma":   {"label":"Google Gemma 4",
+                "base_url":"https://generativelanguage.googleapis.com/v1beta/openai",
+                "env_key":"GEMINI_API_KEY","default_model":"gemma-3-27b-it",
+                "openai_compat":True},
     "mistral": {"label":"Mistral AI","base_url":"https://api.mistral.ai/v1",
                 "env_key":"MISTRAL_API_KEY","default_model":"mistral-small-latest",
                 "openai_compat":True},
@@ -311,30 +367,180 @@ PROVIDERS: Dict[str, Dict] = {
                 "default_model":"claude-sonnet-4-20250514","openai_compat":False},
     "ollama":  {"label":"Ollama (Local)","base_url": os.getenv("OLLAMA_BASE_URL","http://localhost:11434/v1"),
                 "env_key":"","default_model":"glm-5.1:cloud","openai_compat":True,"keyless":True,"local":True},
+    # ── Free-tier cloud providers ─────────────────────────────────────────────
+    "moonshot":    {"label":"Moonshot AI (Kimi K2.5)",
+                    "base_url":"https://api.moonshot.cn/v1",
+                    "env_key":"MOONSHOT_API_KEY","default_model":"kimi-k2-5",
+                    "openai_compat":True},
+    "sambanova":   {"label":"SambaNova Cloud",
+                    "base_url":"https://api.sambanova.ai/v1",
+                    "env_key":"SAMBANOVA_API_KEY",
+                    "default_model":"Meta-Llama-3.3-70B-Instruct",
+                    "openai_compat":True},
+    "together":    {"label":"Together AI",
+                    "base_url":"https://api.together.xyz/v1",
+                    "env_key":"TOGETHER_API_KEY",
+                    "default_model":"meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+                    "openai_compat":True},
+    "huggingface": {"label":"HuggingFace Inference",
+                    "base_url":"https://api-inference.huggingface.co/v1",
+                    "env_key":"HF_TOKEN",
+                    "default_model":"meta-llama/Llama-3.3-70B-Instruct",
+                    "openai_compat":True},
+    "fireworks":   {"label":"Fireworks AI",
+                    "base_url":"https://api.fireworks.ai/inference/v1",
+                    "env_key":"FIREWORKS_API_KEY",
+                    "default_model":"accounts/fireworks/models/llama-v3p3-70b-instruct",
+                    "openai_compat":True},
+    "deepinfra":   {"label":"DeepInfra",
+                    "base_url":"https://api.deepinfra.com/v1/openai",
+                    "env_key":"DEEPINFRA_API_KEY",
+                    "default_model":"meta-llama/Llama-3.3-70B-Instruct-Turbo",
+                    "openai_compat":True},
+    "hyperbolic":  {"label":"Hyperbolic",
+                    "base_url":"https://api.hyperbolic.xyz/v1",
+                    "env_key":"HYPERBOLIC_API_KEY",
+                    "default_model":"meta-llama/Llama-3.3-70B-Instruct",
+                    "openai_compat":True},
+    "novita":      {"label":"Novita AI",
+                    "base_url":"https://api.novita.ai/v3/openai",
+                    "env_key":"NOVITA_API_KEY",
+                    "default_model":"meta-llama/llama-3.3-70b-instruct",
+                    "openai_compat":True},
+    "glhf":        {"label":"GLHF.chat",
+                    "base_url":"https://glhf.chat/api/openai/v1",
+                    "env_key":"GLHF_API_KEY",
+                    "default_model":"hf:meta-llama/Llama-3.3-70B-Instruct",
+                    "openai_compat":True},
+    "chutes":      {"label":"Chutes AI",
+                    "base_url":"https://llm.chutes.ai/v1",
+                    "env_key":"CHUTES_API_KEY",
+                    "default_model":"deepseek-ai/DeepSeek-V3-0324",
+                    "openai_compat":True},
+    "featherless": {"label":"Featherless AI",
+                    "base_url":"https://api.featherless.ai/v1",
+                    "env_key":"FEATHERLESS_API_KEY",
+                    "default_model":"meta-llama/Meta-Llama-3.1-70B-Instruct",
+                    "openai_compat":True},
+    "kluster":     {"label":"Kluster AI",
+                    "base_url":"https://api.kluster.ai/v1",
+                    "env_key":"KLUSTER_API_KEY",
+                    "default_model":"klusterai/Meta-Llama-3.3-70B-Instruct-Turbo",
+                    "openai_compat":True},
+    "aimlapi":     {"label":"AI/ML API",
+                    "base_url":"https://api.aimlapi.com/v1",
+                    "env_key":"AIMLAPI_KEY",
+                    "default_model":"meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+                    "openai_compat":True},
+    "nebius":      {"label":"Nebius AI Studio",
+                    "base_url":"https://api.studio.nebius.ai/v1",
+                    "env_key":"NEBIUS_API_KEY",
+                    "default_model":"meta-llama/Meta-Llama-3.1-70B-Instruct",
+                    "openai_compat":True},
+    "deepseek":    {"label":"DeepSeek",
+                    "base_url":"https://api.deepseek.com/v1",
+                    "env_key":"DEEPSEEK_API_KEY",
+                    "default_model":"deepseek-chat",
+                    "openai_compat":True},
+    "scaleway":    {"label":"Scaleway Generative APIs",
+                    "base_url":"https://api.scaleway.ai/v1",
+                    "env_key":"SCALEWAY_API_KEY",
+                    "default_model":"llama-3.3-70b-instruct",
+                    "openai_compat":True},
+    "lambda":      {"label":"Lambda Labs",
+                    "base_url":"https://api.lambdalabs.com/v1",
+                    "env_key":"LAMBDA_API_KEY",
+                    "default_model":"llama3.3-70b-instruct-fp8",
+                    "openai_compat":True},
+    "perplexity":  {"label":"Perplexity AI",
+                    "base_url":"https://api.perplexity.ai",
+                    "env_key":"PERPLEXITY_API_KEY",
+                    "default_model":"sonar",
+                    "openai_compat":True},
+    "mistral_codestral": {"label":"Codestral (Mistral)",
+                    "base_url":"https://codestral.mistral.ai/v1",
+                    "env_key":"MISTRAL_API_KEY",
+                    "default_model":"codestral-latest",
+                    "openai_compat":True},
+    "neets":       {"label":"Neets AI",
+                    "base_url":"https://api.neets.ai/v1",
+                    "env_key":"NEETS_API_KEY",
+                    "default_model":"meta-llama/llama-3-70b-instruct",
+                    "openai_compat":True},
+    "inference_net":{"label":"Inference.net",
+                    "base_url":"https://api.inference.net/v1",
+                    "env_key":"INFERENCE_NET_API_KEY",
+                    "default_model":"meta-llama/llama-3.3-70b-instruct/fp-8",
+                    "openai_compat":True},
+    "lepton":      {"label":"Lepton AI",
+                    "base_url":"https://llama3-3-70b.lepton.run/api/v1",
+                    "env_key":"LEPTON_API_KEY",
+                    "default_model":"llama3-3-70b",
+                    "openai_compat":True},
+    "cloudflare":  {"label":"Cloudflare Workers AI",
+                    "base_url":f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CF_ACCOUNT_ID','')}/ai/v1",
+                    "env_key":"CF_API_TOKEN",
+                    "default_model":"@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+                    "openai_compat":True},
+    "openai":      {"label":"OpenAI",
+                    "base_url":"https://api.openai.com/v1",
+                    "env_key":"OPENAI_API_KEY",
+                    "default_model":"gpt-4o-mini",
+                    "openai_compat":True},
 }
 
 # ── complexity + provider routing ─────────────────────────────────────────────
 PROVIDER_TIERS = {
-    "high":   ["ollama","claude","grok","gemini","openrouter","mistral"],
-    "medium": ["groq","cerebras","cohere","github_models","nvidia"],
-    "low":    ["llm7","groq","cerebras"],
+    "high":   ["ollama","claude","grok","gemini","gemma","openrouter","mistral",
+               "moonshot","sambanova","together","deepseek","perplexity",
+               "hyperbolic","fireworks","chutes","kluster","nebius","openai"],
+    "medium": ["groq","cerebras","cohere","github_models","nvidia","gemma",
+               "huggingface","deepinfra","novita","glhf","featherless",
+               "aimlapi","scaleway","lambda","inference_net","lepton",
+               "cloudflare","mistral_codestral"],
+    "low":    ["llm7","groq","cerebras","gemma","neets","glhf","cloudflare",
+               "inference_net"],
 }
 
 # ── budget-aware routing ───────────────────────────────────────────────────────
 # Approximate cost in USD per 1K output tokens (used for budget-tier filtering)
 _PROVIDER_COST_PER_1K_TOKENS: Dict[str, float] = {
-    "ollama":        0.000,
-    "llm7":          0.000,
-    "github_models": 0.000,
-    "groq":          0.001,
-    "cerebras":      0.001,
-    "cohere":        0.002,
-    "mistral":       0.002,
-    "nvidia":        0.003,
-    "gemini":        0.004,
-    "openrouter":    0.005,
-    "grok":          0.010,
-    "claude":        0.015,
+    "ollama":           0.000,
+    "llm7":             0.000,
+    "github_models":    0.000,
+    "gemma":            0.000,
+    "sambanova":        0.000,
+    "glhf":             0.000,
+    "chutes":           0.000,
+    "neets":            0.000,
+    "cloudflare":       0.000,
+    "lepton":           0.000,
+    "featherless":      0.000,
+    "groq":             0.001,
+    "cerebras":         0.001,
+    "deepinfra":        0.001,
+    "together":         0.001,
+    "huggingface":      0.001,
+    "inference_net":    0.001,
+    "kluster":          0.001,
+    "scaleway":         0.001,
+    "lambda":           0.001,
+    "novita":           0.001,
+    "cohere":           0.002,
+    "mistral":          0.002,
+    "mistral_codestral":0.002,
+    "hyperbolic":       0.002,
+    "aimlapi":          0.002,
+    "nebius":           0.002,
+    "nvidia":           0.003,
+    "deepseek":         0.003,
+    "moonshot":         0.003,
+    "gemini":           0.004,
+    "openrouter":       0.005,
+    "perplexity":       0.005,
+    "openai":           0.006,
+    "grok":             0.010,
+    "claude":           0.015,
 }
 BUDGET_TIER: str = os.getenv("BUDGET_TIER", "any").lower()   # free | low | medium | any
 _BUDGET_MAX_COST: Dict[str, float] = {
@@ -346,10 +552,15 @@ _BUDGET_MAX_COST: Dict[str, float] = {
 
 # ── Mixture-of-Experts specialization routing ─────────────────────────────────
 PROVIDER_SPECIALIZATIONS: Dict[str, List[str]] = {
-    "coding":    ["ollama", "claude", "groq", "cerebras", "github_models"],
-    "research":  ["gemini", "grok", "openrouter", "claude", "mistral"],
-    "creative":  ["claude", "gemini", "mistral", "openrouter"],
-    "reasoning": ["ollama", "claude", "grok", "gemini"],
+    "coding":    ["ollama", "claude", "groq", "cerebras", "github_models",
+                  "deepseek", "moonshot", "fireworks", "mistral_codestral",
+                  "together", "hyperbolic", "sambanova"],
+    "research":  ["gemini", "gemma", "grok", "openrouter", "claude", "mistral",
+                  "perplexity", "moonshot", "deepseek", "nebius"],
+    "creative":  ["claude", "gemini", "gemma", "mistral", "openrouter",
+                  "together", "hyperbolic", "novita"],
+    "reasoning": ["ollama", "claude", "grok", "gemini", "gemma",
+                  "deepseek", "moonshot", "sambanova", "chutes"],
 }
 _CODING_RE   = re.compile(
     r'\b(code|function|class|module|implement|debug|test|refactor|type\s*hint|'
@@ -712,11 +923,19 @@ def _provider_secret_name(cfg: Dict[str, Any]) -> str:
 
 def _provider_api_key(cfg: Dict[str, Any]) -> str:
     if cfg.get("keyless", False):
-        return "llm7" if cfg.get("label", "").lower().startswith("llm7") else ""
+        # Keyless providers should not force a synthetic token.
+        # Some backends reject malformed/placeholder Authorization headers.
+        return ""
     secret_name = _provider_secret_name(cfg)
     if not secret_name:
         return ""
-    return str(get_secret(secret_name, "") or "").strip()
+    raw = str(get_secret(secret_name, "") or "").strip()
+    # Reject placeholder/comment values: must be pure printable ASCII and not
+    # start with '#'.  Non-ASCII keys (e.g. em-dash in a human-readable hint)
+    # cause http.client latin-1 header encoding errors.
+    if not raw or raw.startswith("#") or not raw.isascii():
+        return ""
+    return raw
 
 
 def _has_key(cfg):
@@ -752,6 +971,19 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
         if pid in avail and pid not in ordered: ordered.append(pid)
     if pref != "auto" and pref in ordered:
         ordered.remove(pref); ordered.insert(0, pref)
+
+    # In auto mode, prioritize fully configured conversational providers first.
+    # Keep anonymous llm7 as a fallback because it often enforces tight limits.
+    if pref == "auto":
+        priority_front: List[str] = []
+        if "openrouter" in ordered and _provider_api_key(PROVIDERS.get("openrouter", {})):
+            priority_front.append("openrouter")
+        if "ollama" in ordered:
+            priority_front.append("ollama")
+        if priority_front:
+            ordered = priority_front + [p for p in ordered if p not in priority_front]
+        if "llm7" in ordered and len(ordered) > 1:
+            ordered = [p for p in ordered if p != "llm7"] + ["llm7"]
 
     # Persona-level provider priority override (when provider=auto).
     if pref == "auto":
@@ -922,6 +1154,17 @@ def get_system_prompt() -> str:
             f"{profile_instructions}\n"
         )
     return base
+
+
+def get_provider_system_prompt(max_chars: int = 7000) -> str:
+    """Return a bounded system prompt for upstream provider compatibility."""
+    prompt = get_system_prompt()
+    if len(prompt) <= max_chars:
+        return prompt
+    marker = "\n\n[... system prompt truncated for provider size limits ...]\n\n"
+    keep_head = max(0, int(max_chars * 0.70))
+    keep_tail = max(0, max_chars - keep_head - len(marker))
+    return prompt[:keep_head] + marker + prompt[-keep_tail:]
 
 # ── system prompt ─────────────────────────────────────────────────────────────
 TOOLS_DESCRIPTION = """You are a sovereign Nexus AI coding agent, part of the Nexus Systems Ecosystem (https://github.com/The-No-Hands-company/Nexus).
@@ -1409,6 +1652,14 @@ _CURRENCY_RE = re.compile(r'(\d[\d,\.]*)\s*([A-Z]{3})\s+(?:to|in|→)\s*([A-Z]{3
 _CONVERT_RE = re.compile(r'(\d[\d,\.]*)\s*([\w]+)\s+(?:to|in|→)\s*([\w]+)',re.IGNORECASE)
 
 def _try_direct(task: str) -> Optional[str]:
+    task_lc = (task or "").strip().lower()
+    if any(phrase in task_lc for phrase in ("what can you do", "what do you do", "help me", "help")):
+        return (
+            "I can help with coding, debugging, architecture, API design, tests, documentation, refactors, "
+            "code review, and implementation guidance. I can also inspect files, explain errors, and suggest fixes."
+        )
+    if task_lc in {"hi", "hello", "hey", "yo"} or task_lc.startswith(("hi ", "hello ", "hey ")):
+        return "Hello. I can help with coding, debugging, design, documentation, and project-level problem solving."
     if _TIME_RE2.search(task):
         loc = re.search(r'\b(?:in|at|for)\s+([A-Za-z][A-Za-z\s/]{1,30})\??$',task,re.IGNORECASE)
         return tool_get_time(loc.group(1).strip() if loc else "UTC")
@@ -1822,20 +2073,32 @@ def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
     secret_name = _provider_secret_name(cfg)
     ctx = inject_request_credentials([secret_name]) if secret_name else nullcontext({})
     with ctx as creds:
-        api_key = str((creds.get(secret_name) if secret_name else "") or _provider_api_key(cfg) or "")
+        _raw_key = str((creds.get(secret_name) if secret_name else "") or _provider_api_key(cfg) or "").strip()
+        # Drop placeholder/comment keys (contain non-ASCII or start with '#')
+        api_key = _raw_key if (_raw_key and _raw_key.isascii() and not _raw_key.startswith("#")) else ""
     # Consume vision model override (set by _smart_order_for_vision before the call).
     model = cfg.pop("_vision_override", None) or _config["model"] or cfg.get("_selected_model") or cfg["default_model"]
     is_local = cfg.get("local") and cfg.get("keyless")
 
     def _do_request():
+        import json as _json
+        headers = {"Content-Type": "application/json; charset=utf-8"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        payload = _json.dumps({
+            "model": model,
+            "messages": [{"role": "system", "content": get_provider_system_prompt()}] + messages,
+            "temperature": _config["temperature"],
+            "max_tokens": 4096,
+        }, ensure_ascii=False).encode("utf-8")
         r = requests.post(
             cfg["base_url"].rstrip("/")+"/chat/completions",
-            headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"},
-            json={"model": model,
-                  "messages":[{"role":"system","content":get_system_prompt()}]+messages,
-                  "temperature":_config["temperature"],"max_tokens":4096},
+            headers=headers,
+            data=payload,
             timeout=90)
-        r.raise_for_status()
+        if r.status_code >= 400:
+            body = (r.text or "")[:300]
+            raise RuntimeError(f"openai_compat_http_{r.status_code}: {body}")
         return r
 
     try:
@@ -1850,9 +2113,24 @@ def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
     data = resp.json()
     msg_obj = data["choices"][0]["message"]
     content = msg_obj.get("content") or ""
+    # Some OpenAI-compatible backends (notably local Ollama/Qwen variants)
+    # can return an empty ``content`` but place text in reasoning/thinking fields.
+    # Normalize those into ``content`` to avoid empty assistant replies.
+    if not content:
+        content = (
+            msg_obj.get("reasoning")
+            or msg_obj.get("thinking")
+            or msg_obj.get("reasoning_content")
+            or ""
+        )
 
-    # DeepSeek reasoning_content normalization
-    reasoning = msg_obj.get("reasoning_content") or ""
+    # Reasoning field normalization (DeepSeek/Ollama variants)
+    reasoning = (
+        msg_obj.get("reasoning_content")
+        or msg_obj.get("reasoning")
+        or msg_obj.get("thinking")
+        or ""
+    )
     result = _parse_json(content)
     if reasoning and isinstance(result, dict) and not result.get("thought"):
         result["thought"] = reasoning
@@ -1869,21 +2147,22 @@ def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
 
 
 def _call_grok(messages):
-    import requests, time as _t
+    import requests, time as _t, json as _json
     secret_name = "GROK_API_KEY"  # pragma: allowlist secret
     with inject_request_credentials([secret_name]) as creds:
-        grok_key = str(creds.get(secret_name) or get_secret(secret_name, "") or "")
-    headers = {
-        "Authorization": f"Bearer {grok_key}",
-        "Content-Type": "application/json",
-    }
+        _gk = str(creds.get(secret_name) or get_secret(secret_name, "") or "").strip()
+        grok_key = _gk if (_gk and _gk.isascii() and not _gk.startswith("#")) else ""
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    if grok_key:
+        headers["Authorization"] = f"Bearer {grok_key}"
     body = {
         "model": _config["model"] or "grok-3",
-        "messages": [{"role":"system","content":get_system_prompt()}]+messages,
+        "messages": [{"role":"system","content":get_provider_system_prompt()}]+messages,
         "temperature": _config["temperature"] or get_active_persona()["temperature"],
         "max_tokens": 4096,
     }
-    resp = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, json=body, timeout=90)
+    payload = _json.dumps(body, ensure_ascii=False).encode("utf-8")
+    resp = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, data=payload, timeout=90)
 
     # Grok async deferred response normalization (202 → poll)
     if resp.status_code == 202:
@@ -1910,15 +2189,22 @@ def _call_grok(messages):
 
 
 def _call_claude_api(messages):
-    import requests
+    import requests, json as _json
     secret_name = "CLAUDE_API_KEY"  # pragma: allowlist secret
     with inject_request_credentials([secret_name]) as creds:
-        claude_key = str(creds.get(secret_name) or get_secret(secret_name, "") or "")
+        _ck = str(creds.get(secret_name) or get_secret(secret_name, "") or "").strip()
+        claude_key = _ck if (_ck and _ck.isascii() and not _ck.startswith("#")) else ""
+    body = {
+        "model": _config["model"] or "claude-sonnet-4-20250514",
+        "system": get_provider_system_prompt(),
+        "messages": messages,
+        "temperature": _config["temperature"] or get_active_persona()["temperature"],
+        "max_tokens": 4096
+    }
+    payload = _json.dumps(body, ensure_ascii=False).encode("utf-8")
     resp = requests.post("https://api.anthropic.com/v1/messages",
-        headers={"x-api-key":claude_key,"anthropic-version":"2023-06-01","Content-Type":"application/json"},
-        json={"model":_config["model"] or "claude-sonnet-4-20250514",
-              "system":get_system_prompt(),"messages":messages,
-              "temperature":_config["temperature"] or get_active_persona()["temperature"],"max_tokens":4096},timeout=90)
+        headers={"x-api-key": claude_key, "anthropic-version": "2023-06-01", "Content-Type": "application/json; charset=utf-8"},
+        data=payload, timeout=90)
     resp.raise_for_status()
     content_blocks = resp.json().get("content", [])
 
@@ -1977,7 +2263,11 @@ def _provider_exhausted_error(scope: str, tried: List[str], last_error: str = ""
         }
     }
 
-def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, str]:
+def call_llm_with_fallback(
+    messages: List[Dict],
+    task: str = "",
+    provider_order: Optional[List[str]] = None,
+) -> tuple[Dict, str]:
     import requests as _r
     tracer = None
     llm_counter = None
@@ -1993,6 +2283,16 @@ def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, 
 
     resources = get_system_resources()
     order = _smart_order(task or (messages[-1].get("content","") if messages else ""), resources)
+    if provider_order:
+        seen: set[str] = set()
+        constrained: List[str] = []
+        for pid in provider_order:
+            p = str(pid).strip()
+            if not p or p in seen or p not in PROVIDERS:
+                continue
+            seen.add(p)
+            constrained.append(p)
+        order = constrained
     if not order: raise AllProvidersExhausted("No providers available.")
 
     # Vision routing: if any message contains image_url parts, promote
@@ -2000,7 +2300,11 @@ def call_llm_with_fallback(messages: List[Dict], task: str = "") -> tuple[Dict, 
     # best local Ollama vision model (sets _vision_override on the ollama cfg).
     if _messages_have_images(messages):
         _smart_order_for_vision(messages)
-        _VISION_PROVIDERS = frozenset({"ollama", "claude", "gemini", "openrouter", "github_models", "groq"})
+        _VISION_PROVIDERS = frozenset({
+            "ollama", "claude", "gemini", "gemma", "openrouter", "github_models",
+            "groq", "together", "fireworks", "hyperbolic", "deepinfra",
+            "huggingface", "novita", "moonshot", "openai", "deepseek",
+        })
         vision_first = [p for p in order if p in _VISION_PROVIDERS]
         rest         = [p for p in order if p not in _VISION_PROVIDERS]
         order        = vision_first + rest
@@ -2076,14 +2380,22 @@ def _graceful_degraded_response(messages: List[Dict], task: str, reason: str) ->
     # 2 — Local Ollama fallback
     try:
         import requests as _r
-        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+        ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
         test = _r.get(f"{ollama_url}/api/tags", timeout=2)
         if test.status_code == 200:
             tags = test.json().get("models", [])
             if tags:
                 first_model = tags[0].get("name", "llama3")
                 print(f"⚡ Graceful degradation: Ollama local model {first_model}")
-                cfg = {"base_url": ollama_url, "model": first_model, "openai_compat": True}
+                openai_base = ollama_url if ollama_url.endswith("/v1") else f"{ollama_url}/v1"
+                cfg = {
+                    "id": "ollama_local_fallback",
+                    "base_url": openai_base,
+                    "default_model": first_model,
+                    "local": True,
+                    "keyless": True,
+                    "openai_compat": True,
+                }
                 result = _call_openai(cfg, messages)
                 result["_source"] = "ollama_local"
                 return result, "ollama_local"
@@ -2277,6 +2589,10 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                       usage_principal: str = "") -> Iterator[Dict[str, Any]]:
     def _stopped(): return stop_evt is not None and stop_evt.is_set()
 
+    # Emit an early heartbeat/status event so SSE clients never observe
+    # a silent 200 response with zero lines when downstream providers fail.
+    yield {"type": "status", "message": "Processing request..."}
+
     # Extract + store token from task; mask it before sending to LLM
     token = extract_token(task)
     if token and sid:
@@ -2316,12 +2632,16 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
     test_sid = (sid or "")
     in_test_sid = test_sid.startswith("test-") or test_sid.endswith("-test")
+    # Skip auto-warmup for: (1) tests, (2) stream/trace contexts, (3) non-first turns
+    is_stream_context = bool(trace_id)  # trace_id indicates stream/non-interactive context
+    should_skip_warmup = in_test_sid or is_stream_context or len(history) > 0
+    
     if (
         warmup_enabled
         and llm_smart_module == __name__
         and not llm_smart_is_mock
         and not llm_fallback_is_mock
-        and not in_test_sid
+        and not should_skip_warmup
     ):
         _wk = f"{sid}:{_config.get('persona', 'general')}"
         _cached = _WARMUP_CACHE.get(_wk)
@@ -2565,7 +2885,20 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             try:
                 action, pid, _llm_meta = _next_action(messages, clean_task)
             except AllProvidersExhausted:
-                yield {"type":"error","message":str(e)+"\n\nAdd more API keys to avoid rate limits."}
+                fallback_text = (
+                    "I could not reach a model provider for this turn, so I could not generate a full answer. "
+                    "Please retry in a moment. If this keeps happening, verify at least one provider key is active "
+                    "or run a local Ollama model so I always have a fallback path."
+                )
+                messages.append({"role": "assistant", "content": fallback_text})
+                cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+                yield {
+                    "type": "done",
+                    "content": fallback_text,
+                    "provider": cfg.get("label", "Built-in"),
+                    "model": _config["model"] or cfg.get("default_model", "fallback"),
+                    "history": messages,
+                }
                 return
 
         # Auto-retry once if output is clearly bad
@@ -3588,14 +3921,20 @@ _WARMUP_CACHE: Dict[str, Dict[str, Any]] = {}   # sid → {messages, ts}
 _WARMUP_TTL = 300                                # seconds before cache expires
 
 
-def warmup_agent(sid: str = "", persona: str = "") -> Dict[str, Any]:
+def warmup_agent(
+    sid: str = "",
+    persona: str = "",
+    provider_order: Optional[List[str]] = None,
+    task: str = "warmup",
+) -> Dict[str, Any]:
     """Prime an agent context for a given session so the first real call is faster.
 
     Performs a lightweight LLM call using the system prompt + a sentinel greeting,
     caches the resulting messages under ``sid``, and returns metadata.
     This reduces cold-start latency when the user sends their first message.
     """
-    cache_key = f"{sid}:{persona or _config.get('persona', 'general')}"
+    order_key = ",".join(provider_order or [])
+    cache_key = f"{sid}:{persona or _config.get('persona', 'general')}:{order_key or '*'}:{task}"
     cached = _WARMUP_CACHE.get(cache_key)
     if cached and (time.time() - cached["ts"]) < _WARMUP_TTL:
         return {"warmed": False, "cached": True, "age_s": round(time.time() - cached["ts"])}
@@ -3603,13 +3942,23 @@ def warmup_agent(sid: str = "", persona: str = "") -> Dict[str, Any]:
     warmup_msg = [{"role": "user",
                    "content": "System ready. Acknowledge with one word."}]
     try:
-        _, pid, _ = call_llm_smart(warmup_msg, "warmup")
+        if provider_order:
+            _, pid = call_llm_with_fallback(warmup_msg, task, provider_order=provider_order)
+        else:
+            _, pid, _ = call_llm_smart(warmup_msg, task)
         _WARMUP_CACHE[cache_key] = {
             "messages": warmup_msg,
             "provider": pid,
+            "providers": provider_order or [],
             "ts": time.time(),
         }
-        return {"warmed": True, "cached": False, "provider": pid}
+        return {
+            "warmed": True,
+            "cached": False,
+            "provider": pid,
+            "providers": provider_order or [],
+            "mode": task,
+        }
     except Exception as exc:
         return {"warmed": False, "cached": False, "error": str(exc)}
 
@@ -3621,6 +3970,7 @@ PROVIDER_CAPABILITIES: Dict[str, Dict[str, bool]] = {
     "groq":           {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
     "cerebras":       {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
     "gemini":         {"vision": True,  "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
+    "gemma":          {"vision": True,  "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
     "mistral":        {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
     "openrouter":     {"vision": True,  "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
     "nvidia":         {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
@@ -3630,6 +3980,17 @@ PROVIDER_CAPABILITIES: Dict[str, Dict[str, bool]] = {
     "claude":         {"vision": True,  "json_mode": False, "tools": True,  "reasoning": True,  "streaming": True},
 }
 
+_DEFAULT_PROVIDER_CAPABILITIES = {
+    "vision": False,
+    "json_mode": True,
+    "tools": True,
+    "reasoning": True,
+    "streaming": True,
+}
+
+for _provider_id in PROVIDERS:
+    PROVIDER_CAPABILITIES.setdefault(_provider_id, dict(_DEFAULT_PROVIDER_CAPABILITIES))
+
 # ── provider benchmark baselines (latency_ms, quality_score 0-100) ─────────────
 _PROVIDER_BENCHMARKS: Dict[str, Dict[str, Any]] = {
     "ollama":        {"latency_ms": 500,  "quality": 75, "tier": "high",   "cost_tier": "free"},
@@ -3637,6 +3998,7 @@ _PROVIDER_BENCHMARKS: Dict[str, Dict[str, Any]] = {
     "groq":          {"latency_ms": 800,  "quality": 72, "tier": "medium", "cost_tier": "paid"},
     "cerebras":      {"latency_ms": 1200, "quality": 70, "tier": "medium", "cost_tier": "paid"},
     "gemini":        {"latency_ms": 1500, "quality": 85, "tier": "high",   "cost_tier": "paid"},
+    "gemma":         {"latency_ms": 1300, "quality": 79, "tier": "medium", "cost_tier": "free"},
     "mistral":       {"latency_ms": 2000, "quality": 80, "tier": "high",   "cost_tier": "paid"},
     "openrouter":    {"latency_ms": 3000, "quality": 80, "tier": "medium", "cost_tier": "paid"},
     "nvidia":        {"latency_ms": 1000, "quality": 78, "tier": "medium", "cost_tier": "paid"},
@@ -3645,6 +4007,12 @@ _PROVIDER_BENCHMARKS: Dict[str, Dict[str, Any]] = {
     "grok":          {"latency_ms": 2200, "quality": 82, "tier": "high",   "cost_tier": "paid"},
     "claude":        {"latency_ms": 2800, "quality": 90, "tier": "high",   "cost_tier": "paid"},
 }
+
+for _provider_id in PROVIDERS:
+    _PROVIDER_BENCHMARKS.setdefault(
+        _provider_id,
+        {"latency_ms": 2000, "quality": 70, "tier": "medium", "cost_tier": "paid"},
+    )
 
 # ── per-persona provider overrides ────────────────────────────────────────────
 _PERSONA_PROVIDER_OVERRIDES: Dict[str, List[str]] = {

@@ -2,7 +2,8 @@
 function toggleSidebar(){
   sidebarOpen=!sidebarOpen;
   document.getElementById('sidebar').classList.toggle('hidden',!sidebarOpen);
-  document.getElementById('sidebar-overlay').classList.toggle('active',sidebarOpen);
+  const isMobile = window.matchMedia('(max-width: 700px)').matches;
+  document.getElementById('sidebar-overlay').classList.toggle('active',isMobile && sidebarOpen);
 }
 function closeSidebar(){
   sidebarOpen=false;

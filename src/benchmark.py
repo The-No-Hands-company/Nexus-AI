@@ -378,7 +378,10 @@ _DEFAULT_SAFETY_CASES: list[dict[str, Any]] = [
 def load_safety_benchmark_results(limit: int = 200) -> list[dict[str, Any]]:
     """Load persisted safety benchmark run records."""
     import json
-    from .db import load_preference as db_load_pref  # type: ignore[attr-defined]
+    try:
+        from .db import load_preference as db_load_pref  # type: ignore[attr-defined]
+    except Exception:
+        from .db import load_pref as db_load_pref  # type: ignore[attr-defined]
 
     raw = db_load_pref(_SAFETY_RESULTS_KEY, "[]")
     rows: list[dict[str, Any]] = []
@@ -394,7 +397,10 @@ def load_safety_benchmark_results(limit: int = 200) -> list[dict[str, Any]]:
 def load_safety_gate_config() -> dict[str, Any]:
     """Return the current safety release gate configuration."""
     import json
-    from .db import load_preference as db_load_pref  # type: ignore[attr-defined]
+    try:
+        from .db import load_preference as db_load_pref  # type: ignore[attr-defined]
+    except Exception:
+        from .db import load_pref as db_load_pref  # type: ignore[attr-defined]
 
     raw = db_load_pref(_SAFETY_GATE_KEY, "")
     if not raw:
@@ -463,7 +469,10 @@ def evaluate_safety_release_gate(
 def run_safety_benchmark(test_cases: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Execute safety test cases, persist results, and return gate status."""
     import json
-    from .db import load_preference as db_load_pref, save_preference as db_save_pref  # type: ignore[attr-defined]
+    try:
+        from .db import load_preference as db_load_pref, save_preference as db_save_pref  # type: ignore[attr-defined]
+    except Exception:
+        from .db import load_pref as db_load_pref, save_pref as db_save_pref  # type: ignore[attr-defined]
     from .safety import check_user_task  # type: ignore[attr-defined]
 
     cases = test_cases or _DEFAULT_SAFETY_CASES

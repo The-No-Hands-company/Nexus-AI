@@ -1,0 +1,52 @@
+name: Runbook Auto Remediation
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply remediation commands"
+        required: false
+        default: "false"
+
+jobs:
+  runbook-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run runbook checks
+        env:
+          NEXUS_BASE_URL: ${{ vars.NEXUS_BASE_URL }}
+          RUNBOOK_REMEDIATION_API_DOWN_CMD: ${{ vars.RUNBOOK_REMEDIATION_API_DOWN_CMD }}
+          RUNBOOK_REMEDIATION_PROVIDER_DOWN_CMD: ${{ vars.RUNBOOK_REMEDIATION_PROVIDER_DOWN_CMD }}
+          RUNBOOK_REMEDIATION_WORKER_DOWN_CMD: ${{ vars.RUNBOOK_REMEDIATION_WORKER_DOWN_CMD }}
+          RUNBOOK_APPROVAL_TOKEN: ${{ secrets.RUNBOOK_APPROVAL_TOKEN }}
+          RUNBOOK_POLICY_FILE: docs/production-readiness/runbook_command_policy.json
+          RUNBOOK_REPORT_PATH: test-results/runbook_auto_remediation_report.json
+        run: |
+          set -euo pipefail
+          APPLY="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.apply || 'false' }}" = "true" ]; then
+            APPLY="true"
+          fi
+          python scripts/runbook_auto_remediation.py \
+            --base-url "${NEXUS_BASE_URL:-http://127.0.0.1:8000}" \
+            --policy-file "${RUNBOOK_POLICY_FILE}" \
+            --report-path "${RUNBOOK_REPORT_PATH}" \
+            $( [ "$APPLY" = "true" ] && echo "--apply --approval-token ${RUNBOOK_APPROVAL_TOKEN}" || true )
+
+      - name: Upload runbook report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runbook-auto-remediation-report
+          path: test-results/runbook_auto_remediation_report.json

@@ -1,0 +1,20 @@
+{
+  "require_approval_token": true,
+  "allowed_patterns": {
+    "RUNBOOK_REMEDIATION_API_DOWN_CMD": [
+      "systemctl restart nexus-ai*",
+      "docker compose* up -d*",
+      "kubectl rollout restart deployment/*"
+    ],
+    "RUNBOOK_REMEDIATION_PROVIDER_DOWN_CMD": [
+      "systemctl restart ollama*",
+      "docker compose* restart*",
+      "kubectl rollout restart deployment/*"
+    ],
+    "RUNBOOK_REMEDIATION_WORKER_DOWN_CMD": [
+      "systemctl restart nexus-ai-worker*",
+      "docker compose* up -d*worker*",
+      "kubectl rollout restart deployment/*worker*"
+    ]
+  }
+}

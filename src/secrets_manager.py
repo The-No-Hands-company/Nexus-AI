@@ -126,7 +126,7 @@ def _get_from_vault(name: str) -> Any:
             value = data.get("data", {}).get("value")
         return value
     except Exception as exc:
-        logger.warning("vault_fetch_error", name=name, error=str(exc))
+        logger.warning("vault_fetch_error name=%s error=%s", name, str(exc))
         return None
 
 
@@ -155,7 +155,7 @@ def _get_from_aws(name: str) -> Any:
     except Exception as exc:
         if "ResourceNotFoundException" in str(type(exc)):
             return None
-        logger.warning("aws_secrets_fetch_error", name=name, error=str(exc))
+        logger.warning("aws_secrets_fetch_error name=%s error=%s", name, str(exc))
         return None
 
 
@@ -232,7 +232,7 @@ def get_secret_access_log(limit: int = 100) -> list[dict]:
 def rotate_secret_in_cache(name: str, new_value: Any) -> None:
     """Inject a rotated secret value directly into the cache (e.g. after rotation event)."""
     _cache_set(name, new_value)
-    logger.info("secret_rotated_in_cache", name=name)
+    logger.info("secret_rotated_in_cache name=%s", name)
 
 
 def start_secret_rotation_daemon(secret_names: list[str] | None = None, interval_seconds: int | None = None) -> bool:
@@ -259,7 +259,7 @@ def start_secret_rotation_daemon(secret_names: list[str] | None = None, interval
                 for name in secrets_to_rotate:
                     invalidate_secret(name)
                     get_secret(name)
-                    logger.info("secret_rotation_refresh", name=name)
+                    logger.info("secret_rotation_refresh name=%s", name)
             except Exception:
                 pass
             time.sleep(max(60, interval))

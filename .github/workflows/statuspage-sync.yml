@@ -1,0 +1,47 @@
+name: Statuspage Sync
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: "Apply updates to Statuspage components"
+        required: false
+        default: "false"
+
+jobs:
+  sync-statuspage:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Sync statuspage components
+        env:
+          NEXUS_BASE_URL: ${{ vars.NEXUS_BASE_URL }}
+          STATUSPAGE_PAGE_ID: ${{ secrets.STATUSPAGE_PAGE_ID }}
+          STATUSPAGE_API_KEY: ${{ secrets.STATUSPAGE_API_KEY }}
+          STATUSPAGE_COMPONENT_API_ID: ${{ vars.STATUSPAGE_COMPONENT_API_ID }}
+          STATUSPAGE_COMPONENT_PROVIDERS_ID: ${{ vars.STATUSPAGE_COMPONENT_PROVIDERS_ID }}
+          STATUSPAGE_REPORT_PATH: test-results/statuspage_sync_report.json
+        run: |
+          set -euo pipefail
+          APPLY="false"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ github.event.inputs.apply || 'false' }}" = "true" ]; then
+            APPLY="true"
+          fi
+          python scripts/statuspage_sync.py --base-url "${NEXUS_BASE_URL:-http://127.0.0.1:8000}" $( [ "$APPLY" = "true" ] && echo "--apply" || true )
+
+      - name: Upload statuspage sync report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: statuspage-sync-report
+          path: test-results/statuspage_sync_report.json
