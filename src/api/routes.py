@@ -147,7 +147,7 @@ def _normalize_response_format(response_format):
     return {"mode": "json", "schema": schema}
 
 
-def _builtin_chat_fallback(task: str) -> str:
+def _builtin_chat_fallback(task: str, reason: str = "timeout") -> str:
     task_lc = (task or "").strip().lower()
     if any(phrase in task_lc for phrase in ("what can you do", "what do you do", "help me", "help")):
         return (
@@ -157,10 +157,97 @@ def _builtin_chat_fallback(task: str) -> str:
         )
     if task_lc in {"hi", "hello", "hey", "yo"} or task_lc.startswith(("hi ", "hello ", "hey ")):
         return "Hello. I can help with coding, debugging, design, documentation, and project-level problem solving."
+    if reason == "provider_unavailable":
+        return (
+            "I could not reach any model provider for this turn. "
+            "Please retry in a moment, or enable at least one provider key / local Ollama model."
+        )
     return (
-        "I could not reach a model provider quickly enough for this turn, but I am still available. "
-        "Please retry with the same message, or give me a concrete coding, debugging, or architecture task and I will respond directly."
+        "This request timed out before a model response completed. "
+        "Please retry with the same message, or send a shorter task and I will continue."
     )
+
+
+def _builtin_coding_fallback(task: str, reason: str = "timeout") -> str:
+    """Return a concrete, useful coding answer for common prompts when providers fail."""
+    task_lc = (task or "").strip().lower()
+    is_python_request = "python" in task_lc
+    is_sort_files_mtime = (
+        is_python_request
+        and "sort" in task_lc
+        and "file" in task_lc
+        and (
+            "date modified" in task_lc
+            or "modified date" in task_lc
+            or "last modified" in task_lc
+            or "mtime" in task_lc
+        )
+    )
+
+    if is_sort_files_mtime:
+        return (
+            "I could not reach a model provider for this turn, but here is a direct built-in answer:\n\n"
+            "```python\n"
+            "#!/usr/bin/env python3\n"
+            "from pathlib import Path\n"
+            "import argparse\n\n"
+            "def main() -> None:\n"
+            "    parser = argparse.ArgumentParser(description='Sort files by last modified time.')\n"
+            "    parser.add_argument('directory', nargs='?', default='.', help='Directory to scan (default: current directory)')\n"
+            "    parser.add_argument('--desc', action='store_true', help='Sort newest first')\n"
+            "    args = parser.parse_args()\n\n"
+            "    root = Path(args.directory).expanduser().resolve()\n"
+            "    files = [p for p in root.iterdir() if p.is_file()]\n"
+            "    files_sorted = sorted(files, key=lambda p: p.stat().st_mtime, reverse=args.desc)\n\n"
+            "    for f in files_sorted:\n"
+            "        ts = f.stat().st_mtime\n"
+            "        print(f\"{f.name}\t{ts:.0f}\")\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```\n\n"
+            f"Fallback reason: `{reason}`."
+        )
+
+    if is_python_request and any(token in task_lc for token in ("script", "function", "class", "code")):
+        return (
+            "I could not reach a model provider for this turn, but here is a useful starting template:\n\n"
+            "```python\n"
+            "def main() -> None:\n"
+            "    # TODO: implement your task logic here\n"
+            "    pass\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+            "```\n\n"
+            "If you retry once providers recover, I will generate the full task-specific implementation."
+        )
+
+    return ""
+
+
+def _light_provider_precheck() -> dict:
+    """Cheap availability snapshot used before first-turn execution."""
+    providers = get_providers_list() or []
+    ready = [p for p in providers if p.get("available")]
+    cooling = [p for p in providers if p.get("rate_limited")]
+    no_key = [p for p in providers if (not p.get("has_key") and not p.get("keyless"))]
+    return {
+        "total": len(providers),
+        "ready": len(ready),
+        "cooling": len(cooling),
+        "no_key": len(no_key),
+        "ready_labels": [str(p.get("label") or p.get("id") or "provider") for p in ready],
+        "ts": time.time(),
+    }
+
+
+def _precheck_status_message(precheck: dict | None) -> str:
+    if not precheck:
+        return "Processing request..."
+    ready = int(precheck.get("ready", 0) or 0)
+    cooling = int(precheck.get("cooling", 0) or 0)
+    if ready <= 0:
+        return "Provider precheck: no providers currently ready. Request may fallback."
+    return f"Provider precheck: {ready} ready" + (f", {cooling} cooling" if cooling else "") + "."
 
 
 def _apply_response_format_hint(task: str, response_format_mode: str = "", schema: dict | None = None) -> str:
@@ -6323,6 +6410,7 @@ async def agent_post(request: Request):
         return _api_error(exc.reason, exc.code, 422)
 
     history = sessions.get(sid,[]) if sid else []
+    provider_precheck = _light_provider_precheck() if not history else None
     # Vision fast-path: call LLM directly when images are provided.
     if images:
         _content: list = [{"type": "text", "text": task}]
@@ -6351,7 +6439,7 @@ async def agent_post(request: Request):
     except (TypeError, ValueError):
         return _api_error("invalid numeric controls: max_tool_calls, max_time_s, max_tokens_out", "validation_error", 422)
 
-    timeout_s = float(data.get("request_timeout_s") or 12.0)
+    timeout_s = float(data.get("request_timeout_s") or 60.0)
     loop = asyncio.get_running_loop()
     try:
         result = await asyncio.wait_for(
@@ -6362,17 +6450,25 @@ async def agent_post(request: Request):
             timeout=timeout_s,
         )
     except asyncio.TimeoutError:
-        fallback = _builtin_chat_fallback(task)
+        fallback = _builtin_coding_fallback(task, reason="timeout") or _builtin_chat_fallback(task, reason="timeout")
         result = {
             "result": fallback,
             "provider": "Built-in",
             "model": "timeout-fallback",
             "fallback_reason": "timeout",
+            "provider_precheck": provider_precheck,
             "history": history + [
                 {"role": "user", "content": task},
                 {"role": "assistant", "content": fallback},
             ],
         }
+
+    if result.get("fallback_reason") in {"provider_unavailable", "timeout"}:
+        assisted = _builtin_coding_fallback(task, reason=str(result.get("fallback_reason") or "timeout"))
+        if assisted:
+            result["result"] = assisted
+            result["provider"] = "Built-in"
+            result["model"] = "coding-fallback"
     if sid:
         sessions[sid]=result["history"]
         db_set_shared_memory(f"session_history:{sid}", result["history"])
@@ -6380,6 +6476,10 @@ async def agent_post(request: Request):
         "result": result.get("result", ""),
         "provider": result.get("provider", ""),
         "model": result.get("model", ""),
+        "fallback_reason": result.get("fallback_reason", ""),
+        "provider_attempt_chain": result.get("provider_attempt_chain", ""),
+        "provider_attempts": result.get("provider_attempts", []),
+        "provider_precheck": result.get("provider_precheck") or provider_precheck,
         "session_id": sid,
     }
 
@@ -6418,6 +6518,7 @@ async def agent_stream(request: Request):
     db_save_execution_trace(trace_id, execution_traces[trace_id])
 
     history  = sessions.get(sid,[]) if sid else []
+    provider_precheck = _light_provider_precheck() if not history else None
 
     # Vision fast-path: if images supplied, call LLM directly and stream one chunk.
     if images:
@@ -6454,7 +6555,7 @@ async def agent_stream(request: Request):
             kwargs["max_time_s"] = float(data.get("max_time_s"))
         if data.get("max_tokens_out") is not None:
             kwargs["budget_tokens_out"] = int(data.get("max_tokens_out"))
-        timeout_s = float(data.get("request_timeout_s") or 12.0)
+        timeout_s = float(data.get("request_timeout_s") or 60.0)
 
         loop = asyncio.get_running_loop()
         try:
@@ -6466,18 +6567,31 @@ async def agent_stream(request: Request):
                 timeout=timeout_s,
             )
         except asyncio.TimeoutError:
-            fallback = _builtin_chat_fallback(task)
+            fallback = _builtin_coding_fallback(task, reason="timeout") or _builtin_chat_fallback(task, reason="timeout")
             result = {
                 "result": fallback,
                 "provider": "Built-in",
                 "model": "timeout-fallback",
+                "fallback_reason": "timeout",
+                "provider_precheck": provider_precheck,
                 "history": history + [
                     {"role": "user", "content": task},
                     {"role": "assistant", "content": fallback},
                 ],
             }
 
-        status_evt = {"type": "status", "message": "Processing request..."}
+        if result.get("fallback_reason") in {"provider_unavailable", "timeout"}:
+            assisted = _builtin_coding_fallback(task, reason=str(result.get("fallback_reason") or "timeout"))
+            if assisted:
+                result["result"] = assisted
+                result["provider"] = "Built-in"
+                result["model"] = "coding-fallback"
+
+        status_evt = {
+            "type": "status",
+            "message": _precheck_status_message(provider_precheck),
+            "provider_precheck": provider_precheck,
+        }
         execution_traces[trace_id].append(status_evt)
 
         if sid and result.get("history"):
@@ -6489,14 +6603,31 @@ async def agent_stream(request: Request):
             "content": result.get("result", "") or "I could not produce a full reply for this turn. Please retry.",
             "provider": result.get("provider", "Built-in"),
             "model": result.get("model", "buffered-stream"),
+            "fallback_reason": result.get("fallback_reason", ""),
+            "provider_attempt_chain": result.get("provider_attempt_chain", ""),
+            "provider_attempts": result.get("provider_attempts", []),
+            "provider_precheck": result.get("provider_precheck") or provider_precheck,
         }
+
+        diagnostic_evt = None
+        if done_evt.get("fallback_reason") or done_evt.get("provider_attempt_chain"):
+            diagnostic_evt = {
+                "type": "diagnostic",
+                "fallback_reason": done_evt.get("fallback_reason", ""),
+                "provider_attempt_chain": done_evt.get("provider_attempt_chain", ""),
+                "provider_attempts": done_evt.get("provider_attempts", []),
+                "provider_precheck": done_evt.get("provider_precheck"),
+            }
+            execution_traces[trace_id].append(diagnostic_evt)
+
         execution_traces[trace_id].append(done_evt)
         db_save_execution_trace(trace_id, execution_traces[trace_id])
-        body = (
-            f"data: {json.dumps(status_evt)}\n\n"
-            f"data: {json.dumps(done_evt, default=str)}\n\n"
-            "data: [DONE]\n\n"
-        )
+        parts = [f"data: {json.dumps(status_evt)}\n\n"]
+        if diagnostic_evt is not None:
+            parts.append(f"data: {json.dumps(diagnostic_evt, default=str)}\n\n")
+        parts.append(f"data: {json.dumps(done_evt, default=str)}\n\n")
+        parts.append("data: [DONE]\n\n")
+        body = "".join(parts)
     except Exception as exc:
         friendly = (
             "I started processing your request but could not finish this turn with a model response. "

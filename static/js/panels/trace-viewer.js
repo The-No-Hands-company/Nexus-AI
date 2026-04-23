@@ -41,7 +41,11 @@ function replayTrace(traceId) {
       const evt = JSON.parse(e.data);
       const row = document.createElement("div");
       row.style.cssText = "padding:5px 8px;background:var(--surface2);border-radius:5px;font-size:.78rem;";
-      row.textContent = `[${evt.type || "event"}] ${esc(evt.action || evt.content || evt.message || "")}`.slice(0, 120);
+      const baseText = String(evt.action || evt.content || evt.message || "");
+      const reason = String(evt.fallback_reason || "").trim();
+      const chain = String(evt.provider_attempt_chain || "").trim();
+      const diag = reason || chain ? ` | reason=${reason || "n/a"}${chain ? ` | ${chain}` : ""}` : "";
+      row.textContent = (`[${evt.type || "event"}] ${baseText}${diag}`).slice(0, 220);
       feed.appendChild(row);
       feed.scrollTop = feed.scrollHeight;
     } catch (_) {
