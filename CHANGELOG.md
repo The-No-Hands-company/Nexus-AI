@@ -4,7 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [Unreleased] — Sprint K: Web UI — Live Trace, Task History, Swarm SSE
+
+### Added
+
+* `static/js/panels/task-history.js`: full Task History panel — search, filter (All/Done/Running/Failed), newest/oldest sort, expandable per-trace event timeline, export (.json), delete, replay/resume shortcuts
+* `static/js/panels/live-trace.js`: Live Trace panel backed by SSE — real-time event stream with colour-coded type indicators, elapsed-time stamps, timeline tick bar, inline plan step expansion, tool result previews, trace replay dropdown
+* `src/api/routes.py`: `GET /swarm/live` — SSE stream that pushes `activity_log` events as they arrive (replaces 2s client polling in Swarm View)
+* `src/api/routes.py`: `GET /agent/stream/live` — SSE stream of all agent events for the Live Trace panel
+* `static/js/panels/swarm.js`: Activity tab now connects via SSE (`/swarm/live`) instead of polling; falls back to 3s polling on SSE failure; new-events badge on Activity tab counts unseen events while user is on another tab
+* `static/index.html`: Task History (🗂) and Live Trace (📡) added to overflow menu; both panel HTML blocks added; new-events badge wired; script tags for new panel JS
+
+---
+
+## [Unreleased — previous]
 
 ### Added
 - Sprint J (NAI-SAFETY-CONTRACT-00002): Durable SQLite-backed safety audit storage — `add_safety_audit_entry()`, `load_safety_audit_entries()`, `clear_safety_audit_entries()` in `src/db.py`

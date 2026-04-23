@@ -2163,6 +2163,57 @@ def swarm_activity(limit: int = 50):
     return {"events": activity_log[-limit:], "total": len(activity_log)}
 
 
+@router.get("/swarm/live")
+async def swarm_live_stream():
+    """SSE stream of swarm activity events as they are pushed to activity_log."""
+    import asyncio as _aio
+    import json as _json
+
+    async def _generate():
+        last_seen = len(activity_log)
+        # Send existing events first (catch-up)
+        for ev in activity_log[-30:]:
+            yield f"data: {_json.dumps(ev)}\n\n"
+        # Then stream new ones
+        while True:
+            await _aio.sleep(0.5)
+            current = len(activity_log)
+            if current > last_seen:
+                for ev in activity_log[last_seen:current]:
+                    yield f"data: {_json.dumps(ev)}\n\n"
+                last_seen = current
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.get("/agent/stream/live")
+async def agent_live_stream():
+    """SSE stream of all agent events (activity_log) for the Live Trace panel."""
+    import asyncio as _aio
+    import json as _json
+
+    async def _generate():
+        last_seen = len(activity_log)
+        while True:
+            await _aio.sleep(0.3)
+            current = len(activity_log)
+            if current > last_seen:
+                for ev in activity_log[last_seen:current]:
+                    yield f"data: {_json.dumps(ev)}\n\n"
+                last_seen = current
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+
 @router.post("/safety/check")
 async def safety_check(request: Request):
     try:

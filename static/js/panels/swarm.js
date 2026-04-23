@@ -71,6 +71,9 @@ function swarmTab(name) {
   }
 
   if (name === "activity") {
+    _swarmNewEventCount = 0;
+    const badge = document.getElementById("swarm-new-badge");
+    if (badge) badge.style.display = "none";
     _startSwarmPolling();
     _stopGraphPolling();
     _stopProgressPolling();
@@ -129,14 +132,74 @@ function clearSwarmFeed() {
   _lastSwarmTotal = 0;
 }
 
+// ── SSE live feed (replaces polling) ─────────────────────────────────────────
+let _swarmEventSource = null;
+let _swarmNewEventCount = 0;
+
 function _startSwarmPolling() {
-  if (_swarmTimer) return;
-  _pollSwarm();
-  _swarmTimer = setInterval(_pollSwarm, 2000);
+  if (_swarmEventSource) return;
+  _connectSwarmSSE();
 }
 
 function _stopSwarmPolling() {
+  if (_swarmEventSource) {
+    _swarmEventSource.close();
+    _swarmEventSource = null;
+  }
   if (_swarmTimer) { clearInterval(_swarmTimer); _swarmTimer = null; }
+}
+
+function _connectSwarmSSE() {
+  if (_swarmEventSource) return;
+  _swarmEventSource = new EventSource("/swarm/live");
+
+  _swarmEventSource.onmessage = (e) => {
+    try {
+      const ev = JSON.parse(e.data);
+      _appendSwarmEvent(ev);
+      // New-events badge when panel is in background
+      if (document.hidden || _swarmActiveTab !== "activity") {
+        _swarmNewEventCount++;
+        const badge = document.getElementById("swarm-new-badge");
+        if (badge) {
+          badge.textContent = _swarmNewEventCount > 99 ? "99+" : String(_swarmNewEventCount);
+          badge.style.display = "inline";
+        }
+      }
+    } catch (_) {}
+  };
+
+  _swarmEventSource.onerror = () => {
+    // SSE failed — fall back to polling
+    if (_swarmEventSource) { _swarmEventSource.close(); _swarmEventSource = null; }
+    if (!_swarmTimer) {
+      _pollSwarm();
+      _swarmTimer = setInterval(_pollSwarm, 3000);
+    }
+  };
+}
+
+function _appendSwarmEvent(ev) {
+  const feed = document.getElementById("swarm-feed");
+  const countEl = document.getElementById("swarm-count");
+  if (!feed) return;
+
+  _lastSwarmTotal++;
+  const clr = SWARM_ACTION_COLORS[ev.action] || "#888";
+  const ts  = ev.ts
+    ? new Date(ev.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:6px;background:var(--surface2);font-size:.72rem;animation:fadeUp .1s ease;";
+  row.innerHTML = `<span style="color:${clr};font-weight:700;min-width:90px;">${esc(ev.action || "?")}</span><span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(ev.label || "")}</span><span style="color:var(--muted);font-size:.65rem;">${ts}</span>`;
+  feed.appendChild(row);
+
+  // Keep feed to last 200 rows
+  while (feed.children.length > 200) feed.removeChild(feed.firstChild);
+
+  feed.scrollTop = feed.scrollHeight;
+  if (countEl) countEl.textContent = _lastSwarmTotal + " event" + (_lastSwarmTotal === 1 ? "" : "s");
 }
 
 function _startProgressPolling() {
