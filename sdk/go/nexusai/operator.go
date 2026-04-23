@@ -84,6 +84,9 @@ type Operator struct {
 	client *Client
 }
 
+// NexusOperator is kept as a public alias for documentation and compatibility.
+type NexusOperator = Operator
+
 // NewOperator creates a new Operator with the given config.
 func NewOperator(cfg OperatorConfig) *Operator {
 	c := NewClient(cfg.BaseURL, cfg.APIKey)

@@ -31,7 +31,7 @@
       --bg:#09090e;--surface:#111118;--surface2:#18181f;--border:#1f1f2e;
       --accent:#7c6af7;--accent-d:#5a4fd4;--green:#22c55e;--amber:#f59e0b;
       --red:#f87171;--teal:#5eead4;--text:#e2e8f0;--muted:#64748b;
-      --sidebar-w:260px;
+      --sidebar-w:clamp(230px,22vw,320px);
       color-scheme:dark;
     }
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -310,8 +310,8 @@
 
     /* ── THEMES ── */
     body.light {
-      --bg:#f8fafc; --surface:#ffffff; --surface2:#f1f5f9;
-      --border:#e2e8f0; --text:#1e293b; --muted:#94a3b8;
+      --bg:#e9edf3; --surface:#f4f7fb; --surface2:#e4eaf2;
+      --border:#c7d2e0; --text:#1f2937; --muted:#64748b;
     }
     body.light, body.light-theme { color-scheme: light; }
     body.light .user .bubble { background:var(--accent); color:#fff; }
@@ -518,9 +518,17 @@
     /* ── SIDEBAR ── */
     #sidebar{width:var(--sidebar-w);flex-shrink:0;background:var(--surface);
       border-right:1px solid var(--border);display:flex;flex-direction:column;
-      transition:transform .25s cubic-bezier(.4,0,.2,1);z-index:20}
-    #sidebar.hidden{transform:translateX(calc(-1 * var(--sidebar-w)))}
-    @media(max-width:700px){#sidebar{position:absolute;top:0;bottom:0;left:0}}
+      transition:width .24s cubic-bezier(.4,0,.2,1),
+                 border-color .2s ease,
+                 transform .24s cubic-bezier(.4,0,.2,1);
+      z-index:20;overflow:hidden}
+    #sidebar.hidden{width:0;border-right-color:transparent;transform:translateX(-8px)}
+    #sidebar.hidden>*{opacity:0;pointer-events:none}
+    @media(max-width:700px){
+      #sidebar{position:absolute;top:0;bottom:0;left:0;transform:translateX(0)}
+      #sidebar.hidden{width:var(--sidebar-w);transform:translateX(calc(-1 * var(--sidebar-w)));border-right-color:var(--border)}
+      #sidebar.hidden>*{opacity:1;pointer-events:auto}
+    }
     .sidebar-head{display:flex;align-items:center;justify-content:space-between;
       padding:12px 14px;border-bottom:1px solid var(--border);flex-shrink:0}
     .sidebar-head span{font-size:.72rem;font-weight:700;text-transform:uppercase;
@@ -1050,37 +1058,25 @@
   <div class="overflow-menu-wrap">
     <button class="btn-icon" id="overflow-btn" onclick="toggleOverflow()" title="More">⋮</button>
     <div id="overflow-menu" class="overflow-menu" style="display:none">
-      <button onclick="openCommandPalette();toggleOverflow()">⌘ Command palette</button>
-      <button onclick="toggleSearch();toggleOverflow()">🔍 Search chats</button>
-      <button onclick="openProjectsModal();toggleOverflow()">🗂️ Projects</button>
-      <button onclick="openCIModal();toggleOverflow()">📋 Custom instructions</button>
+      <button onclick="openCommandPalette();toggleOverflow()">⌘ Command palette <span style="font-size:.65rem;color:var(--muted);margin-left:4px">all features</span></button>
       <button onclick="openMemoryModal();toggleOverflow()">🧠 Memory</button>
-      <button onclick="openUsageModal();toggleOverflow()">📊 Usage</button>
-      <button onclick="openBenchmarkLeaderboardPanel();toggleOverflow()">🏆 Benchmark leaderboard</button>
-      <button onclick="openBenchmarkDashboardPanel();toggleOverflow()">📈 Model benchmark dashboard</button>
-      <button onclick="openFinetuneDashboardPanel();toggleOverflow()">🧪 Fine-tuning jobs</button>
-      <button onclick="openRagCorpusPanel();toggleOverflow()">📚 RAG corpus browser</button>
-      <button onclick="openAdminDashboardPanel();toggleOverflow()">👥 Multi-user admin dashboard</button>
-      <button onclick="openCodeRunnerPanel();toggleOverflow()">▶️ Code sandbox runner</button>
-      <button onclick="enableTaskNotifications();toggleOverflow()">🔔 Enable task notifications</button>
+      <button onclick="openCIModal();toggleOverflow()">📋 Custom instructions</button>
+      <button onclick="openProjectsModal();toggleOverflow()">🗂️ Projects</button>
+      <button onclick="openApprovalsPanel();toggleOverflow()">⚠️ Approvals<span id="approvals-badge"></span></button>
+      <button onclick="openUsageModal();toggleOverflow()">📊 Usage stats</button>
       <button onclick="openHealthModal();toggleOverflow()">🏥 Provider health</button>
-      <button onclick="openSafetyAudit();toggleOverflow()">🛡 Safety audit log</button>
-      <button onclick="openSafetyScanner();toggleOverflow()">🧪 Safety scanner</button>
-      <button onclick="showTokenBar();toggleOverflow()">🔑 GitHub token</button>
       <button onclick="openPersonaEditor();toggleOverflow()">🎭 Persona editor</button>
+      <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
       <button onclick="openSchedulerPanel();toggleOverflow()">⏱ Scheduler</button>
       <button onclick="openSwarmPanel();toggleOverflow()">🧬 Swarm View</button>
-      <button onclick="openKGPanel();toggleOverflow()">🧠 Knowledge Graph</button>
-      <button onclick="openTracePanel();toggleOverflow()">⏮ Trace Viewer</button>
-      <button onclick="openEnsemblePanel();toggleOverflow()">🔴 Ensemble Mode</button>
-      <button onclick="openArchitecturePanel();toggleOverflow()">🏛 Architecture</button>
-      <button onclick="openDiffViewer();toggleOverflow()">📊 Diff viewer</button>
-      <button onclick="openSelfReviewPanel();toggleOverflow()">🔄 Self-improve</button>
-      <button onclick="openDocumentsPanel();toggleOverflow()">📄 Documents</button>
-      <button onclick="openDebatePanel();toggleOverflow()">⚔️ Debate</button>
-      <button onclick="openHypothesisPanel();toggleOverflow()">🔬 Hypothesis</button>
-      <button onclick="openAdaptiveRoutingPanel();toggleOverflow()">🎯 Adaptive routing</button>
-      <button onclick="openApprovalsPanel();toggleOverflow()">⚠️ Approvals<span id="approvals-badge"></span></button>
+      <button onclick="openFinetuneDashboardPanel();toggleOverflow()">🧪 Fine-tuning</button>
+      <button onclick="openRagCorpusPanel();toggleOverflow()">📚 RAG corpus</button>
+      <button onclick="openAdminDashboardPanel();toggleOverflow()">👥 Admin</button>
+      <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
+      <button onclick="enableTaskNotifications();toggleOverflow()">🔔 Notifications</button>
+      <button onclick="openSafetyAudit();toggleOverflow()">🛡 Safety audit</button>
+      <button onclick="showTokenBar();toggleOverflow()">🔑 GitHub token</button>
+      <button onclick="openShortcuts();toggleOverflow()">⌨️ Keyboard shortcuts</button>
     </div>
   </div>
 </header>
@@ -1370,9 +1366,9 @@
   </div>
 
   <div id="main">
-    <!-- Persona strip -->
-    <div class="persona-strip" id="persona-strip">
-      <!-- filled by JS -->
+    <!-- Persona strip (hidden until user activates a persona) -->
+    <div class="persona-strip" id="persona-strip" style="display:none">
+      <!-- filled by JS; shown when personas are active -->
     </div>
 
     <div id="drawer">
@@ -1392,14 +1388,20 @@
 
     <div id="chat">
       <div id="welcome">
-        <div class="welcome-icon">⚡</div>
-        <h2>Your private, self-hosted <span>command center</span>.</h2>
-        <p>Auto-fallback across free LLMs · web search · voice input · file upload · memory</p>
+        <div class="welcome-icon" style="font-size:2.4rem;margin-bottom:4px">⬡</div>
+        <h2 style="font-size:1.7rem;font-weight:900;letter-spacing:-.05em;margin-bottom:6px">Your AI. <span>Your rules.</span></h2>
+        <p style="font-size:.88rem;color:var(--muted);max-width:380px;line-height:1.7;margin-bottom:6px">
+          Self-hosted · open-source · <strong style="color:var(--text)">free forever</strong><br>
+          Your data never leaves your server. No subscriptions. No lock-in.
+        </p>
+        <p style="font-size:.72rem;color:var(--muted);max-width:380px;opacity:.65;margin-bottom:20px">
+          Part of the <a href="https://github.com/The-No-Hands-company" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">No Hands Company</a> Nexus Systems ecosystem
+        </p>
         <div class="chips">
-          <div class="chip" onclick="fillTask('List all files in the repo')">📂 List files</div>
-          <div class="chip" onclick="fillTask('Search the web for latest free LLM APIs 2025')">🔍 Web search</div>
-          <div class="chip" onclick="fillTask('What time is it in Tokyo?')">🕐 Time</div>
-          <div class="chip" onclick="fillTask('Read the README and summarize it')">📖 Read README</div>
+          <div class="chip" onclick="fillTask('Search the web for the latest AI news today')">🔍 Web search</div>
+          <div class="chip" onclick="fillTask('Write a Python script that sorts a list of files by date modified')">💻 Write code</div>
+          <div class="chip" onclick="fillTask('Summarize this conversation so far')">📝 Summarize</div>
+          <div class="chip" onclick="fillTask('What can you do? Give me a quick tour of your capabilities')">✨ What can you do?</div>
         </div>
       </div>
       <div id="messages">
@@ -2270,6 +2272,9 @@ async function send(){
   let streamedMarkdown='';
   let hasTokenStream=false;
   let streamElapsedSeconds=0;
+  let sawAnySseEvent=false;
+  let sawTerminalEvent=false;
+  let sawDoneMarker=false;
 
   try{
     const resp=await fetch('/agent/stream',{
@@ -2277,6 +2282,40 @@ async function send(){
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({task:val,session_id:sid,files,stream_id:currentStreamId}),
     });
+    if(!resp.ok){
+      let backendMsg = `Request failed (${resp.status})`;
+      try{
+        const raw = await resp.text();
+        if(raw){
+          try{
+            const parsed = JSON.parse(raw);
+            backendMsg = parsed.error || parsed.detail || raw;
+          } catch {
+            backendMsg = raw;
+          }
+        }
+      } catch {}
+      throw new Error(backendMsg);
+    }
+    const contentType = (resp.headers.get('content-type')||'').toLowerCase();
+    if(!contentType.includes('text/event-stream')){
+      let backendMsg = `Unexpected response type: ${contentType||'unknown'}`;
+      try{
+        const raw = await resp.text();
+        if(raw){
+          try{
+            const parsed = JSON.parse(raw);
+            backendMsg = parsed.error || parsed.detail || raw;
+          } catch {
+            backendMsg = raw;
+          }
+        }
+      } catch {}
+      throw new Error(backendMsg);
+    }
+    if(!resp.body){
+      throw new Error('Streaming response body is unavailable.');
+    }
     const reader=resp.body.getReader(),decoder=new TextDecoder();
     let buf='';
 
@@ -2288,7 +2327,13 @@ async function send(){
 
       for(const part of parts){
         if(!part.startsWith('data:')) continue;
-        let evt;try{evt=JSON.parse(part.slice(5).trim())}catch{continue}
+        const rawData = part.slice(5).trim();
+        if(rawData === '[DONE]'){
+          sawDoneMarker = true;
+          continue;
+        }
+        let evt;try{evt=JSON.parse(rawData)}catch{continue}
+        sawAnySseEvent = true;
         if(!gotFirst){showTyping(false);gotFirst=true}
 
         if(evt.type==='clarify'){
@@ -2564,20 +2609,45 @@ async function send(){
           enhanceRenderedContent(agentBub);
           scrollBottom();
 
+        } else if(evt.type==='status'){
+          const statusEl=document.createElement('div');
+          statusEl.className='msg-meta';
+          statusEl.dataset.streamStatus='1';
+          statusEl.textContent=evt.message||'Processing request...';
+          // Keep only one status line to avoid clutter.
+          const prior = agentBub.querySelector('[data-stream-status="1"]');
+          if(prior) prior.remove();
+          agentBub.appendChild(statusEl);
+          scrollBottom();
+
         } else if(evt.type==='done'){haptic('success');
+          sawTerminalEvent = true;
           if (typeof swarmRecordProgressEvent === 'function') swarmRecordProgressEvent(evt);
           if(evt.input_tokens||evt.output_tokens) showTokenCount(evt.input_tokens,evt.output_tokens);
           if(toolContainer){agentBub.appendChild(document.createElement('hr'))}
-          const textNode=document.createElement('div');
-          agentBub.appendChild(textNode);
           const finalText = evt.content||'';
-          if(hasTokenStream){
-            textNode.innerHTML = renderMd(streamedMarkdown || finalText);
-            enhanceRenderedContent(textNode);
-          } else {
-            await typewrite(textNode,finalText);
+          const combinedText = streamedMarkdown || finalText;
+          // Only render a text node if there is actual content to show.
+          // When the agent emits done with empty content (e.g. after a clarify card)
+          // we skip rendering to avoid leaving an empty container in the bubble.
+          if(combinedText.trim()){
+            const textNode=document.createElement('div');
+            agentBub.appendChild(textNode);
+            if(hasTokenStream){
+              textNode.innerHTML = renderMd(combinedText);
+              enhanceRenderedContent(textNode);
+            } else {
+              await typewrite(textNode,finalText);
+            }
+          } else if(!agentBub.children.length && !agentBub.textContent.trim()){
+            // Completely empty bubble with no prior content — show a soft fallback
+            const emptyEl=document.createElement('div');
+            emptyEl.style.cssText='color:var(--muted);font-size:.82rem;font-style:italic';
+            emptyEl.textContent='No response generated. Please try again.';
+            agentBub.appendChild(emptyEl);
           }
-          agentRow.dataset.markdown = streamedMarkdown || finalText;
+          agentBub.querySelector('[data-stream-status="1"]')?.remove();
+          agentRow.dataset.markdown = combinedText;
           if(evt.provider&&evt.provider!=='Built-in'){
             const m=document.createElement('div');m.className='msg-meta';
             m.textContent=`${evt.provider} · ${evt.model}`;agentWrap.appendChild(m);
@@ -2601,6 +2671,7 @@ async function send(){
           triggerAutoSave();  // auto-save after every response
 
         } else if(evt.type==='error'){
+          sawTerminalEvent = true;
           const msg = evt.message || '';
           const isExhausted = msg.toLowerCase().includes('exhausted') ||
                               msg.toLowerCase().includes('rate limit') ||
@@ -2620,6 +2691,7 @@ async function send(){
             errEl.textContent = '⚠️ ' + msg;
             agentBub.appendChild(errEl);
           }
+          agentBub.querySelector('[data-stream-status="1"]')?.remove();
           showTyping(false);
           scrollBottom();
         }
@@ -2630,6 +2702,36 @@ async function send(){
       showTyping(false);
       const errEl2=document.createElement('div');errEl2.style.cssText='color:var(--red);font-size:.82rem;margin-top:4px';errEl2.textContent='⚠️ '+esc(String(err));agentBub.appendChild(errEl2);
     }
+  }
+
+  // Stream ended cleanly ([DONE]) but no logical terminal payload arrived.
+  // Replace lingering status-only UI with a clear incomplete-response message.
+  if(sawDoneMarker && !sawTerminalEvent){
+    agentBub.querySelector('[data-stream-status="1"]')?.remove();
+    const hasRenderable = (
+      (agentBub.textContent||'').trim().length > 0 ||
+      !!agentBub.querySelector('.clarify-card,.plan-card,.tool-step,.approval-card,.think-step,.img-bubble,.code-viewer,img,pre,table,blockquote')
+    );
+    if(!hasRenderable){
+      const incompleteEl=document.createElement('div');
+      incompleteEl.style.cssText='color:var(--muted);font-size:.82rem;font-style:italic';
+      incompleteEl.textContent='Request finished without a final answer. Please retry.';
+      agentBub.appendChild(incompleteEl);
+    }
+  }
+
+  // Last-line guard: avoid leaving a visually empty assistant container.
+  const hasMeaningfulAssistantContent = (
+    (agentBub.textContent||'').trim().length > 0 ||
+    !!agentBub.querySelector('.clarify-card,.plan-card,.tool-step,.approval-card,.think-step,.img-bubble,.code-viewer,img,pre,table,blockquote')
+  );
+  if(!hasMeaningfulAssistantContent){
+    const emptyEl=document.createElement('div');
+    emptyEl.style.cssText='color:var(--muted);font-size:.82rem;font-style:italic';
+    emptyEl.textContent = (sawAnySseEvent && !sawTerminalEvent)
+      ? 'Request started but no final response was produced. Please try again.'
+      : 'No response generated. Please try again.';
+    agentBub.appendChild(emptyEl);
   }
 
   showTyping(false);

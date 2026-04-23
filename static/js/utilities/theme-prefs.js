@@ -2,7 +2,7 @@
 const HLJS_THEME_DARK = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css';
 const HLJS_THEME_LIGHT = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-light.min.css';
 const BROWSER_THEME_DARK = '#09090e';
-const BROWSER_THEME_LIGHT = '#f8fafc';
+const BROWSER_THEME_LIGHT = '#e9edf3';
 
 function normalizeTheme(theme) {
   return theme === 'light' ? 'light' : 'dark';

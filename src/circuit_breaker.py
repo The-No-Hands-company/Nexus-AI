@@ -81,7 +81,7 @@ class CircuitBreaker:
             if time.time() - self._last_failure_time >= self._recovery_timeout:
                 self._state = CircuitState.HALF_OPEN
                 self._success_count = 0
-                logger.info("circuit_half_open", name=self.name)
+                logger.info("circuit_half_open name=%s", self.name)
         return self._state
 
     def call(self, fn: Callable, *args, **kwargs) -> Any:
@@ -114,7 +114,7 @@ class CircuitBreaker:
                     self._state = CircuitState.CLOSED
                     self._failure_count = 0
                     self._success_count = 0
-                    logger.info("circuit_closed", name=self.name)
+                    logger.info("circuit_closed name=%s", self.name)
             elif self._state == CircuitState.CLOSED:
                 self._failure_count = 0
 
@@ -124,16 +124,16 @@ class CircuitBreaker:
             self._last_failure_time = time.time()
             if self._state == CircuitState.HALF_OPEN:
                 self._state = CircuitState.OPEN
-                logger.warning("circuit_open_from_half_open", name=self.name)
+                logger.warning("circuit_open_from_half_open name=%s", self.name)
             elif (
                 self._state == CircuitState.CLOSED
                 and self._failure_count >= self._failure_threshold
             ):
                 self._state = CircuitState.OPEN
                 logger.warning(
-                    "circuit_open",
-                    name=self.name,
-                    failures=self._failure_count,
+                    "circuit_open name=%s failures=%s",
+                    self.name,
+                    self._failure_count,
                 )
 
     def reset(self) -> None:
@@ -143,7 +143,7 @@ class CircuitBreaker:
             self._failure_count = 0
             self._success_count = 0
             self._last_failure_time = 0.0
-        logger.info("circuit_reset", name=self.name)
+        logger.info("circuit_reset name=%s", self.name)
 
     def status(self) -> dict:
         with self._lock:
@@ -226,7 +226,7 @@ def circuit_protected(
             try:
                 return cb.call(fn, *args, **kwargs)
             except CircuitBreakerOpen:
-                logger.warning("circuit_fallback", name=name, fn=fn.__name__)
+                logger.warning("circuit_fallback name=%s fn=%s", name, fn.__name__)
                 return fallback
 
         wrapper.__wrapped__ = fn  # type: ignore

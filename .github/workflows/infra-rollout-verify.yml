@@ -1,0 +1,36 @@
+name: Infra Rollout Verify
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "15 */6 * * *"
+
+jobs:
+  verify-rollout-packs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.7.5
+
+      - name: Verify rollout packs
+        run: |
+          set -euo pipefail
+          python scripts/verify_infra_rollout.py --run-terraform-validate --report test-results/infra_rollout_verify_report.json
+
+      - name: Upload verification report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: infra-rollout-verify-report
+          path: test-results/infra_rollout_verify_report.json

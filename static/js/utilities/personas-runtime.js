@@ -16,8 +16,9 @@ function renderPersonaStrip(personas,activeId){
       style="${p.id===activeId?`background:${p.color};border-color:${p.color}`:''}">
       <span class="p-icon">${p.icon}</span>${p.label}
     </button>`).join('');
+    // Only show the strip when there is more than one persona to choose from
+    strip.style.display = personas.length > 1 ? 'flex' : 'none';
 }
-
 async function switchPersona(id){
   haptic('light');
   const d=await fetch(`/personas/${id}`,{method:'POST'}).then(r=>r.json()).catch(()=>null);

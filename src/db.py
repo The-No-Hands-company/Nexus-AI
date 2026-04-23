@@ -294,6 +294,36 @@ class SQLiteBackend(DatabaseBackend):
                 lessons     TEXT NOT NULL DEFAULT '[]',
                 source      TEXT NOT NULL DEFAULT 'reflection'
             );
+            CREATE TABLE IF NOT EXISTS dpo_jobs (
+                id           TEXT PRIMARY KEY,
+                base_model   TEXT NOT NULL,
+                adapter_name TEXT NOT NULL,
+                dataset_path TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'queued',
+                metrics      TEXT NOT NULL DEFAULT '{}',
+                adapter_path TEXT,
+                error        TEXT,
+                created_at   TEXT NOT NULL,
+                completed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_dpo_jobs_status ON dpo_jobs(status);
+            CREATE INDEX IF NOT EXISTS idx_dpo_jobs_created_at ON dpo_jobs(created_at);
+            CREATE TABLE IF NOT EXISTS rlhf_jobs (
+                id                TEXT PRIMARY KEY,
+                base_model        TEXT NOT NULL,
+                adapter_name      TEXT NOT NULL,
+                dataset_path      TEXT NOT NULL,
+                status            TEXT NOT NULL DEFAULT 'queued',
+                rounds_completed  INTEGER NOT NULL DEFAULT 0,
+                reward_model_path TEXT,
+                metrics           TEXT NOT NULL DEFAULT '{}',
+                adapter_path      TEXT,
+                error             TEXT,
+                created_at        TEXT NOT NULL,
+                completed_at      TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_rlhf_jobs_status ON rlhf_jobs(status);
+            CREATE INDEX IF NOT EXISTS idx_rlhf_jobs_created_at ON rlhf_jobs(created_at);
         """)
         c.executescript("""
             CREATE TABLE IF NOT EXISTS orgs (
@@ -1016,6 +1046,36 @@ class PostgresBackend(DatabaseBackend):
                     lessons     TEXT NOT NULL DEFAULT '[]',
                     source      TEXT NOT NULL DEFAULT 'reflection'
                 );
+                CREATE TABLE IF NOT EXISTS dpo_jobs (
+                    id           TEXT PRIMARY KEY,
+                    base_model   TEXT NOT NULL,
+                    adapter_name TEXT NOT NULL,
+                    dataset_path TEXT NOT NULL,
+                    status       TEXT NOT NULL DEFAULT 'queued',
+                    metrics      JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    adapter_path TEXT,
+                    error        TEXT,
+                    created_at   TEXT NOT NULL,
+                    completed_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_dpo_jobs_status ON dpo_jobs(status);
+                CREATE INDEX IF NOT EXISTS idx_dpo_jobs_created_at ON dpo_jobs(created_at);
+                CREATE TABLE IF NOT EXISTS rlhf_jobs (
+                    id                TEXT PRIMARY KEY,
+                    base_model        TEXT NOT NULL,
+                    adapter_name      TEXT NOT NULL,
+                    dataset_path      TEXT NOT NULL,
+                    status            TEXT NOT NULL DEFAULT 'queued',
+                    rounds_completed  INTEGER NOT NULL DEFAULT 0,
+                    reward_model_path TEXT,
+                    metrics           JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    adapter_path      TEXT,
+                    error             TEXT,
+                    created_at        TEXT NOT NULL,
+                    completed_at      TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_rlhf_jobs_status ON rlhf_jobs(status);
+                CREATE INDEX IF NOT EXISTS idx_rlhf_jobs_created_at ON rlhf_jobs(created_at);
             """)
             for col_sql in [
                 "ALTER TABLE users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'",
@@ -1532,6 +1592,14 @@ def assign_chat_to_project(project_id, chat_id): _backend.assign_chat_to_project
 def get_project_chats(project_id): return _backend.get_project_chats(project_id)
 def save_pref(key, value): _backend.save_pref(key, value)
 def load_pref(key, default=""): return _backend.load_pref(key, default)
+
+# Backward-compatible preference helpers used by older modules.
+def save_preference(key, value):
+    _backend.save_pref(key, value)
+
+
+def load_preference(key, default=""):
+    return _backend.load_pref(key, default)
 def log_usage(p, m, it, ot, tt="chat", username="", cost_usd=0.0):
     _backend.log_usage(p, m, it, ot, tt, username=username, cost_usd=cost_usd)
 def get_usage_stats(days=7): return _backend.get_usage_stats(days)
@@ -2486,6 +2554,192 @@ def _ft_synthetic_batches_key() -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _json_parse_obj(value: Any) -> dict:
+    if isinstance(value, dict):
+        return value
+    if value is None:
+        return {}
+    try:
+        parsed = json.loads(str(value))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def upsert_dpo_job_record(job: dict) -> dict:
+    payload = {
+        "id": str(job.get("id") or "").strip(),
+        "base_model": str(job.get("base_model") or "").strip(),
+        "adapter_name": str(job.get("adapter_name") or "").strip(),
+        "dataset_path": str(job.get("dataset_path") or "").strip(),
+        "status": str(job.get("status") or "queued").strip(),
+        "metrics": dict(job.get("metrics") or {}),
+        "adapter_path": str(job.get("adapter_path") or "").strip() or None,
+        "error": str(job.get("error") or "").strip() or None,
+        "created_at": str(job.get("created_at") or _now_iso()).strip(),
+        "completed_at": str(job.get("completed_at") or "").strip() or None,
+    }
+    if not payload["id"]:
+        raise ValueError("DPO job id is required")
+
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO dpo_jobs(id, base_model, adapter_name, dataset_path, status, metrics, adapter_path, error, created_at, completed_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "base_model=excluded.base_model, adapter_name=excluded.adapter_name, dataset_path=excluded.dataset_path, "
+            "status=excluded.status, metrics=excluded.metrics, adapter_path=excluded.adapter_path, "
+            "error=excluded.error, created_at=excluded.created_at, completed_at=excluded.completed_at",
+            (
+                payload["id"], payload["base_model"], payload["adapter_name"], payload["dataset_path"],
+                payload["status"], json.dumps(payload["metrics"]), payload["adapter_path"], payload["error"],
+                payload["created_at"], payload["completed_at"],
+            ),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO dpo_jobs(id, base_model, adapter_name, dataset_path, status, metrics, adapter_path, error, created_at, completed_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "base_model=EXCLUDED.base_model, adapter_name=EXCLUDED.adapter_name, dataset_path=EXCLUDED.dataset_path, "
+            "status=EXCLUDED.status, metrics=EXCLUDED.metrics, adapter_path=EXCLUDED.adapter_path, "
+            "error=EXCLUDED.error, created_at=EXCLUDED.created_at, completed_at=EXCLUDED.completed_at",
+            (
+                payload["id"], payload["base_model"], payload["adapter_name"], payload["dataset_path"],
+                payload["status"], json.dumps(payload["metrics"]), payload["adapter_path"], payload["error"],
+                payload["created_at"], payload["completed_at"],
+            ),
+        )
+    return payload
+
+
+def get_dpo_job_record(job_id: str) -> dict | None:
+    jid = str(job_id or "").strip()
+    if not jid:
+        return None
+    if isinstance(_backend, SQLiteBackend):
+        rows = _sql_fetchall("SELECT * FROM dpo_jobs WHERE id=? LIMIT 1", (jid,))
+    else:
+        rows = _sql_fetchall("SELECT * FROM dpo_jobs WHERE id=%s LIMIT 1", (jid,))
+    if not rows:
+        return None
+    row = dict(rows[0])
+    row["metrics"] = _json_parse_obj(row.get("metrics"))
+    return row
+
+
+def list_dpo_job_records(status: str = "", limit: int = 1000) -> list[dict]:
+    safe_limit = max(1, min(int(limit or 1000), 10000))
+    status_q = str(status or "").strip()
+    if isinstance(_backend, SQLiteBackend):
+        if status_q:
+            rows = _sql_fetchall(
+                f"SELECT * FROM dpo_jobs WHERE status=? ORDER BY created_at DESC LIMIT {safe_limit}",
+                (status_q,),
+            )
+        else:
+            rows = _sql_fetchall(f"SELECT * FROM dpo_jobs ORDER BY created_at DESC LIMIT {safe_limit}")
+    else:
+        if status_q:
+            rows = _sql_fetchall(
+                f"SELECT * FROM dpo_jobs WHERE status=%s ORDER BY created_at DESC LIMIT {safe_limit}",
+                (status_q,),
+            )
+        else:
+            rows = _sql_fetchall(f"SELECT * FROM dpo_jobs ORDER BY created_at DESC LIMIT {safe_limit}")
+    for row in rows:
+        row["metrics"] = _json_parse_obj(row.get("metrics"))
+    return [dict(r) for r in rows]
+
+
+def upsert_rlhf_job_record(job: dict) -> dict:
+    payload = {
+        "id": str(job.get("id") or "").strip(),
+        "base_model": str(job.get("base_model") or "").strip(),
+        "adapter_name": str(job.get("adapter_name") or "").strip(),
+        "dataset_path": str(job.get("dataset_path") or "").strip(),
+        "status": str(job.get("status") or "queued").strip(),
+        "rounds_completed": int(job.get("rounds_completed") or 0),
+        "reward_model_path": str(job.get("reward_model_path") or "").strip() or None,
+        "metrics": dict(job.get("metrics") or {}),
+        "adapter_path": str(job.get("adapter_path") or "").strip() or None,
+        "error": str(job.get("error") or "").strip() or None,
+        "created_at": str(job.get("created_at") or _now_iso()).strip(),
+        "completed_at": str(job.get("completed_at") or "").strip() or None,
+    }
+    if not payload["id"]:
+        raise ValueError("RLHF job id is required")
+
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO rlhf_jobs(id, base_model, adapter_name, dataset_path, status, rounds_completed, reward_model_path, metrics, adapter_path, error, created_at, completed_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "base_model=excluded.base_model, adapter_name=excluded.adapter_name, dataset_path=excluded.dataset_path, status=excluded.status, "
+            "rounds_completed=excluded.rounds_completed, reward_model_path=excluded.reward_model_path, metrics=excluded.metrics, "
+            "adapter_path=excluded.adapter_path, error=excluded.error, created_at=excluded.created_at, completed_at=excluded.completed_at",
+            (
+                payload["id"], payload["base_model"], payload["adapter_name"], payload["dataset_path"],
+                payload["status"], payload["rounds_completed"], payload["reward_model_path"], json.dumps(payload["metrics"]),
+                payload["adapter_path"], payload["error"], payload["created_at"], payload["completed_at"],
+            ),
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO rlhf_jobs(id, base_model, adapter_name, dataset_path, status, rounds_completed, reward_model_path, metrics, adapter_path, error, created_at, completed_at) "
+            "VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb,%s,%s,%s,%s) "
+            "ON CONFLICT(id) DO UPDATE SET "
+            "base_model=EXCLUDED.base_model, adapter_name=EXCLUDED.adapter_name, dataset_path=EXCLUDED.dataset_path, status=EXCLUDED.status, "
+            "rounds_completed=EXCLUDED.rounds_completed, reward_model_path=EXCLUDED.reward_model_path, metrics=EXCLUDED.metrics, "
+            "adapter_path=EXCLUDED.adapter_path, error=EXCLUDED.error, created_at=EXCLUDED.created_at, completed_at=EXCLUDED.completed_at",
+            (
+                payload["id"], payload["base_model"], payload["adapter_name"], payload["dataset_path"],
+                payload["status"], payload["rounds_completed"], payload["reward_model_path"], json.dumps(payload["metrics"]),
+                payload["adapter_path"], payload["error"], payload["created_at"], payload["completed_at"],
+            ),
+        )
+    return payload
+
+
+def get_rlhf_job_record(job_id: str) -> dict | None:
+    jid = str(job_id or "").strip()
+    if not jid:
+        return None
+    if isinstance(_backend, SQLiteBackend):
+        rows = _sql_fetchall("SELECT * FROM rlhf_jobs WHERE id=? LIMIT 1", (jid,))
+    else:
+        rows = _sql_fetchall("SELECT * FROM rlhf_jobs WHERE id=%s LIMIT 1", (jid,))
+    if not rows:
+        return None
+    row = dict(rows[0])
+    row["metrics"] = _json_parse_obj(row.get("metrics"))
+    return row
+
+
+def list_rlhf_job_records(status: str = "", limit: int = 1000) -> list[dict]:
+    safe_limit = max(1, min(int(limit or 1000), 10000))
+    status_q = str(status or "").strip()
+    if isinstance(_backend, SQLiteBackend):
+        if status_q:
+            rows = _sql_fetchall(
+                f"SELECT * FROM rlhf_jobs WHERE status=? ORDER BY created_at DESC LIMIT {safe_limit}",
+                (status_q,),
+            )
+        else:
+            rows = _sql_fetchall(f"SELECT * FROM rlhf_jobs ORDER BY created_at DESC LIMIT {safe_limit}")
+    else:
+        if status_q:
+            rows = _sql_fetchall(
+                f"SELECT * FROM rlhf_jobs WHERE status=%s ORDER BY created_at DESC LIMIT {safe_limit}",
+                (status_q,),
+            )
+        else:
+            rows = _sql_fetchall(f"SELECT * FROM rlhf_jobs ORDER BY created_at DESC LIMIT {safe_limit}")
+    for row in rows:
+        row["metrics"] = _json_parse_obj(row.get("metrics"))
+    return [dict(r) for r in rows]
 
 
 def save_lora_adapter_version(

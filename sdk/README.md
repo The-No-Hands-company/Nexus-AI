@@ -13,6 +13,18 @@ All SDKs target the OpenAI-compatible and agent/autonomy parity routes:
 - `POST /v1/autonomy/plan`
 - `GET /v1/models`
 
+## Release process
+
+SDK publication is release-tag driven and validated before publish:
+
+- Python: tag `sdk/python/vX.Y.Z`
+- TypeScript: tag `sdk/typescript/vX.Y.Z`
+- Go: tag `sdk/go/vX.Y.Z`
+
+The release workflow verifies that the tag version matches package metadata, runs package-specific validation, builds publishable artifacts, and only then publishes or announces the release target.
+
+Operator runbook: `docs/production-readiness/sdk_release_process.md`
+
 ## Quick usage
 
 Python:

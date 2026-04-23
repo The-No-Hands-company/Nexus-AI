@@ -15,7 +15,13 @@ _TEXTUAL_RESPONSE_TYPES = (
     "text/event-stream",
     "text/markdown",
 )
-_REQUEST_EXEMPT_PATHS = {"/safety/check", "/safety/pii-scan", "/safety/prompt-injection"}
+_REQUEST_EXEMPT_PATHS = {
+    "/safety/check",
+    "/safety/pii-scan",
+    "/safety/prompt-injection",
+    "/agent/stream",
+    "/v1/agent/stream",
+}
 _RESPONSE_EXEMPT_PREFIXES = ("/static/",)
 
 
@@ -181,7 +187,9 @@ class SafetyPipelineMiddleware:
                     current = body
                     body = b""
                     return {"type": "http.request", "body": current, "more_body": False}
-                return {"type": "http.disconnect"}
+                # Do not emit synthetic disconnects here; streaming handlers and
+                # request lifecycle checks may interpret this as a dropped client.
+                return {"type": "http.request", "body": b"", "more_body": False}
 
             receive_to_use = replay_receive
 

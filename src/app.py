@@ -1,5 +1,6 @@
 import logging
 import os
+import asyncio
 import signal
 import threading
 import time
@@ -8,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
 from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -59,6 +61,23 @@ _INFLIGHT_LOCK = threading.Lock()
 _DEPRECATED_ENDPOINTS = {
     "/v1/completions": "2026-12-31T00:00:00+00:00",
 }
+
+
+def _startup_warmup_mode() -> str:
+    mode = str(os.getenv("AGENT_STARTUP_WARMUP_MODE", "full")).strip().lower()
+    if mode not in {"off", "critical", "background", "full"}:
+        mode = "full"
+    return mode
+
+
+def _startup_warmup_critical_providers() -> list[str]:
+    raw = os.getenv("AGENT_STARTUP_WARMUP_CRITICAL", "ollama,openrouter,gemini,groq")
+    providers: list[str] = []
+    for item in raw.split(","):
+        p = item.strip().lower()
+        if p and p not in providers:
+            providers.append(p)
+    return providers
 
 
 def _inflight_inc() -> None:
@@ -121,13 +140,48 @@ async def lifespan(app: FastAPI):
     if hasattr(api_routes, "startup_event"):
         api_routes.startup_event()
 
-    # Pre-warm the default agent context to reduce first-call cold-start latency
+    # Warmup strategy: OFF | CRITICAL | BACKGROUND | FULL
+    mode = _startup_warmup_mode()
+    critical = _startup_warmup_critical_providers()
     try:
         from .agent import warmup_agent
-        warmup_agent(sid="runtime", persona="general")
-        _logger.info("agent_warmup_complete")
+
+        if mode == "off":
+            _logger.info("agent_warmup_skipped mode=off")
+        elif mode == "critical":
+            result = warmup_agent(
+                sid="runtime",
+                persona="general",
+                provider_order=critical,
+                task="warmup_critical",
+            )
+            _logger.info("agent_warmup_complete mode=critical result=%s", result)
+        elif mode == "background":
+            async def _bg_warmup() -> None:
+                try:
+                    result = await asyncio.to_thread(
+                        warmup_agent,
+                        sid="runtime",
+                        persona="general",
+                        provider_order=None,
+                        task="warmup_full",
+                    )
+                    _logger.info("agent_warmup_complete mode=background result=%s", result)
+                except Exception as bg_exc:
+                    _logger.warning("agent_warmup_failed mode=background error=%s", bg_exc)
+
+            asyncio.create_task(_bg_warmup())
+            _logger.info("agent_warmup_scheduled mode=background")
+        else:
+            result = warmup_agent(
+                sid="runtime",
+                persona="general",
+                provider_order=None,
+                task="warmup_full",
+            )
+            _logger.info("agent_warmup_complete mode=full result=%s", result)
     except Exception as exc:
-        _logger.warning("agent_warmup_failed error=%s", exc)
+        _logger.warning("agent_warmup_failed mode=%s error=%s", mode, exc)
 
     # Zero-downtime online DDL migrations (non-blocking, idempotent)
     try:
@@ -349,7 +403,21 @@ def create_app() -> FastAPI:
     if os.path.exists(static_path):
         app.mount("/static", StaticFiles(directory=static_path), name="static")
 
+    @app.get("/status", include_in_schema=False)
+    async def public_status_page():
+        status_page = os.path.join(static_path, "status.html")
+        if os.path.exists(status_page):
+            return FileResponse(status_page, media_type="text/html")
+        return JSONResponse(
+            {
+                "ok": True,
+                "status": "operational",
+                "detail": "Status page is not available; serve static/status.html to enable UI.",
+            }
+        )
+
     from .api.routes import router as api_router
+    from .routes.rlhf import router as rlhf_router
     # Mount with no prefix for backwards-compat bare paths (/chat, /health, etc.)
     app.include_router(api_router)
     # Mount again under /v1 so every route is also reachable at /v1/<path>.
@@ -357,6 +425,8 @@ def create_app() -> FastAPI:
     # clients continue to work unchanged.  The X-API-Version response header
     # (set by the existing APIVersionMiddleware) still signals "v1" vs "legacy".
     app.include_router(api_router, prefix="/v1")
+    # RLHF router already uses /v1/rlhf prefix internally.
+    app.include_router(rlhf_router)
 
     # SCIM 2.0 provisioning endpoints
     try:

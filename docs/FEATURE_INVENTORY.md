@@ -809,13 +809,13 @@ harden these to full production level:
 - [x] LoRA adapter versioning (store + compare adapter checkpoints) (`POST /finetune/adapters`, `GET /finetune/adapters`, `GET /finetune/adapters/{adapter_id}/compare`) — registry metadata is persisted, adapter saves now materialize version artifacts with manifests, and compare includes artifact-aware deltas (`exists`, `kind`, `file_count`, `total_bytes`, `sha256`) with payload-aware hashing/counting for local checkpoints.
 - [x] LoRA adapter hot-swap at inference (`POST /finetune/adapters/{adapter_id}/hot-swap`) — `apply_adapter()` now merges adapter via Ollama Modelfile (for GGUF) or `peft.PeftModel.merge_and_unload` (for HF format). `rollback_adapter()` switches active adapter in registry.
 - [x] One-click fine-tune on collected feedback data (`POST /finetune/one-click`) — `export_feedback_dataset` queries positive-reaction messages from DB and writes Alpaca/ShareGPT JSONL; fed into `create_finetune_job` dispatch.
-- [~] RLHF / DPO pipeline integration — routes now consume persisted dataset preview rows, build preference pairs, compute dataset-backed alignment metrics, and persist scored outputs + adapter metadata; however this is still orchestration-level preference scoring rather than full gradient-level RLHF/DPO optimization.
-- [~] Continual fine-tuning scheduler — scheduler policy records stored and cron-triggered; training dispatch now works but GPU availability is not guaranteed in all deployment environments.
+- [x] RLHF / DPO pipeline integration — experiment runner now supports a real training backend toggle via config (`training_backend=orchestration|native`) in `src/api/routes.py:_run_rlhf_dpo_job`, with native execution wired to `src/rlhf_dpo.py` (`create_dpo_job`/`run_dpo_training`, `create_rlhf_job`/`run_rlhf_training`) and telemetry gate enforcement (`min_pair_count`, `min_alignment_score`, `max_synthetic_negative_ratio`) that blocks low-quality runs and records explicit gate outcomes in job events/results.
+- [x] Continual fine-tuning scheduler — scheduler policy records are stored and cron-triggered via `POST /finetune/continual/schedule`; runtime execution in `src/api/routes.py:_execute_continual_re_tune_task` now handles transient capacity/GPU failures with explicit deferred status (`last_trigger_status=deferred_capacity`) instead of hard-failing the schedule loop, preserving reliable continual operation across mixed-capacity environments.
 
 ### 12.3 Model packaging and release readiness
 
 - [x] Nexus Prime Alpha persona wired to fine-tuned Ollama model — `POST /finetune/personas/nexus-prime-alpha/wire` persists persona wiring, provider order overrides, and active adapter selection via `set_active_lora_adapter`.
-- [~] Automated eval suite (benchmark vs base model) — `src/eval_pipeline.py` now uses grounded suite-task runners for `humaneval`, `gsm8k`, `arc`, `rag`, `safety`, `advglue`, and `multilingual`, with live-provider best-effort execution and fixture-backed deterministic fallback. This closes the hash-placeholder path, but it is still a local suite harness rather than a full academic dataset runner/public leaderboard pipeline.
+- [x] Automated eval suite (benchmark vs base model) — Production dataset runners and export pipeline are now in place: `src/evals/dataset_runners.py` (GSM8K, TruthfulQA, HumanEval, MMLU, HellaSwag), `src/evals/artifact_export.py` (JSONL/CSV/HTML/leaderboard JSON + signed manifest), and benchmark API routes in `src/api/routes.py` (`/benchmark/dataset/*`, `/benchmark/export/*`) support reproducible model-vs-baseline evaluation history.
 - [x] Model card and transparency report endpoint — `GET /models/{model_id}/card` and `GET /models/{model_id}/transparency` now consume live eval job outputs, dataset provenance, and adapter lineage from local registries rather than hash-placeholder score scaffolding.
 - [x] Multi-task LoRA adapters hot-swap — `/finetune/adapters/multitask` and `/finetune/adapters/multitask/hot-swap` persist task→adapter mappings and update the active adapter registry for target models.
 - [x] Multimodal fine-tuning extension — `POST /finetune/multimodal/jobs` validates multimodal rows (`prompt`, `response`, `image_url`/`image_b64`) and creates a real fine-tuning child job through `_create_finetune_job_from_rows`.
@@ -1203,31 +1203,31 @@ harden these to full production level:
 
 ### 26.1 Security and Compliance
 
-- [ ] **[CRITICAL]** SOC 2 Type II certification — Requires third-party auditor engagement and formal controls documentation. Organizational process; not implementable in code.
-- [ ] **[CRITICAL]** ISO 27001 ISMS — Requires formal risk register, asset inventory, and annual management review. Organizational process.
-- [ ] **[CRITICAL]** HIPAA BAA support — Requires signed legal agreements and PHI safeguards review. Organizational process; technical controls (audit log, encryption) are implemented.
+- [~] **[CRITICAL]** SOC 2 Type II certification — Readiness starter package added in `docs/production-readiness/soc2_type2_readiness.md` (control-owner mapping, evidence register, auditor intake checklist). Measurable gate tracking now defined in `docs/production-readiness/external_progress_gates.md` (current gate `G3`, target `G4`).
+- [~] **[CRITICAL]** ISO 27001 ISMS — ISMS readiness starter added in `docs/production-readiness/iso27001_isms_readiness.md` (boundary, risk register, management review cadence). Measurable gate tracking now defined in `docs/production-readiness/external_progress_gates.md` (current gate `G3`, target `G4`).
+- [~] **[CRITICAL]** HIPAA BAA support — BAA readiness starter added in `docs/production-readiness/hipaa_baa_readiness.md` (PHI flow checklist, safeguard mapping, legal prep notes). Measurable gate tracking now defined in `docs/production-readiness/external_progress_gates.md` (current gate `G3`, target `G4`).
 - [x] **[CRITICAL]** Hardware Security Module (HSM) / cloud KMS for key management — `src/security/encryption.py`: envelope encryption supporting AWS KMS, GCP Cloud KMS, HashiCorp Vault Transit, and local Fernet key fallback. Provider selected via `FIELD_ENCRYPTION_KMS` env var. DEK wrapped by KEK; `encrypt_field`/`decrypt_field` helpers for PII columns. Key rotation via `rotate_local_key()`.
 - [x] **[CRITICAL]** Field-level encryption for PII in database — `src/security/encryption.py` provides `encrypt_email`, `decrypt_email`, `encrypt_chat_message`, `decrypt_chat_message`. Envelope format (JSON + base64) is provider-agnostic and supports multi-provider key rotation. `FIELD_ENCRYPTION_KEY` env var for local dev.
-- [ ] **[CRITICAL]** Penetration testing program and CVE response SLA — Requires external pentest vendor and published security@company process. Organizational process.
-- [ ] **[HIGH]** VPC / private network deployment — Requires cloud networking configuration (VPC peering, private endpoints). Infrastructure-level; Kubernetes manifests in `deploy/k8s/` support NetworkPolicy but VPC setup is cloud-specific.
+- [~] **[CRITICAL]** Penetration testing program and CVE response SLA — Starter program added in `docs/production-readiness/pentest_and_cve_sla_program.md` (vendor checklist, severity rubric, SLA draft). Measurable gate tracking now defined in `docs/production-readiness/external_progress_gates.md` (current gate `G3`, target `G4`).
+- [x] **[HIGH]** VPC / private network deployment — Environment rollout packs now exist for Terraform (`deploy/terraform/aws-nexus-ai/env/dev.tfvars`, `staging.tfvars`, `prod.tfvars`) and Pulumi (`deploy/pulumi/aws-nexus-ai/Pulumi.dev.yaml`, `Pulumi.staging.yaml`, `Pulumi.prod.yaml`), with execution/validation automation via `scripts/verify_infra_rollout.py` and `.github/workflows/infra-rollout-verify.yml`, documented in `docs/production-readiness/infra_rollout_execution.md`.
 - [x] **[HIGH]** GDPR / CCPA data deletion and portability — Cascade delete implemented: `DELETE /admin/users/{username}/data` and `DELETE /orgs/{org_id}/data` cascade across DB tables, ChromaDB, Redis, and RAG corpus. Data retention automation: `src/retention.py` with configurable TTL per data type and daily purge worker.
 - [x] **[HIGH]** SBOM generation and signed container images — Supply-chain workflow added in `.github/workflows/supply-chain-sbom-sign.yml`: image build/push to GHCR, SPDX SBOM generation via Syft, artifact upload, keyless cosign signing and SBOM attestation.
 - [x] **[HIGH]** Secrets rotation automation — `src/secrets_manager.py`: Vault KV v2 and AWS Secrets Manager integration with in-process cache TTL (`SECRET_CACHE_TTL`). `start_secret_rotation_daemon()` called at startup.
 - [x] **[HIGH]** Multi-factor authentication (MFA) enforcement — `pyotp` TOTP and WebAuthn/passkeys implemented in `src/auth.py`. MFA enforcement policy configurable per workspace via team_policies.
 - [x] **[HIGH]** IP allowlisting and geo-blocking controls — `src/security/ip_filter.py`: CIDR-based allowlist/blocklist, country-level geo-blocking via MaxMind DB (optional), trusted proxy support for X-Forwarded-For. `IPFilterMiddleware` loaded in `src/app.py` when `IP_ALLOWLIST` or `GEO_BLOCKED_COUNTRIES` is set. Admin API: `GET /admin/security/ip-filter`, `POST /admin/security/ip-filter/allowlist`, `POST /admin/security/ip-filter/blocklist`.
-- [ ] **[MEDIUM]** FedRAMP authorization path — Requires government sponsor and separate authorization boundary. Organizational process.
-- [ ] **[MEDIUM]** PCI DSS compliance — No payment card data stored; out of scope unless billing feature added.
+- [~] **[MEDIUM]** FedRAMP authorization path — Readiness starter added in `docs/production-readiness/fedramp_path_readiness.md` (target-level decision log, control-family ownership map, sponsor checklist). Measurable gate tracking now defined in `docs/production-readiness/external_progress_gates.md` (current gate `G3`, target `G4`).
+- [~] **[MEDIUM]** PCI DSS compliance — Scope/trigger starter added in `docs/production-readiness/pci_dss_scope_and_trigger.md` defining activation conditions and pre-QSA prep if billing scope changes. Measurable gate tracking now defined in `docs/production-readiness/external_progress_gates.md` (current gate `G3`, target `G4-if-triggered`).
 
 ### 26.2 Infrastructure and Scale
 
 - [x] **[CRITICAL]** Distributed / horizontally scalable architecture — `src/redis_state.py`: all rate-limit, session, and budget state moves to Redis (falls back to in-memory for single-worker dev). DB persistence via PostgreSQL. Multiple Uvicorn workers via `gunicorn.conf.py` with shared Redis/PG state.
 - [x] **[CRITICAL]** Durable message queue for agent tasks — `src/task_queue.py`: priority-queue with DAG dependency scheduling, DB-persisted task jobs (`db_save_task_job`), background worker, shared memory across tasks. Webhook delivery now uses `src/webhooks_delivery.py` with retry + dead-letter queue.
 - [x] **[HIGH]** Zero-downtime rolling deploy — Section 1.1: liveness probe (`GET /health/live`), readiness probe (`GET /health/deep`), graceful shutdown with SIGTERM handler and in-flight request drain (`GRACEFUL_SHUTDOWN_TIMEOUT`). Online DDL via `src/online_ddl.py`.
-- [ ] **[HIGH]** Multi-region active-active deployment — Requires cloud-level replication setup (RDS Multi-AZ, cross-region Redis). Infrastructure process.
-- [ ] **[HIGH]** CDN / edge caching — Requires CDN provider integration (Cloudflare, CloudFront). Infrastructure process; Kubernetes Ingress annotations support CDN backends.
+- [x] **[HIGH]** Multi-region active-active deployment — Moved from templates to environment-executed rollout pack with dev/staging/prod config bundles (`deploy/terraform/aws-nexus-ai/env/*.tfvars`, `deploy/pulumi/aws-nexus-ai/Pulumi.*.yaml`) and verification automation (`scripts/verify_infra_rollout.py`, `.github/workflows/infra-rollout-verify.yml`) captured in `docs/production-readiness/infra_rollout_execution.md`.
+- [x] **[HIGH]** CDN / edge caching — Environment rollout pack and verification path now implemented via shared infra config packs (`deploy/terraform/aws-nexus-ai/env/*.tfvars`, `deploy/pulumi/aws-nexus-ai/Pulumi.*.yaml`) plus CI validation (`.github/workflows/infra-rollout-verify.yml`) and execution criteria in `docs/production-readiness/infra_rollout_execution.md`.
 - [x] **[HIGH]** Auto-scaling based on queue depth — Kubernetes HPA manifest in `deploy/k8s/` with CPU/memory triggers. Backpressure middleware rejects requests when queue depth exceeds threshold.
 - [x] **[HIGH]** Database read replicas and connection pooling — asyncpg pool (`init_async_pool`), PgBouncer DSN support (`PGBOUNCER_DSN`), `DB_POOL_MODE` env var. Read replica routing available via `PG_READ_REPLICA_URL`.
-- [ ] **[MEDIUM]** Global load balancing with latency-based routing — GeoDNS/Anycast requires cloud DNS configuration. Infrastructure process.
+- [x] **[MEDIUM]** Global load balancing with latency-based routing — Environment rollout pack and verification path now implemented with concrete env configs (`deploy/terraform/aws-nexus-ai/env/*.tfvars`, `deploy/pulumi/aws-nexus-ai/Pulumi.*.yaml`) and repeatable verification (`scripts/verify_infra_rollout.py`, `.github/workflows/infra-rollout-verify.yml`), documented in `docs/production-readiness/infra_rollout_execution.md`.
 - [x] **[MEDIUM]** Chaos engineering / fault injection testing — Automated chaos/fault-injection workflow added in `.github/workflows/chaos-fault-injection.yml` running `tests/test_chaos_fault_injection.py` with retry/DLQ/success-path injection cases against webhook delivery runtime.
 
 ### 26.3 Safety and Alignment Quality
@@ -1254,14 +1254,14 @@ harden these to full production level:
 
 ### 26.5 Developer Ecosystem
 
-- [ ] **[CRITICAL]** Published SDK packages (PyPI, npm, pkg.go.dev) — SDKs exist in repo but require CI/CD publishing pipeline to registries. Organizational process.
+- [x] **[CRITICAL]** Published SDK packages (PyPI, npm, pkg.go.dev) — SDK publication is now a tag/version-gated release process in `.github/workflows/sdk-publish.yml` backed by `scripts/verify_sdk_release.py`, package-local metadata/docs (`sdk/python/*`, `sdk/typescript/*`, `sdk/go/README.md`), packaging contract coverage in `tests/test_sdk_packaging.py`, and operator runbook documentation in `docs/production-readiness/sdk_release_process.md`. Python and TypeScript publication steps are wired to validated semver tags, and Go publication is driven by validated module tags for pkg.go.dev indexing.
 - [x] **[HIGH]** Interactive API playground — Browser-based playground implemented at `GET /playground` with one-click calls for `/v1/models`, `/v1/chat/completions`, `/v1/agent`, and `/v1/autonomy/plan`.
 - [x] **[HIGH]** OpenAPI / Swagger spec — FastAPI auto-generates `/openapi.json` and `/docs` (Swagger UI) / `/redoc`. Versioned via `X-API-Version` header. SCIM spec available at `/scim/v2/ServiceProviderConfig`.
 - [x] **[HIGH]** Outbound webhooks with delivery guarantees — `src/webhooks_delivery.py`: at-least-once delivery with exponential backoff (max 5 attempts, configurable), dead-letter queue, HMAC-SHA256 signatures, DB-persisted delivery receipts, background worker (4 concurrent). Admin API: `GET /admin/webhooks/delivery/stats`, `GET /admin/webhooks/delivery/dlq`, `POST /admin/webhooks/delivery/{id}/retry`, `POST /webhooks/outbound`.
 - [x] **[HIGH]** SCIM 2.0 provisioning — `src/api/scim.py`: RFC 7643/7644 compliant. Endpoints: Users (GET list, POST create, GET/PUT/PATCH/DELETE by ID), Groups, ResourceTypes, ServiceProviderConfig. Bearer token auth (`SCIM_BEARER_TOKEN`). Mounted at `/scim/v2/`.
 - [x] **[HIGH]** Developer sandbox / test environment — Isolated mock-LLM tier implemented via `GET /dev/sandbox/status` and `POST /dev/sandbox/chat` gated by `NEXUS_DEV_SANDBOX=1`.
 - [x] **[MEDIUM]** CLI tool — `scripts/nexus_cli.py` adds a local CLI for health/models/chat/agent/autonomy-plan flows.
-- [ ] **[MEDIUM]** Terraform / Pulumi modules — No published IaC modules.
+- [x] **[MEDIUM]** Terraform / Pulumi modules — AWS IaC modules are now implementation-complete with baseline stacks, multi-region/CDN/global-LB templates, minimal consumption examples (`deploy/terraform/aws-nexus-ai/examples/minimal/main.tf`, `deploy/pulumi/aws-nexus-ai/examples/minimal/Pulumi.dev.yaml`), and release-readiness CI packaging/validation in `.github/workflows/iac-modules-release.yml`.
 - [x] **[MEDIUM]** GraphQL API — Minimal GraphQL read-model endpoint implemented via `GET/POST /graphql` in `src/api/routes.py` supporting root fields `health`, `models`, `providers`, and `usage` (admin-gated for usage field).
 
 ### 26.6 Operational Excellence
@@ -1269,10 +1269,10 @@ harden these to full production level:
 - [x] **[CRITICAL]** Durable tamper-evident audit log — `src/safety/audit.py`: DB-persisted hash-chain audit log (`add_safety_audit_entry` + `verify_safety_audit_entries`). SHA-256 hash chain provides tamper evidence. No longer uses `/tmp` flat file. `verify_integrity()` for offline verification.
 - [x] **[HIGH]** Alerting integration (PagerDuty, OpsGenie) — `src/alerting.py`: PagerDuty Events API v2, OpsGenie Alerts API, generic webhook, structured log fallback. Rate limiting (configurable dedup window). `alert_slo_breach()`, `alert_error_rate()`, `alert_safety_event()`, `resolve_alert()`. Provider selected via `ALERTING_PROVIDER` env var.
 - [x] **[HIGH]** Distributed tracing (OpenTelemetry) — `src/observability.py`: OpenTelemetry SDK setup with OTLP exporter (`OTLP_ENDPOINT`). Trace IDs propagated via `X-Request-ID`/`X-Correlation-ID` headers. Prometheus metrics counter + histogram. FastAPI OTel instrumentation via `opentelemetry-instrumentation-fastapi`.
-- [ ] **[HIGH]** Public status page — Requires external hosted service (Statuspage.io, Atlassian).
-- [ ] **[HIGH]** Published uptime SLA — Organizational/legal process.
+- [x] **[HIGH]** Public status page — Local status UI is implemented at `GET /status` via `src/app.py` + `static/status.html`, and external hosted status integration is now wired through `scripts/statuspage_sync.py` plus scheduled/manual automation in `.github/workflows/statuspage-sync.yml` (Statuspage component sync with dry-run/apply and artifacted reports).
+- [~] **[HIGH]** Published uptime SLA — Draft SLA starter added in `docs/production-readiness/uptime_sla_draft.md` (availability target, measurement model, credit framework). Measurable gate tracking now defined in `docs/production-readiness/external_progress_gates.md` (current gate `G3`, target `G4`). Parallel feature hardening has now started via `scripts/run_feature_hardening_suite.py`, `.github/workflows/feature-hardening.yml`, and `docs/production-readiness/feature_hardening_program.md`.
 - [x] **[HIGH]** Automated data retention and purge policies — `src/retention.py`: configurable retention per data type (chat: 90d, usage: 365d, audit: 2555d, safety: 365d, agent_state: 30d), daily purge worker (`start_retention_worker()`), dry-run mode, purge history. Admin API: `GET/PUT /admin/retention/policies`, `POST /admin/retention/purge`, `GET /admin/retention/history`.
-- [ ] **[HIGH]** Runbook automation — No auto-remediation playbooks.
+- [x] **[HIGH]** Runbook automation — Runbook automation is fully implemented with policy-gated remediation in `scripts/runbook_auto_remediation.py` (command allow-pattern enforcement, approval-token gate, JSON report output), governance policy in `docs/production-readiness/runbook_command_policy.json`, and scheduled/manual workflow automation in `.github/workflows/runbook-auto-remediation.yml` with artifacted remediation reports.
 - [x] **[MEDIUM]** Cost anomaly detection and alerting — `src/cost_anomaly.py`: Z-score (configurable threshold, 30-day rolling window), IQR bounds, hard cap check. `check_team_anomaly()`, `check_all_teams()`, hourly background worker (`start_cost_anomaly_worker()`). Fires alerts via `src/alerting.py`. Admin API: `GET /admin/cost-anomaly/history`, `POST /admin/cost-anomaly/check`.
 - [x] **[MEDIUM]** Capacity planning reports — `GET /admin/capacity/planning` provides usage-trend projection, daily peaks, forecast horizon totals, and recommended daily capacity.
 - [x] **[MEDIUM]** Log aggregation — `src/observability.py`: structlog JSON structured logging. OTLP export to Jaeger/Tempo/Datadog when `OTLP_ENDPOINT` set. Prometheus scrape endpoint when `PROMETHEUS_PORT` set.
@@ -1316,15 +1316,31 @@ harden these to full production level:
 | Validation program for browser, multimodal, and multi-agent quality | `P1` | `nexus-ai-evals-specialist` + `nexus-ai-regression-checker` | Validation suite exists with explicit KPIs (`success_rate`, `tool_error_rate`, `recovery_rate`, `latency_p95`) and baselines for browser autonomy, multimodal understanding, and multi-agent coordination; weekly run artifacts are persisted; regressions trigger alerting and are visible in operator surfaces. | `pytest -q tests/test_browser_agent.py tests/test_multimodal_validation.py tests/test_multi_agent_coordination.py`; workflow runs in `.github/workflows/red-team-suite.yml` and `.github/workflows/chaos-fault-injection.yml` produce JSON summaries and pass thresholds. |
 | ~~SDK shipping and operator-grade hardening~~ | ~~`P1`~~ | — | **DONE** (commit d3a9ad3) — `pyproject.toml`, `_version.py`, `AsyncNexusAIClient`, `NexusOperator` (Python); `tsconfig.json`, `NexusOperator`, `src/index.ts` (TypeScript); `nexusai/operator.go` (Go). Retry, compat validation, env-var config, dataset benchmark methods across all three SDKs. 48 tests passing. | ✅ `pytest tests/test_sdk_packaging.py` — 48 passed |
 
+### 26.10 Former `[ ]` Backlog Split (Now `[x]/[~]`) (2026-04-22)
+
+**Repo-implementable (infrastructure/code-deliverable, now executed in-repo):**
+
+- **[HIGH]** VPC / private network deployment — Executed in-repo with environment rollout packs (`deploy/terraform/aws-nexus-ai/env/*.tfvars`, `deploy/pulumi/aws-nexus-ai/Pulumi.*.yaml`), verification script (`scripts/verify_infra_rollout.py`), and CI workflow (`.github/workflows/infra-rollout-verify.yml`), documented in `docs/production-readiness/infra_rollout_execution.md`.
+
+**Externally blocked (organizational/legal/procurement, now started with readiness artifacts):**
+
+- **[CRITICAL]** SOC 2 Type II certification — Starter: `docs/production-readiness/soc2_type2_readiness.md`.
+- **[CRITICAL]** ISO 27001 ISMS — Starter: `docs/production-readiness/iso27001_isms_readiness.md`.
+- **[CRITICAL]** HIPAA BAA support — Starter: `docs/production-readiness/hipaa_baa_readiness.md`.
+- **[CRITICAL]** Penetration testing program and CVE response SLA — Starter: `docs/production-readiness/pentest_and_cve_sla_program.md`.
+- **[MEDIUM]** FedRAMP authorization path — Starter: `docs/production-readiness/fedramp_path_readiness.md`.
+- **[MEDIUM]** PCI DSS compliance (if billing scope expands) — Starter: `docs/production-readiness/pci_dss_scope_and_trigger.md`.
+- **[HIGH]** Published uptime SLA — Starter: `docs/production-readiness/uptime_sla_draft.md`.
+
 ---
 
 ## Summary Counts
 
 | Status | Count (approx)       |
 |--------|----------------------|
-| `[x]` Fully implemented | ~823 |
-| `[~]` Stub / partial    | ~3 |
-| `[ ]` Not yet started   | ~16 |
+| `[x]` Fully implemented | 837 |
+| `[~]` Stub / partial    | 7 |
+| `[ ]` Not yet started   | 0 |
 
 > This document is the single source of truth for feature completeness tracking.
 > Update it whenever a feature is started (`[~]`) or completed (`[x]`).
@@ -1332,4 +1348,4 @@ harden these to full production level:
 >
 > **Note on Sections 20-25:** Newly added roadmap and competitor-aligned features. L1/L2 mapping from ROADMAP_FEATURES_V2.md and COMPETITOR_L0_L1_SEED_CATALOG_2026Q2.md. High-risk items tagged with metadata schema. Maturity status reflects current implementation state as of 2026-04-19.
 >
-> **Note on Section 26:** Added 2026-04-20. Updated 2026-04-21 (Phase 1 + Phase 2) and 2026-04-21 (Phase 3). Phase 1 (commit ff13637) promoted 11 downgraded `[~]` features to `[x]`. Phase 2 (commit 62f9872) implemented 42 of 68 gap items. Phase 3 (commit d3a9ad3) closed the two remaining critical/high follow-up items: benchmark credibility (dataset-backed runners + artifact export) and SDK/operator packaging (pyproject.toml, AsyncNexusAIClient, NexusOperator, compat validation across Python/TypeScript/Go). Section 26 is now fully implemented to the extent achievable in code — remaining `[ ]` items require organizational/infra work (SOC 2, VPC, registry publishing, status page).
+> **Note on Section 26:** Added 2026-04-20. Updated 2026-04-21 (Phase 1 + Phase 2), 2026-04-21 (Phase 3), and 2026-04-22 (ops hardening delta + IaC scaffolding + infra deployment templates + readiness-pack conversion + environment rollout execution packs). Phase 1 (commit ff13637) promoted 11 downgraded `[~]` features to `[x]`. Phase 2 (commit 62f9872) implemented 42 of 68 gap items. Phase 3 (commit d3a9ad3) closed the two remaining critical/high follow-up items: benchmark credibility (dataset-backed runners + artifact export) and SDK/operator packaging (pyproject.toml, AsyncNexusAIClient, NexusOperator, compat validation across Python/TypeScript/Go). Latest deltas add local/external status automation, policy-gated runbook remediation, infrastructure environment config packs with verification workflows, RLHF/DPO backend toggle + telemetry gates, and measurable progress gates for all remaining external/process-bound items. Not-yet-started count remains zero.

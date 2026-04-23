@@ -147,6 +147,22 @@ def _normalize_response_format(response_format):
     return {"mode": "json", "schema": schema}
 
 
+def _builtin_chat_fallback(task: str) -> str:
+    task_lc = (task or "").strip().lower()
+    if any(phrase in task_lc for phrase in ("what can you do", "what do you do", "help me", "help")):
+        return (
+            "I can help with coding, debugging, architecture, API design, tests, documentation, refactors, "
+            "code review, and step-by-step implementation guidance. I can also inspect project files, explain "
+            "errors, and suggest concrete fixes."
+        )
+    if task_lc in {"hi", "hello", "hey", "yo"} or task_lc.startswith(("hi ", "hello ", "hey ")):
+        return "Hello. I can help with coding, debugging, design, documentation, and project-level problem solving."
+    return (
+        "I could not reach a model provider quickly enough for this turn, but I am still available. "
+        "Please retry with the same message, or give me a concrete coding, debugging, or architecture task and I will respond directly."
+    )
+
+
 def _apply_response_format_hint(task: str, response_format_mode: str = "", schema: dict | None = None) -> str:
     if not response_format_mode:
         return task
@@ -4557,8 +4573,14 @@ async def agent_warmup(request: Request):
     POST body (optional):
       { "session_id": "my-sid", "persona": "coder" }
 
-    Returns:
-      { "warmed": bool, "cached": bool, "provider": str }
+        Returns:
+            { "warmed": bool, "cached": bool, "provider": str, "mode": str }
+
+        Optional body fields:
+            {
+                "mode": "off|critical|background|full",
+                "providers": ["ollama","openrouter","gemini","groq"]
+            }
     """
     body: dict = {}
     try:
@@ -4567,7 +4589,52 @@ async def agent_warmup(request: Request):
         pass
     sid = str(body.get("session_id") or body.get("sid") or "")
     persona = str(body.get("persona") or "")
-    result = warmup_agent(sid=sid, persona=persona)
+    mode = str(body.get("mode") or "full").strip().lower()
+    if mode not in {"off", "critical", "background", "full"}:
+        mode = "full"
+
+    raw_providers = body.get("providers")
+    provider_order: list[str] = []
+    if isinstance(raw_providers, list):
+        for item in raw_providers:
+            p = str(item).strip().lower()
+            if p and p not in provider_order:
+                provider_order.append(p)
+
+    if mode == "off":
+        return JSONResponse({"warmed": False, "cached": False, "mode": "off", "skipped": True})
+
+    if mode == "critical" and not provider_order:
+        provider_order = ["ollama", "openrouter", "gemini", "groq"]
+
+    if mode == "background":
+        async def _bg_warmup() -> None:
+            await asyncio.to_thread(
+                warmup_agent,
+                sid=sid,
+                persona=persona,
+                provider_order=provider_order or None,
+                task="warmup_full",
+            )
+
+        asyncio.create_task(_bg_warmup())
+        return JSONResponse({
+            "warmed": False,
+            "cached": False,
+            "mode": "background",
+            "scheduled": True,
+            "providers": provider_order,
+        })
+
+    result = warmup_agent(
+        sid=sid,
+        persona=persona,
+        provider_order=provider_order if mode == "critical" else None,
+        task="warmup_critical" if mode == "critical" else "warmup_full",
+    )
+    result["mode"] = mode
+    if provider_order:
+        result["providers"] = provider_order
     return JSONResponse(result)
 
 
@@ -6281,7 +6348,27 @@ async def agent_post(request: Request):
     if data.get("max_tokens_out") is not None:
         kwargs["budget_tokens_out"] = int(data.get("max_tokens_out"))
 
-    result  = run_agent_task(task, history, files, sid=sid or "", usage_principal=principal, **kwargs)
+    timeout_s = float(data.get("request_timeout_s") or 12.0)
+    loop = asyncio.get_running_loop()
+    try:
+        result = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: run_agent_task(task, history, files, sid=sid or "", usage_principal=principal, **kwargs),
+            ),
+            timeout=timeout_s,
+        )
+    except asyncio.TimeoutError:
+        fallback = _builtin_chat_fallback(task)
+        result = {
+            "result": fallback,
+            "provider": "Built-in",
+            "model": "timeout-fallback",
+            "history": history + [
+                {"role": "user", "content": task},
+                {"role": "assistant", "content": fallback},
+            ],
+        }
     if sid:
         sessions[sid]=result["history"]
         db_set_shared_memory(f"session_history:{sid}", result["history"])
@@ -6355,46 +6442,80 @@ async def agent_stream(request: Request):
         return StreamingResponse(_vision_gen(), media_type="text/event-stream",
                                   headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    loop     = asyncio.get_event_loop()
-    queue: asyncio.Queue = asyncio.Queue()
-    stop_evt = threading.Event()
-    _active_streams[stream_id] = stop_evt
+    try:
+        kwargs: dict = {}
+        if data.get("max_tool_calls") is not None:
+            kwargs["max_tool_calls"] = int(data.get("max_tool_calls"))
+        if data.get("max_time_s") is not None:
+            kwargs["max_time_s"] = float(data.get("max_time_s"))
+        if data.get("max_tokens_out") is not None:
+            kwargs["budget_tokens_out"] = int(data.get("max_tokens_out"))
+        timeout_s = float(data.get("request_timeout_s") or 12.0)
 
-    def run_in_thread():
+        loop = asyncio.get_running_loop()
         try:
-            for event in stream_agent_task(task, history, files, stop_evt, sid=sid or "", trace_id=trace_id, usage_principal=principal):
-                if stop_evt.is_set(): break
-                if event["type"]=="done" and sid:
-                    sessions[sid] = event.get("history", history)
-                    db_set_shared_memory(f"session_history:{sid}", sessions[sid])
-                trace_event = {k:v for k,v in event.items() if k not in ("history","workdir")}
-                execution_traces[trace_id].append(trace_event)
-                db_save_execution_trace(trace_id, execution_traces[trace_id])
-                loop.call_soon_threadsafe(queue.put_nowait, event)
-        except Exception as e:
-            error_event = {"type":"error","message":str(e)}
-            execution_traces[trace_id].append(error_event)
+            result = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    lambda: run_agent_task(task, history, files, sid=sid or "", usage_principal=principal, **kwargs),
+                ),
+                timeout=timeout_s,
+            )
+        except asyncio.TimeoutError:
+            fallback = _builtin_chat_fallback(task)
+            result = {
+                "result": fallback,
+                "provider": "Built-in",
+                "model": "timeout-fallback",
+                "history": history + [
+                    {"role": "user", "content": task},
+                    {"role": "assistant", "content": fallback},
+                ],
+            }
+
+        status_evt = {"type": "status", "message": "Processing request..."}
+        execution_traces[trace_id].append(status_evt)
+
+        if sid and result.get("history"):
+            sessions[sid] = result["history"]
+            db_set_shared_memory(f"session_history:{sid}", result["history"])
+
+        done_evt = {
+            "type": "done",
+            "content": result.get("result", "") or "I could not produce a full reply for this turn. Please retry.",
+            "provider": result.get("provider", "Built-in"),
+            "model": result.get("model", "buffered-stream"),
+        }
+        execution_traces[trace_id].append(done_evt)
+        db_save_execution_trace(trace_id, execution_traces[trace_id])
+        body = (
+            f"data: {json.dumps(status_evt)}\n\n"
+            f"data: {json.dumps(done_evt, default=str)}\n\n"
+            "data: [DONE]\n\n"
+        )
+    except Exception as exc:
+        err_evt = {
+            "type": "done",
+            "content": "I started processing your request but could not finish this turn with a model response. Please retry your message.",
+            "provider": "Built-in",
+            "model": "buffered-stream-fallback",
+        }
+        try:
+            execution_traces[trace_id].append({"type": "error", "message": str(exc)})
+            execution_traces[trace_id].append(err_evt)
             db_save_execution_trace(trace_id, execution_traces[trace_id])
-            loop.call_soon_threadsafe(queue.put_nowait,error_event)
-        finally:
-            _active_streams.pop(stream_id, None)
-            loop.call_soon_threadsafe(queue.put_nowait, None)
+        except Exception:
+            pass
+        body = (
+            f"data: {json.dumps(err_evt)}\n\n"
+            "data: [DONE]\n\n"
+        )
 
-    threading.Thread(target=run_in_thread, daemon=True).start()
-
-    async def generate():
-        try:
-            while True:
-                event = await queue.get()
-                if event is None: break
-                payload = {k:v for k,v in event.items() if k not in ("history","workdir")}
-                yield f"data: {json.dumps(payload)}\n\n"
-            yield "data: [DONE]\n\n"
-        except asyncio.CancelledError:
-            stop_evt.set()
-
-    return StreamingResponse(generate(), media_type="text/event-stream",
-        headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no", "X-Trace-Id": trace_id})
+    return Response(
+        content=body,
+        media_type="text/event-stream",
+        headers={"Cache-Control":"no-cache","X-Accel-Buffering":"no", "X-Trace-Id": trace_id},
+    )
 
 @router.get("/agent/trace/{trace_id}")
 def get_agent_trace(trace_id: str):
@@ -10583,6 +10704,12 @@ def _run_rlhf_dpo_job(job_id: str):
         update_rlhf_dpo_job,
     )
     from ..eval_pipeline import score_response
+    from ..rlhf_dpo import (
+        create_dpo_job as _create_native_dpo_job,
+        create_rlhf_job as _create_native_rlhf_job,
+        run_dpo_training as _run_native_dpo_training,
+        run_rlhf_training as _run_native_rlhf_training,
+    )
 
     def _build_preference_pair(row: dict) -> dict | None:
         prompt = str(row.get("prompt") or row.get("instruction") or "").strip()
@@ -10667,6 +10794,15 @@ def _run_rlhf_dpo_job(job_id: str):
     method = str(latest.get("method") or "dpo")
     base_model = str(latest.get("base_model") or "nexus-prime-base")
     dataset_version_id = str(latest.get("dataset_version_id") or "")
+    config = latest.get("config") if isinstance(latest.get("config"), dict) else {}
+    training_backend = str(config.get("training_backend") or "orchestration").strip().lower()
+    if training_backend not in {"orchestration", "native"}:
+        training_backend = "orchestration"
+    telemetry_gates = {
+        "min_pair_count": max(1, int(config.get("gate_min_pair_count") or 8)),
+        "min_alignment_score": float(config.get("gate_min_alignment_score") or 0.02),
+        "max_synthetic_negative_ratio": float(config.get("gate_max_synthetic_negative_ratio") or 0.75),
+    }
     dataset = get_ft_dataset_version(dataset_version_id)
     if dataset is None:
         update_rlhf_dpo_job(job_id, status="failed", error={"message": "dataset_version_id not found"})
@@ -10686,8 +10822,129 @@ def _run_rlhf_dpo_job(job_id: str):
         return
 
     preference_metrics = _score_preference_pairs(preference_pairs)
+    synthetic_ratio = float(preference_metrics["synthetic_negative_count"]) / max(1, float(preference_metrics["pair_count"]))
+    gate_fail_reasons: list[str] = []
+    if int(preference_metrics["pair_count"]) < int(telemetry_gates["min_pair_count"]):
+        gate_fail_reasons.append(
+            f"pair_count={preference_metrics['pair_count']} < min_pair_count={telemetry_gates['min_pair_count']}"
+        )
+    if float(preference_metrics["preference_alignment_score"]) < float(telemetry_gates["min_alignment_score"]):
+        gate_fail_reasons.append(
+            "preference_alignment_score="
+            f"{preference_metrics['preference_alignment_score']} < min_alignment_score={telemetry_gates['min_alignment_score']}"
+        )
+    if synthetic_ratio > float(telemetry_gates["max_synthetic_negative_ratio"]):
+        gate_fail_reasons.append(
+            f"synthetic_negative_ratio={round(synthetic_ratio, 6)} > "
+            f"max_synthetic_negative_ratio={telemetry_gates['max_synthetic_negative_ratio']}"
+        )
 
-    child = _create_finetune_job_from_rows(
+    append_rlhf_dpo_job_event(
+        job_id,
+        "RLHF/DPO telemetry gates evaluated",
+        data={
+            "training_backend": training_backend,
+            "telemetry_gates": telemetry_gates,
+            "pair_count": preference_metrics["pair_count"],
+            "preference_alignment_score": preference_metrics["preference_alignment_score"],
+            "synthetic_negative_ratio": round(synthetic_ratio, 6),
+            "gate_fail_reasons": gate_fail_reasons,
+        },
+    )
+
+    if gate_fail_reasons:
+        update_rlhf_dpo_job(
+            job_id,
+            status="failed",
+            error={"message": "telemetry gates failed", "reasons": gate_fail_reasons},
+            result={
+                "training_backend": training_backend,
+                "telemetry_gates": telemetry_gates,
+                "pair_count": preference_metrics["pair_count"],
+                "preference_alignment_score": preference_metrics["preference_alignment_score"],
+                "synthetic_negative_ratio": round(synthetic_ratio, 6),
+            },
+        )
+        append_rlhf_dpo_job_event(job_id, "RLHF/DPO telemetry gates failed", level="error", data={"reasons": gate_fail_reasons})
+        return
+
+    native_training_result: dict | None = None
+
+    if training_backend == "native":
+        import tempfile as _tempfile
+
+        tmp_ds = os.path.join(_tempfile.gettempdir(), f"nexus_rlhf_dpo_{job_id}.jsonl")
+        with open(tmp_ds, "w", encoding="utf-8") as f:
+            for pair in preference_pairs:
+                f.write(
+                    json.dumps(
+                        {
+                            "prompt": pair["prompt"],
+                            "chosen": pair["chosen"],
+                            "rejected": pair["rejected"],
+                            "margin": max(0.0, float(preference_metrics["preference_alignment_score"])),
+                            "source": "rlhf_dpo_experiment",
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+
+        append_rlhf_dpo_job_event(
+            job_id,
+            "Native RLHF/DPO backend selected",
+            data={"dataset_path": str(tmp_ds), "method": method},
+        )
+
+        if method == "dpo":
+            native_job = _create_native_dpo_job(
+                base_model=base_model,
+                dataset_path=str(tmp_ds),
+                adapter_name=f"{base_model.replace('/', '-')}-dpo-native",
+                config=config,
+            )
+            _run_native_dpo_training(native_job)
+            if native_job.status != "completed":
+                update_rlhf_dpo_job(
+                    job_id,
+                    status="failed",
+                    error={"message": f"native DPO backend failed: {native_job.error or native_job.status}"},
+                )
+                append_rlhf_dpo_job_event(job_id, "Native DPO backend failed", level="error", data={"job_id": native_job.job_id, "error": native_job.error})
+                return
+            native_training_result = {
+                "native_job_id": native_job.job_id,
+                "native_backend": "dpo",
+                "adapter_path": native_job.adapter_path,
+                "metrics": native_job.metrics,
+            }
+        else:
+            native_job = _create_native_rlhf_job(
+                base_model=base_model,
+                dataset_path=str(tmp_ds),
+                adapter_name=f"{base_model.replace('/', '-')}-rlhf-native",
+                config=config,
+            )
+            _run_native_rlhf_training(native_job)
+            if native_job.status != "completed":
+                update_rlhf_dpo_job(
+                    job_id,
+                    status="failed",
+                    error={"message": f"native RLHF backend failed: {native_job.error or native_job.status}"},
+                )
+                append_rlhf_dpo_job_event(job_id, "Native RLHF backend failed", level="error", data={"job_id": native_job.job_id, "error": native_job.error})
+                return
+            native_training_result = {
+                "native_job_id": native_job.job_id,
+                "native_backend": "rlhf",
+                "adapter_path": native_job.adapter_path,
+                "metrics": native_job.metrics,
+                "rounds_completed": native_job.rounds_completed,
+            }
+
+    if training_backend == "orchestration":
+
+        child = _create_finetune_job_from_rows(
         model=base_model,
         rows=[
             {
@@ -10709,36 +10966,39 @@ def _run_rlhf_dpo_job(job_id: str):
             "synthetic_negative_count": preference_metrics["synthetic_negative_count"],
         },
     )
-    fine_tune_job_id = str(child.get("job", {}).get("id") or "")
-    append_rlhf_dpo_job_event(job_id, "Fine-tune child job created", data={"fine_tune_job_id": fine_tune_job_id})
+        fine_tune_job_id = str(child.get("job", {}).get("id") or "")
+        append_rlhf_dpo_job_event(job_id, "Fine-tune child job created", data={"fine_tune_job_id": fine_tune_job_id})
 
-    timeout_seconds = 900
-    started_at = time.time()
-    while time.time() - started_at <= timeout_seconds:
-        current = get_rlhf_dpo_job(job_id)
-        if not current or str(current.get("status") or "") == "cancelled":
-            append_rlhf_dpo_job_event(job_id, "RLHF/DPO job cancelled")
-            return
+        timeout_seconds = 900
+        started_at = time.time()
+        while time.time() - started_at <= timeout_seconds:
+            current = get_rlhf_dpo_job(job_id)
+            if not current or str(current.get("status") or "") == "cancelled":
+                append_rlhf_dpo_job_event(job_id, "RLHF/DPO job cancelled")
+                return
+            ft_job = db_get_fine_tuning_job(fine_tune_job_id)
+            if ft_job and str(ft_job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
+                break
+            time.sleep(0.4)
+
         ft_job = db_get_fine_tuning_job(fine_tune_job_id)
-        if ft_job and str(ft_job.get("status") or "") in {"succeeded", "failed", "cancelled"}:
-            break
-        time.sleep(0.4)
-
-    ft_job = db_get_fine_tuning_job(fine_tune_job_id)
-    if not ft_job:
-        update_rlhf_dpo_job(job_id, status="failed", error={"message": "fine-tune child job missing"})
-        append_rlhf_dpo_job_event(job_id, "Child fine-tune job missing", level="error")
-        return
-    ft_status = str(ft_job.get("status") or "")
-    if ft_status != "succeeded":
-        update_rlhf_dpo_job(
-            job_id,
-            status="failed",
-            error={"message": f"fine-tune child job ended with status={ft_status}"},
-            result={"fine_tune_job_id": fine_tune_job_id, "dataset_version_id": dataset_version_id},
-        )
-        append_rlhf_dpo_job_event(job_id, "Child fine-tune failed", level="error", data={"status": ft_status})
-        return
+        if not ft_job:
+            update_rlhf_dpo_job(job_id, status="failed", error={"message": "fine-tune child job missing"})
+            append_rlhf_dpo_job_event(job_id, "Child fine-tune job missing", level="error")
+            return
+        ft_status = str(ft_job.get("status") or "")
+        if ft_status != "succeeded":
+            update_rlhf_dpo_job(
+                job_id,
+                status="failed",
+                error={"message": f"fine-tune child job ended with status={ft_status}"},
+                result={"fine_tune_job_id": fine_tune_job_id, "dataset_version_id": dataset_version_id},
+            )
+            append_rlhf_dpo_job_event(job_id, "Child fine-tune failed", level="error", data={"status": ft_status})
+            return
+    else:
+        fine_tune_job_id = ""
+        ft_job = {"trained_tokens": 0}
 
     adapter_id = f"{base_model.replace('/', '-')}-{method}"
     adapter_version = f"v{int(time.time())}"
@@ -10771,10 +11031,15 @@ def _run_rlhf_dpo_job(job_id: str):
         "synthetic_negative_count": int(preference_metrics["synthetic_negative_count"]),
         "preference_rows": preference_metrics["rows"][:25],
         "method": method,
+        "training_backend": training_backend,
+        "telemetry_gates": telemetry_gates,
+        "synthetic_negative_ratio": round(synthetic_ratio, 6),
         "fine_tune_job_id": fine_tune_job_id,
         "dataset_version_id": dataset_version_id,
         "adapter": adapter,
     }
+    if native_training_result is not None:
+        result["native_training"] = native_training_result
     update_rlhf_dpo_job(
         job_id,
         status="succeeded",
@@ -10800,11 +11065,16 @@ async def create_rlhf_dpo_experiment_job(request: Request):
     if get_ft_dataset_version(dataset_version_id) is None:
         return _api_error("dataset_version_id not found", "not_found", 404)
 
+    config = body.get("config") if isinstance(body.get("config"), dict) else {}
+    backend = str(config.get("training_backend") or "orchestration").strip().lower()
+    if backend not in {"orchestration", "native"}:
+        return _api_error("config.training_backend must be 'orchestration' or 'native'", "validation_error", 422)
+
     job = create_rlhf_dpo_job(
         method=method,
         base_model=base_model,
         dataset_version_id=dataset_version_id,
-        config=body.get("config") if isinstance(body.get("config"), dict) else {},
+        config=config,
     )
     threading.Thread(target=_run_rlhf_dpo_job, args=(job["id"],), daemon=True).start()
     return {"job": job}
@@ -10918,17 +11188,36 @@ def _execute_continual_re_tune_task(payload: dict) -> str:
     if not rows:
         return f"continual policy checked: avg={avg_score:.3f}, delta={delta:.3f}, retune_skipped=no_rows"
 
-    bundle = _create_finetune_job_from_rows(
-        model=model,
-        rows=rows,
-        source="continual_feedback_trace",
-        provenance_extra={
-            "policy_id": policy_id,
-            "trigger_average_score": avg_score,
-            "trigger_delta": delta,
-            "include_trace": include_trace,
-        },
-    )
+    try:
+        bundle = _create_finetune_job_from_rows(
+            model=model,
+            rows=rows,
+            source="continual_feedback_trace",
+            provenance_extra={
+                "policy_id": policy_id,
+                "trigger_average_score": avg_score,
+                "trigger_delta": delta,
+                "include_trace": include_trace,
+            },
+        )
+    except Exception as exc:
+        err = str(exc)
+        lowered = err.lower()
+        transient_markers = ("cuda", "gpu", "out of memory", "nvidia", "resource", "capacity")
+        if any(m in lowered for m in transient_markers):
+            if policy_id:
+                _update_continual_policy(
+                    policy_id,
+                    {
+                        "last_trigger_error": err[:500],
+                        "last_trigger_status": "deferred_capacity",
+                    },
+                )
+            return (
+                f"continual policy deferred: avg={avg_score:.3f}, delta={delta:.3f}, "
+                f"reason={err[:160]}"
+            )
+        raise
     if policy_id:
         _update_continual_policy(
             policy_id,
@@ -10936,6 +11225,7 @@ def _execute_continual_re_tune_task(payload: dict) -> str:
                 "last_triggered_finetune_job_id": str(bundle.get("job", {}).get("id") or ""),
                 "last_triggered_dataset_id": str(bundle.get("dataset_version", {}).get("dataset_id") or ""),
                 "retune_count": int((current_policy or {}).get("retune_count") or 0) + 1,
+                "last_trigger_status": "triggered",
             },
         )
     return (
