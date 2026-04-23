@@ -987,6 +987,23 @@
       padding:1px 5px;margin-left:3px;vertical-align:middle}
     #approvals-badge.visible{display:inline}
     .pill-safety, .pill-providers { display: none !important; }
+  
+  /* ── Sprint K: Task History & Live Trace panels ── */
+  .lt-feed-wrap { flex:1; overflow-y:auto; padding:8px 10px; display:flex; flex-direction:column; gap:4px; min-height:0; }
+  .th-card { transition: border-color .13s, box-shadow .13s; }
+  .th-card:hover { box-shadow: 0 2px 12px rgba(0,0,0,.18); }
+  #lt-timeline-bar {
+    display:flex; gap:2px; align-items:stretch; height:6px;
+    overflow-x:auto; padding:0 10px 6px; flex-shrink:0;
+    scrollbar-width:none;
+  }
+  #lt-timeline-bar::-webkit-scrollbar { display:none; }
+  .swarm-new-badge {
+    display:none; background:#ef4444; color:#fff; border-radius:99px;
+    font-size:.58rem; font-weight:700; padding:1px 5px;
+    position:absolute; top:-4px; right:-4px; pointer-events:none;
+  }
+
   </style>
 </head>
 <body>
@@ -1079,6 +1096,8 @@
       <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
       <button onclick="openSchedulerPanel();toggleOverflow()">⏱ Scheduler</button>
       <button onclick="openSwarmPanel();toggleOverflow()">🧬 Swarm View</button>
+      <button onclick="openTaskHistoryPanel();toggleOverflow()">🗂 Task History</button>
+      <button onclick="openLiveTracePanel();toggleOverflow()">📡 Live Trace</button>
       <button onclick="openFinetuneDashboardPanel();toggleOverflow()">🧪 Fine-tuning</button>
       <button onclick="openRagCorpusPanel();toggleOverflow()">📚 RAG corpus</button>
       <button onclick="openAdminDashboardPanel();toggleOverflow()">👥 Admin</button>
@@ -1497,7 +1516,7 @@
         <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🧬 Swarm</span>
         <!-- Tab bar -->
         <div style="display:flex;gap:2px;background:var(--surface2);border-radius:7px;padding:2px;">
-          <button id="swarm-tab-activity" onclick="swarmTab('activity')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:var(--accent);color:#fff;font-weight:600;">Activity</button>
+          <button id="swarm-tab-activity" onclick="swarmTab('activity')" style="position:relative;" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:var(--accent);color:#fff;font-weight:600;">Activity<span id="swarm-new-badge" class="swarm-new-badge"></span></button>
           <button id="swarm-tab-graph" onclick="swarmTab('graph')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:transparent;color:var(--muted);">Graph</button>
           <button id="swarm-tab-assign" onclick="swarmTab('assign')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:transparent;color:var(--muted);">Assign</button>
           <button id="swarm-tab-progress" onclick="swarmTab('progress')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:transparent;color:var(--muted);">Progress</button>
@@ -3081,5 +3100,60 @@ async function updateApprovalsBadge(count){
 <script>
 init();
 </script>
+
+<!-- ── Task History Panel (Sprint K) ── -->
+<div id="task-history-panel" style="position:fixed;bottom:80px;left:18px;width:480px;max-height:560px;background:var(--surface);border:1px solid var(--border);border-radius:14px;display:none;flex-direction:column;z-index:42;box-shadow:0 8px 40px rgba(0,0,0,.45);">
+  <!-- Header -->
+  <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <span style="font-size:.85rem;font-weight:700;">🗂 Task History</span>
+    <span id="th-count" style="font-size:.68rem;background:var(--surface2);border-radius:99px;padding:1px 8px;color:var(--muted);">0</span>
+    <div style="flex:1;"></div>
+    <input id="th-search" type="text" placeholder="Search tasks…" oninput="thSetSearch(this.value)"
+      style="width:150px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;padding:4px 9px;color:var(--text);font-size:.75rem;outline:none;" />
+    <button id="th-sort-btn" onclick="thToggleSort()"
+      style="font-size:.7rem;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">↓ Newest</button>
+    <button onclick="closeTaskHistoryPanel()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;line-height:1;">×</button>
+  </div>
+  <!-- Filter bar -->
+  <div style="display:flex;gap:4px;padding:7px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <button class="th-filter-btn" data-filter="all"     onclick="thSetFilter('all')"     style="font-size:.7rem;padding:3px 10px;border:none;border-radius:99px;cursor:pointer;background:var(--accent);color:#fff;">All</button>
+    <button class="th-filter-btn" data-filter="done"    onclick="thSetFilter('done')"    style="font-size:.7rem;padding:3px 10px;border:none;border-radius:99px;cursor:pointer;background:transparent;color:var(--muted);">✓ Done</button>
+    <button class="th-filter-btn" data-filter="running" onclick="thSetFilter('running')" style="font-size:.7rem;padding:3px 10px;border:none;border-radius:99px;cursor:pointer;background:transparent;color:var(--muted);">… Running</button>
+    <button class="th-filter-btn" data-filter="failed"  onclick="thSetFilter('failed')"  style="font-size:.7rem;padding:3px 10px;border:none;border-radius:99px;cursor:pointer;background:transparent;color:var(--muted);">✕ Failed</button>
+    <div style="flex:1;"></div>
+    <button onclick="thRefresh()" style="font-size:.7rem;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">↻</button>
+  </div>
+  <!-- List -->
+  <div id="th-list" style="flex:1;overflow-y:auto;padding:8px 12px;display:flex;flex-direction:column;gap:6px;min-height:0;"></div>
+</div>
+
+<!-- ── Live Trace Panel (Sprint K) ── -->
+<div id="live-trace-panel" style="position:fixed;bottom:80px;right:18px;width:460px;max-height:560px;background:var(--surface);border:1px solid var(--border);border-radius:14px;display:none;flex-direction:column;z-index:43;box-shadow:0 8px 40px rgba(0,0,0,.45);">
+  <!-- Header -->
+  <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <span style="font-size:.85rem;font-weight:700;">📡 Live Trace</span>
+    <span id="lt-status" style="font-size:.68rem;color:var(--muted);">○ Idle</span>
+    <div style="flex:1;"></div>
+    <span id="lt-event-count" style="font-size:.65rem;color:var(--muted);">0 events</span>
+    <button onclick="ltConnectLive()" style="font-size:.7rem;padding:3px 9px;border:none;border-radius:6px;background:var(--accent);color:#fff;cursor:pointer;font-weight:600;">● Live</button>
+    <button onclick="ltStop()" style="font-size:.7rem;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">⏹</button>
+    <button onclick="ltClearFeed()" style="font-size:.7rem;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">🗑</button>
+    <button onclick="closeLiveTracePanel()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;line-height:1;">×</button>
+  </div>
+  <!-- Timeline bar -->
+  <div id="lt-timeline-bar" title="Event timeline — each tick is one event"></div>
+  <!-- Feed -->
+  <div id="lt-feed" class="lt-feed-wrap"></div>
+  <!-- Replay controls -->
+  <div style="display:flex;gap:6px;padding:8px 12px;border-top:1px solid var(--border);flex-shrink:0;align-items:center;">
+    <select id="lt-trace-select" style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.75rem;">
+      <option value="">— Select trace to replay —</option>
+    </select>
+    <button onclick="ltReplaySelected()" style="font-size:.7rem;padding:5px 10px;border:none;border-radius:6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);cursor:pointer;">⏮ Replay</button>
+  </div>
+</div>
+
+  <script src="/static/js/panels/task-history.js"></script>
+  <script src="/static/js/panels/live-trace.js"></script>
 </body>
 </html>
