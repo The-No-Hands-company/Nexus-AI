@@ -1,10 +1,16 @@
 // ── PERSONAS ──────────────────────────────────────────────────────────────────
 let activePersona = {id:'assistant',icon:'🤖',label:'Assistant',color:'#7c6af7'};
+let personaCache = [];
+const PERSONA_PREF_KEY = 'nexus.persona.active';
 
 async function loadPersonas(){
-  const d=await fetch('/personas').then(r=>r.json()).catch(()=>({personas:[],active:'assistant'}));
-  renderPersonaStrip(d.personas||[],d.active||'assistant');
-  const found=(d.personas||[]).find(p=>p.id===d.active);
+  const savedActive = localStorage.getItem(PERSONA_PREF_KEY) || 'assistant';
+  const d=await fetch('/personas').then(r=>r.json()).catch(()=>({personas:personaCache,active:savedActive}));
+  const personas = d.personas || [];
+  const activeId = d.active || savedActive;
+  personaCache = personas;
+  renderPersonaStrip(personas,activeId);
+  const found=personas.find(p=>p.id===activeId) || personas[0];
   if(found) setActivePersonaUI(found);
 }
 
@@ -22,16 +28,18 @@ function renderPersonaStrip(personas,activeId){
 async function switchPersona(id){
   haptic('light');
   const d=await fetch(`/personas/${id}`,{method:'POST'}).then(r=>r.json()).catch(()=>null);
-  if(!d) return;
+  if(!d){
+    const fallback = personaCache.find(x=>x.id===id);
+    if(fallback) setActivePersonaUI(fallback);
+    return;
+  }
+  localStorage.setItem(PERSONA_PREF_KEY, id);
   await loadPersonas();
-  const personas=await fetch('/personas').then(r=>r.json()).then(d=>d.personas).catch(()=>[]);
-  const p=personas.find(x=>x.id===id);
-  if(p) setActivePersonaUI(p);
 }
 
 function setActivePersonaUI(p){
   activePersona=p;
-  document.querySelector('meta[name=theme-color]')?.setAttribute('content',p.color);
+  document.querySelectorAll('meta[name="theme-color"]').forEach((meta)=>meta.setAttribute('content',p.color));
   document.documentElement.style.setProperty('--accent',p.color);
   const accentD=p.color+'cc';
   document.documentElement.style.setProperty('--accent-d',accentD);

@@ -8,6 +8,19 @@ function normalizeTheme(theme) {
   return theme === 'light' ? 'light' : 'dark';
 }
 
+function detectSystemTheme() {
+  try {
+    return window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  } catch (_) {
+    return 'dark';
+  }
+}
+
+function getPreferredTheme() {
+  const local = localStorage.getItem('theme');
+  return local ? normalizeTheme(local) : detectSystemTheme();
+}
+
 function updateThemeControls(theme) {
   const themeBtn = document.getElementById('theme-btn');
   if (themeBtn) {
@@ -68,13 +81,19 @@ function setTheme(theme, options = {}) {
 }
 
 function toggleTheme() {
-  const currentTheme = normalizeTheme(localStorage.getItem('theme') || 'dark');
+  const currentTheme = getPreferredTheme();
   const nextTheme = currentTheme === 'dark' ? 'light' : 'dark';
   setTheme(nextTheme, {persist: true});
   haptic('light');
 }
 
-applyTheme(normalizeTheme(localStorage.getItem('theme') || 'dark'));
+applyTheme(getPreferredTheme());
+
+window.addEventListener('storage', (evt) => {
+  if (evt.key === 'theme' && evt.newValue) {
+    applyTheme(normalizeTheme(evt.newValue));
+  }
+});
 
 // ── THEME & FONT SIZE ─────────────────────────────────────────────────────────
 

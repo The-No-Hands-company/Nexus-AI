@@ -6293,7 +6293,7 @@ async def set_prefs(request: Request):
 # ── agent ─────────────────────────────────────────────────────────────────────
 @router.post("/agent")
 async def agent_post(request: Request):
-    data   = await request.json()
+    data   = await _read_json_body(request, "invalid JSON body for /agent")
     task   = data.get("task","").strip()
     sid    = data.get("session_id")
     files  = data.get("files",[])
@@ -6341,12 +6341,15 @@ async def agent_post(request: Request):
             return _api_error(str(_exc), "vision_error", 500)
         return {"result": _vout, "provider": _vpid, "model": "", "session_id": sid}
     kwargs: dict = {}
-    if data.get("max_tool_calls") is not None:
-        kwargs["max_tool_calls"] = int(data.get("max_tool_calls"))
-    if data.get("max_time_s") is not None:
-        kwargs["max_time_s"] = float(data.get("max_time_s"))
-    if data.get("max_tokens_out") is not None:
-        kwargs["budget_tokens_out"] = int(data.get("max_tokens_out"))
+    try:
+        if data.get("max_tool_calls") is not None:
+            kwargs["max_tool_calls"] = int(data.get("max_tool_calls"))
+        if data.get("max_time_s") is not None:
+            kwargs["max_time_s"] = float(data.get("max_time_s"))
+        if data.get("max_tokens_out") is not None:
+            kwargs["budget_tokens_out"] = int(data.get("max_tokens_out"))
+    except (TypeError, ValueError):
+        return _api_error("invalid numeric controls: max_tool_calls, max_time_s, max_tokens_out", "validation_error", 422)
 
     timeout_s = float(data.get("request_timeout_s") or 12.0)
     loop = asyncio.get_running_loop()
@@ -6364,6 +6367,7 @@ async def agent_post(request: Request):
             "result": fallback,
             "provider": "Built-in",
             "model": "timeout-fallback",
+            "fallback_reason": "timeout",
             "history": history + [
                 {"role": "user", "content": task},
                 {"role": "assistant", "content": fallback},
@@ -6382,7 +6386,7 @@ async def agent_post(request: Request):
 
 @router.post("/agent/stream")
 async def agent_stream(request: Request):
-    data      = await request.json()
+    data      = await _read_json_body(request, "invalid JSON body for /agent/stream")
     task      = data.get("task","").strip()
     sid       = data.get("session_id")
     files     = data.get("files",[])
@@ -6494,9 +6498,13 @@ async def agent_stream(request: Request):
             "data: [DONE]\n\n"
         )
     except Exception as exc:
+        friendly = (
+            "I started processing your request but could not finish this turn with a model response. "
+            "Please retry, or simplify the request into smaller steps."
+        )
         err_evt = {
             "type": "done",
-            "content": "I started processing your request but could not finish this turn with a model response. Please retry your message.",
+            "content": friendly,
             "provider": "Built-in",
             "model": "buffered-stream-fallback",
         }
