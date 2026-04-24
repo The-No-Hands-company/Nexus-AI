@@ -1205,7 +1205,9 @@ def _error_category(error_text: str) -> str:
     msg = str(error_text or "").lower()
     if "429" in msg or "rate limit" in msg or "too many requests" in msg or "quota" in msg or "throttl" in msg:
         return "rate"
-    if "401" in msg or "unauthorized" in msg or "invalid api key" in msg or "not authenticated" in msg:
+    if "413" in msg or "tokens_limit_reached" in msg or "request body too large" in msg:
+        return "rate"   # treat as soft rate (short cooldown) — different model may succeed
+    if "401" in msg or "unauthorized" in msg or "invalid api key" in msg or "not authenticated" in msg or "wrong api key" in msg:
         return "auth"
     if "402" in msg or "payment" in msg or "subscription" in msg or "upgrade" in msg or "insufficient credits" in msg:
         return "payment"
@@ -1272,6 +1274,11 @@ def _record_provider_failure(pid: str, error_text: str, source: str = "runtime")
         if strikes >= WARMUP_DEMOTION_STRIKES:
             _provider_demotion_until[pid] = time.time() + WARMUP_DEMOTION_SECONDS
             _provider_demotion_reasons[pid] = f"warmup_{category}"
+    elif category in ("auth", "payment"):
+        # Runtime auth/payment failures are persistent config errors — demote for a long window
+        # so we don't waste a request on every turn probing a broken provider.
+        _provider_demotion_until[pid] = time.time() + 3600  # 1 hour
+        _provider_demotion_reasons[pid] = f"runtime_{category}"
     elif category == "rate":
         # Runtime rate-limit events are already managed by cooldown; keep a short demotion
         # so routing avoids immediately retrying noisy providers.
@@ -1645,12 +1652,18 @@ When the user mentions a GitHub URL with any development intent ("help", "develo
      for every subsequent read_file call. Example: if the result says "read_file prefix: ca_session_abc/MyRepo/"
      then call: read_file ca_session_abc/MyRepo/README.md
   3. read_file <prefix>README.md (or main entry point shown in Top-level)
-  4. read_file <prefix><MainSourceFile> — 1-2 more key source files.
+  4. read_file <prefix><MainSourceFile> — 1-2 more key source files ONLY. Stop at 3 reads total.
      NEVER call list_files. NEVER retry read_file with the same path. NEVER use absolute paths.
-  5. respond with a FULL ANALYSIS: what the project is, current state, assessment of the code,
-     and 3-5 concrete prioritised next steps with brief implementation notes.
+  5. IMMEDIATELY respond with a FULL ANALYSIS after reading at most 3 files: what the project is,
+     current state, assessment of the code, and 3-5 concrete prioritised next steps.
      DO NOT call write_file, run_command, or any other action on the first turn — just respond.
-     The user can ask for specific changes after seeing the analysis.
+
+IF THE TASK STARTS WITH "[REPOS ALREADY CLONED":
+  - The repo is already on disk. File paths are listed in the task.
+  - Read at most 3 files from that list (README first, then 1-2 source files).
+  - After those reads, call respond IMMEDIATELY with your full analysis.
+  - Do NOT call clone_repo again. Do NOT read more than 3 files. Do NOT call list_files.
+
 Do NOT stop after cloning. Do NOT ask "what would you like to do?".
 ALWAYS finish with a respond action — never leave the user without an answer.
 """
@@ -2585,6 +2598,7 @@ def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
             "temperature": _config["temperature"],
             "max_tokens": 4096,
         }, ensure_ascii=False).encode("utf-8")
+        print(f"[llm/{cfg.get('id','?')}] payload={len(payload)}B msgs={len(messages)}", flush=True)
         r = requests.post(
             cfg["base_url"].rstrip("/")+"/chat/completions",
             headers=headers,
@@ -2626,6 +2640,8 @@ def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
         or ""
     )
     result = _parse_json(content)
+    if not result.get("action"):
+        print(f"[llm/{cfg.get('id','?')}] action=None raw={content[:200]!r}", flush=True)
     if reasoning and isinstance(result, dict) and not result.get("thought"):
         result["thought"] = reasoning
 
@@ -3345,21 +3361,44 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 set_session_repo(sid, url)
             yield {"type":"tool","icon":"📦","action":"clone_repo",
                    "label":url,"result":result,"file_path":None,"file_content":None}
-        # List files for context
-        all_files = []
+        # Build a curated file list — prefer high-signal files, skip noise.
+        # Keeps the instruction short so the model reads a handful of key files and responds.
+        _KEY_EXTS = {".md", ".txt", ".rst", ".py", ".js", ".ts", ".jsx", ".tsx",
+                     ".go", ".rs", ".java", ".cs", ".cpp", ".c", ".rb", ".swift",
+                     ".json", ".toml", ".yaml", ".yml"}
+        _SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", "venv",
+                      "dist", "build", ".next", "vendor", "coverage"}
+        all_files: list[str] = []
+        priority_files: list[str] = []   # README + root-level source files first
         for url in urls:
             rname = url.rstrip('/').split('/')[-1].replace('.git','')
             rdir  = os.path.join(workdir, rname)
-            if os.path.isdir(rdir):
-                all_files += [os.path.relpath(os.path.join(dp,f), workdir)
-                              for dp,_,fs in os.walk(rdir) for f in fs][:50]
-        file_ctx = "\n".join(all_files[:60])
+            if not os.path.isdir(rdir):
+                continue
+            for dp, dirs, fs in os.walk(rdir):
+                # Prune noise dirs in-place so os.walk skips them
+                dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+                for f in fs:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext not in _KEY_EXTS:
+                        continue
+                    rel = os.path.relpath(os.path.join(dp, f), workdir)
+                    depth = rel.count(os.sep)
+                    if depth == 1:   # repo root level
+                        priority_files.append(rel)
+                    else:
+                        all_files.append(rel)
+        # Root files first, then deeper files; cap total at 20 to avoid overwhelming the model
+        curated = priority_files[:12] + all_files[:8]
+        file_ctx = "\n".join(curated[:20])
         clean_task = (f"[REPOS ALREADY CLONED — do NOT call clone_repo again]\n"
-                      f"Cloned to {workdir}. Use these relative paths for read_file:\n{file_ctx}\n\n"
-                      f"Original task: {clean_task}\n\n"
-                      f"Read the key files listed above, then respond with: what the project is, "
-                      f"its current state, your assessment, and 3-5 prioritised next steps. "
-                      f"Do NOT call write_file or run_command on this first turn.")
+                      f"These are the key files (relative to session workdir {workdir}):\n{file_ctx}\n\n"
+                      f"INSTRUCTIONS: Read at most 4 files (start with README then 1-3 source files), "
+                      f"then immediately respond with your full analysis. "
+                      f"Do NOT read every file. Do NOT call write_file or run_command on this first turn.\n\n"
+                      f"Original request: {clean_task}\n\n"
+                      f"Respond with: what the project is, its current state, your assessment, "
+                      f"and 3-5 prioritised next steps.")
 
     history_list = list(history)
     raw_tokens = sum(item.get("tokens", 0) for item in CONTEXT_WINDOW.token_breakdown(history_list))
@@ -3409,7 +3448,10 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     complexity = _score_complexity(clean_task)
     yield {"type":"complexity","level":complexity}
 
-    mcts_guidance = _auto_mcts_guidance(clean_task)
+    # Skip MCTS for already-cloned/bypass tasks: the operation is well-defined (read → respond)
+    # and MCTS guidance messages prime the model to return score/rationale JSON instead of actions.
+    _skip_mcts = clean_task.startswith("[REPOS ALREADY CLONED")
+    mcts_guidance = None if _skip_mcts else _auto_mcts_guidance(clean_task)
     if mcts_guidance:
         best_plan = mcts_guidance.get("best_plan", [])
         plan_text = "\n".join(f"{idx + 1}. {step}" for idx, step in enumerate(best_plan))
@@ -3433,6 +3475,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     # ── per-request execution budget ─────────────────────────────────────────
     _budget_start = time.time()
     _tool_call_count = 0
+    _read_file_count = 0   # track consecutive read_file calls to prevent over-reading
     _strict_mode = bool(_config.get("strict_no_guess_mode", True))
     _strict_confidence_threshold = float(_config.get("strict_confidence_threshold", 0.95) or 0.95)
     _strict_evidence_threshold = int(_config.get("strict_evidence_threshold", 1) or 1)
@@ -3548,6 +3591,26 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                        "chain":" → ".join(PROVIDERS[p]["label"] for p in providers_used)}
 
         kind = action.get("action")
+        # If model returned action=null/missing but included content, treat it as a respond
+        if not kind and action.get("content"):
+            action["action"] = "respond"
+            kind = "respond"
+        elif not kind:
+            # Completely missing action — tell the model what format to use and continue
+            _bad_fmt_msg = (
+                "Your last response was not a valid JSON action object. "
+                "You MUST reply with exactly one of these formats:\n"
+                '{"action":"respond","content":"your full answer","confidence":0.9}\n'
+                '{"action":"read_file","path":"<relative-path>"}\n'
+                "Do NOT wrap in markdown. Output raw JSON only."
+            )
+            messages.append({"role": "assistant", "content": json.dumps(action)})
+            messages.append({"role": "user", "content": _bad_fmt_msg})
+            _step_idx += 1
+            continue
+        print(f"[agent/loop step={_step_idx} sid={sid[:8] if sid else '-'}] action={kind!r} "
+              f"path={action.get('path','')!r} url={action.get('url','')!r}",
+              flush=True)
         llm_confidence = 1.0
         try:
             llm_confidence = float(action.get("confidence", _llm_meta.get("confidence", 1.0)) or 1.0)
@@ -3563,7 +3626,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             action_confidence_threshold = max(action_confidence_threshold, 0.95)
             action_evidence_threshold = max(action_evidence_threshold, 1)
 
-        if gate_mode_active and kind not in ("clarify", "plan", "think", "think_deep"):
+        if gate_mode_active and kind not in ("clarify", "plan", "think", "think_deep", "respond"):
             doubt = _strict_doubt_assessment(
                 task=clean_task,
                 action=action,
@@ -4265,7 +4328,8 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 _recent_conflict = ""
 
             messages.append({"role":"assistant","content":json.dumps(action)})
-            messages.append({"role":"user","content":f"Tool result:\n{result_str}\n\nContinue."})
+            _ctx_str = result_str if len(result_str) <= 1200 else result_str[:1200] + f"\n…[truncated — {len(result_str)-1200} chars omitted]"
+            messages.append({"role":"user","content":f"Tool result:\n{_ctx_str}\n\nContinue."})
             _step_idx += 1
             if trace_id:
                 _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
@@ -4442,8 +4506,26 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         elif isinstance(result, str) and ("failed" in result.lower() or "error" in result.lower() or "not found" in result.lower()):
             _recent_conflict = f"{kind}:tool_result_conflict"
 
+        # After read_file, count reads and nudge model to respond after 3 successful reads
+        if kind == "read_file":
+            _read_file_count += 1
+
         messages.append({"role":"assistant","content":json.dumps(action)})
-        messages.append({"role":"user","content":f"Tool result:\n{result}\n\nContinue."})
+        # Truncate large file results stored in context to prevent 413 payload-too-large errors.
+        # Tool-result text in messages is for the model's reasoning; full content is shown to user separately.
+        _CONTEXT_RESULT_MAX = 1200
+        _result_for_ctx = result if isinstance(result, str) else str(result)
+        if len(_result_for_ctx) > _CONTEXT_RESULT_MAX:
+            _result_for_ctx = _result_for_ctx[:_CONTEXT_RESULT_MAX] + f"\n…[truncated — {len(result) - _CONTEXT_RESULT_MAX} chars omitted for context]"
+        _continue_msg = f"Tool result:\n{_result_for_ctx}\n\nContinue."
+        if kind == "read_file" and _read_file_count >= 3:
+            _continue_msg = (
+                f"Tool result:\n{_result_for_ctx}\n\n"
+                "You have now read 3 files. That is enough context. "
+                "Do NOT read any more files. "
+                "Call respond NOW with your full analysis."
+            )
+        messages.append({"role":"user","content":_continue_msg})
         _step_idx += 1
         if trace_id:
             _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
