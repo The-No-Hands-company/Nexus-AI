@@ -372,7 +372,7 @@ PROVIDERS: Dict[str, Dict] = {
     },
     "cerebras": {
         "label":"Cerebras","base_url":"https://api.cerebras.ai/v1",
-        "env_key":"CEREBRAS_API_KEY","default_model":"llama-3.3-70b",
+        "env_key":"CEREBRAS_API_KEY","default_model":"llama3.3-70b",
         "openai_compat":True,"opt_in":True,
         "free_tier":{"available":True,"cc_required":False,
                      "signup_url":"https://cloud.cerebras.ai",
@@ -390,9 +390,9 @@ PROVIDERS: Dict[str, Dict] = {
                      "free_model":None,"notes":"Get free key at ai.google.dev (Google AI Studio). Multimodal: image/audio/video."},
     },
     "gemma": {
-        "label":"Google Gemma 4",
+        "label":"Google Gemma 2",
         "base_url":"https://generativelanguage.googleapis.com/v1beta/openai",
-        "env_key":"GEMINI_API_KEY","default_model":"gemma-3-27b-it",
+        "env_key":"GEMINI_API_KEY","default_model":"gemma-2-9b-it",
         "openai_compat":True,"opt_in":True,
         "free_tier":{"available":True,"cc_required":False,
                      "signup_url":"https://ai.google.dev",
@@ -410,7 +410,7 @@ PROVIDERS: Dict[str, Dict] = {
     },
     "mistral_codestral": {
         "label":"Codestral (Mistral)","base_url":"https://codestral.mistral.ai/v1",
-        "env_key":"MISTRAL_API_KEY","default_model":"codestral-latest",
+        "env_key":"CODESTRAL_API_KEY","default_model":"codestral-latest",
         "openai_compat":True,"opt_in":True,
         "free_tier":{"available":True,"cc_required":False,
                      "signup_url":"https://console.mistral.ai",
@@ -428,7 +428,7 @@ PROVIDERS: Dict[str, Dict] = {
     },
     "github_models": {
         "label":"GitHub Models","base_url":"https://models.inference.ai.azure.com",
-        "env_key":"GITHUB_MODELS_TOKEN","default_model":"meta-llama/Llama-3.3-70B-Instruct",
+        "env_key":"GITHUB_MODELS_TOKEN","default_model":"gpt-4o-mini",
         "openai_compat":True,"opt_in":True,
         "free_tier":{"available":True,"cc_required":False,
                      "signup_url":"https://github.com/marketplace/models",
@@ -437,7 +437,7 @@ PROVIDERS: Dict[str, Dict] = {
     },
     "huggingface": {
         "label":"HuggingFace Inference","base_url":"https://api-inference.huggingface.co/v1",
-        "env_key":"HF_TOKEN","default_model":"meta-llama/Llama-3.3-70B-Instruct",
+        "env_key":"HF_TOKEN","default_model":"mistralai/Mistral-7B-Instruct-v0.3",
         "openai_compat":True,"opt_in":True,
         "free_tier":{"available":True,"cc_required":False,
                      "signup_url":"https://huggingface.co/settings/tokens",
@@ -1209,6 +1209,12 @@ def _error_category(error_text: str) -> str:
         return "auth"
     if "402" in msg or "payment" in msg or "subscription" in msg or "upgrade" in msg or "insufficient credits" in msg:
         return "payment"
+    # Persistent config errors (wrong model name, unsupported feature): treat as auth-class
+    # so repeated failures trigger demotion and the provider is skipped automatically.
+    if "unknown_model" in msg or "model_not_found" in msg or "unknown model" in msg or "does not exist" in msg:
+        return "auth"
+    if "developer instruction is not enabled" in msg or "invalid_argument" in msg:
+        return "auth"
     return "other"
 
 

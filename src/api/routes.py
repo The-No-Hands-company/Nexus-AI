@@ -6723,6 +6723,9 @@ async def agent_stream(request: Request):
         parts.append("data: [DONE]\n\n")
         body = "".join(parts)
     except Exception as exc:
+        import traceback as _tb
+        _exc_detail = _tb.format_exc()
+        print(f"[agent/stream ERROR] {type(exc).__name__}: {exc}\n{_exc_detail}", flush=True)
         friendly = (
             "I started processing your request but could not finish this turn with a model response. "
             "Please retry, or simplify the request into smaller steps."
@@ -6734,7 +6737,7 @@ async def agent_stream(request: Request):
             "model": "buffered-stream-fallback",
         }
         try:
-            execution_traces[trace_id].append({"type": "error", "message": str(exc)})
+            execution_traces[trace_id].append({"type": "error", "message": str(exc), "detail": _exc_detail})
             execution_traces[trace_id].append(err_evt)
             db_save_execution_trace(trace_id, execution_traces[trace_id])
         except Exception:
