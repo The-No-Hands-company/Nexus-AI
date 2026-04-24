@@ -1641,18 +1641,17 @@ GITHUB REPO WORKFLOW (critical — follow this exactly when given a GitHub URL):
 When the user mentions a GitHub URL with any development intent ("help", "develop", "continue",
 "improve", "fix", "build", "work on"), you MUST follow this sequence without asking:
   1. clone_repo the URL immediately.
-  2. The clone_repo result includes "Local path: /tmp/ca_session_XXXX/RepoName" — remember the
-     FOLDER NAME (e.g. "RepoName") which is the relative path prefix for all subsequent reads.
-  3. read_file <FolderName>/README.md  (use the folder name from step 2, NOT just "README.md")
-  4. read_file <FolderName>/<MainSourceFile> — 2-3 key files to understand the current state.
-     Never call list_files more than once. Never retry read_file with the same path.
-  5. respond with: what the project is, current state, what you found, and concrete next steps.
-PATH RULES:
-- The workdir is a session temp dir, NOT the repo root. Always prefix paths with the repo folder name.
-- If clone_repo says "Local path: /tmp/ca_session_abc/MyRepo", use: read_file MyRepo/README.md
-- If read_file returns "File not found", fix the prefix from the clone result — do NOT call list_files again.
-Do NOT stop after cloning. Do NOT ask "what would you like to do?" — read the code and
-immediately provide a useful analysis and development plan.
+  2. The clone_repo result includes a line "read_file prefix: <prefix>/". USE THAT PREFIX EXACTLY
+     for every subsequent read_file call. Example: if the result says "read_file prefix: ca_session_abc/MyRepo/"
+     then call: read_file ca_session_abc/MyRepo/README.md
+  3. read_file <prefix>README.md (or main entry point shown in Top-level)
+  4. read_file <prefix><MainSourceFile> — 1-2 more key source files.
+     NEVER call list_files. NEVER retry read_file with the same path. NEVER use absolute paths.
+  5. respond with a FULL ANALYSIS: what the project is, current state, assessment of the code,
+     and 3-5 concrete prioritised next steps with brief implementation notes.
+     DO NOT call write_file, run_command, or any other action on the first turn — just respond.
+     The user can ask for specific changes after seeing the analysis.
+Do NOT stop after cloning. Do NOT ask "what would you like to do?".
 ALWAYS finish with a respond action — never leave the user without an answer.
 """
 
@@ -1928,8 +1927,10 @@ def tool_clone_repo(url: str, token: str, workdir: str, dest_path: str = "") -> 
         count = sum(len(fs) for _,_,fs in os.walk(dest))
 
     top = sorted([f for f in os.listdir(dest) if not f.startswith('.')])[:20]
+    rel = os.path.relpath(dest, workdir)
     return (f"✅ Fetched {owner}/{repo_name} via GitHub API ({count} files)\n"
             f"Local path: {dest}\n"
+            f"read_file prefix: {rel}/\n"
             f"Top-level: {', '.join(top)}")
 
 def tool_create_repo(name: str, description: str, private: bool,
