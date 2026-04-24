@@ -5521,12 +5521,23 @@ async def set_session_safety(sid: str, request: Request):
 
 
 # ── chat history ──────────────────────────────────────────────────────────────
+_TITLE_SKIP_PREFIXES = (
+    "[MEMORY",
+    "Tool result:",
+    "Continue.",
+    "Noted —",
+    "You have reached",
+)
+
 def _auto_title(history: list) -> str:
     for msg in history:
         if msg.get("role") != "user":
             continue
         content = str(msg.get("content") or "").strip()
         if not content:
+            continue
+        # Skip injected context messages (memory, KG, tool scaffolding)
+        if any(content.startswith(p) for p in _TITLE_SKIP_PREFIXES):
             continue
         head = content.split("\n", 1)[0].strip()
         return (head[:77] + "...") if len(head) > 80 else head

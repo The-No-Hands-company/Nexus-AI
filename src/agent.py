@@ -3365,6 +3365,10 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
     messages: List[Dict] = _maybe_compress_history(history_list)
     messages = CONTEXT_WINDOW.compress_to_token_budget(messages, token_budget=model_budget, reserve_tokens=4096)
+    # Track how many messages we prepend so we can strip them from history returned to clients.
+    # Injected context (memory, KG) must NOT persist in the chat history stored by the front-end —
+    # it is re-injected fresh on every turn.
+    _n_injected = 0
     # Inject long-term knowledge graph context when relevant entities exist
     _kg_ctx = kg_to_context_string(clean_task, limit=5)
     if _kg_ctx:
@@ -3372,6 +3376,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             {"role": "user",      "content": _kg_ctx},
             {"role": "assistant", "content": "Noted — I have reviewed the relevant knowledge graph context."},
         ] + messages
+        _n_injected += 2
     # Inject long-term memory context (semantic summaries of past conversations)
     _mem_ctx = get_memory_context()
     if _mem_ctx:
@@ -3379,7 +3384,12 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             {"role": "user",      "content": _mem_ctx},
             {"role": "assistant", "content": "Noted — I have context from previous conversations."},
         ] + messages
+        _n_injected += 2
     messages.append({"role":"user","content":_build_content(clean_task, files or [])})
+
+    def _pub_history() -> List[Dict]:
+        """History slice safe to return to the client (no injected context prefixes)."""
+        return messages[_n_injected:]
     yield {
         "type": "token_breakdown",
         "messages": CONTEXT_WINDOW.token_breakdown(messages),
@@ -3462,7 +3472,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "content": _msg,
                 "provider": cfg.get("label", "Built-in"),
                 "model": _config["model"] or cfg.get("default_model", "budget-guard"),
-                "history": messages,
+                "history": _pub_history(),
             }
             return
         if max_tool_calls > 0 and _tool_call_count >= max_tool_calls:
@@ -3476,7 +3486,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "content": _msg,
                 "provider": cfg.get("label", "Built-in"),
                 "model": _config["model"] or cfg.get("default_model", "budget-guard"),
-                "history": messages,
+                "history": _pub_history(),
             }
             return
         if _stopped():
@@ -3510,7 +3520,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     "fallback_reason": "provider_unavailable",
                     "provider_attempt_chain": _format_provider_attempt_chain(provider_attempts),
                     "provider_attempts": provider_attempts,
-                    "history": messages,
+                    "history": _pub_history(),
                 }
                 return
 
@@ -3572,7 +3582,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     "content": _clarify_msg,
                     "provider": cfg.get("label", "?"),
                     "model": _config["model"] or cfg.get("default_model", "?"),
-                    "history": messages,
+                    "history": _pub_history(),
                 }
                 return
 
@@ -3646,7 +3656,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "content": _clarify_msg,
                 "provider": cfg.get("label", "?"),
                 "model": _config["model"] or cfg.get("default_model", "?"),
-                "history": messages,
+                "history": _pub_history(),
             }   # full history returned and stored in session
             return
 
@@ -3791,7 +3801,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "fallback_reason": action.get("fallback_reason", ""),
                 "provider_attempt_chain": action.get("provider_attempt_chain", ""),
                 "provider_attempts": action.get("provider_attempts", []),
-                "history": messages,
+                "history": _pub_history(),
                 "tokens": {
                     "input": input_token_estimate,
                     "output": output_tokens,
@@ -4228,7 +4238,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     "content": final,
                     "provider": cfg.get("label", "?"),
                     "model": _config["model"] or cfg.get("default_model", "?"),
-                    "history": messages,
+                    "history": _pub_history(),
                     "tokens": {
                         "input": input_token_estimate,
                         "output": _estimate_tokens(final),
@@ -4406,7 +4416,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "content": final,
                 "provider": cfg.get("label", "?"),
                 "model": _config["model"] or cfg.get("default_model", "?"),
-                "history": messages,
+                "history": _pub_history(),
                 "tokens": {
                     "input": input_token_estimate,
                     "output": _estimate_tokens(final),
@@ -4451,7 +4461,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
     messages.append({"role": "assistant", "content": final})
     yield {"type": "done", "content": final, "provider": cfg.get("label", "?"),
-           "model": _config["model"] or cfg.get("default_model", "?"), "history": messages,
+           "model": _config["model"] or cfg.get("default_model", "?"), "history": _pub_history(),
            "tokens": {"input": input_token_estimate, "output": len(final)//4,
                       "total": input_token_estimate + len(final)//4}}
 
