@@ -804,7 +804,8 @@ _PROVIDER_COST_PER_1K_TOKENS: Dict[str, float] = {
 BUDGET_TIER: str = os.getenv("BUDGET_TIER", "any").lower()   # free | low | medium | any
 FREE_ONLY_MODE: bool = os.getenv("FREE_ONLY_MODE", "false").lower() in ("1", "true", "yes", "on")
 WARMUP_DEMOTION_STRIKES: int = max(1, int(os.getenv("WARMUP_DEMOTION_STRIKES", "2")))
-WARMUP_DEMOTION_SECONDS: int = max(30, int(os.getenv("WARMUP_DEMOTION_SECONDS", "1800")))
+# Default 90s: enough to survive startup races without blocking providers for 30 min on a cold-start hiccup.
+WARMUP_DEMOTION_SECONDS: int = max(30, int(os.getenv("WARMUP_DEMOTION_SECONDS", "90")))
 _BUDGET_MAX_COST: Dict[str, float] = {
     "free":   0.000,
     "low":    0.002,
