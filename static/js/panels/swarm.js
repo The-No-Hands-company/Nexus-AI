@@ -10,6 +10,10 @@ let _swarmActiveTab    = "activity";
 let _swarmPaused       = false;
 let _swarmSelectedTrace = "";
 let _swarmCachedTasks   = [];
+let _swarmActivityAction = "";
+let _swarmActivityWindowS = 900;
+let _swarmActivityFilterKey = "";
+let _swarmBypassBadgeUpdatedAt = 0;
 
 // Graph physics state
 let _graphNodes        = [];
@@ -30,6 +34,7 @@ const SWARM_ACTION_COLORS = {
   commit_push:  "#5b5",
   clone_repo:   "#5b5",
   sub_agent:    "#b75",
+  strict_clone_bootstrap_exception: "#c67dff",
 };
 
 const AGENT_STATE_COLOR = {
@@ -44,6 +49,7 @@ const AGENT_STATE_COLOR = {
 function openSwarmPanel() {
   NexusApi.setPanelOpen("swarm-panel", true);
   _populateAgentSelect();
+  swarmRefreshCloneBypassBadge(true);
   swarmTab(_swarmActiveTab);
 }
 
@@ -136,6 +142,44 @@ function clearSwarmFeed() {
 let _swarmEventSource = null;
 let _swarmNewEventCount = 0;
 
+function _swarmFormatBypassTs(ts) {
+  if (!ts || ts <= 0) return '';
+  const d = new Date(ts * 1000);
+  const ageSec = Math.floor((Date.now() - ts * 1000) / 1000);
+  if (ageSec < 60) return 'just now';
+  if (ageSec < 3600) return `${Math.floor(ageSec / 60)}m ago`;
+  if (ageSec < 86400) return `${Math.floor(ageSec / 3600)}h ago`;
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) +
+    ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+function _setSwarmCloneBypassBadge(count, latestTs = null) {
+  const badge = document.getElementById("swarm-clone-bypass-badge");
+  if (!badge) return;
+  const safeCount = Math.max(0, Number(count || 0));
+  badge.textContent = `BYPASS ${safeCount}`;
+  const tsLabel = latestTs ? _swarmFormatBypassTs(latestTs) : '';
+  badge.title = `${safeCount} persisted strict clone bypass event${safeCount === 1 ? '' : 's'}${tsLabel ? ` · last: ${tsLabel}` : ''}`;
+  const tsEl = document.getElementById("swarm-bypass-latest-ts");
+  if (tsEl) {
+    tsEl.textContent = tsLabel ? `↑ ${tsLabel}` : '';
+    tsEl.title = tsLabel ? `Latest bypass: ${new Date((latestTs || 0) * 1000).toLocaleString()}` : '';
+  }
+}
+
+async function swarmRefreshCloneBypassBadge(force = false) {
+  const now = Date.now();
+  if (!force && (now - _swarmBypassBadgeUpdatedAt) < 10000) return;
+  try {
+    const r = await fetch("/swarm/activity?action=strict_clone_bootstrap_exception&limit=1");
+    if (!r.ok) return;
+    const d = await r.json();
+    _swarmBypassBadgeUpdatedAt = now;
+    const latestTs = d.events && d.events.length > 0 ? (d.events[d.events.length - 1].ts || null) : null;
+    _setSwarmCloneBypassBadge(d.unfiltered_total || d.total || 0, latestTs);
+  } catch (_) {}
+}
+
 function _startSwarmPolling() {
   if (_swarmEventSource) return;
   _connectSwarmSSE();
@@ -217,9 +261,21 @@ function _stopProgressPolling() {
 
 async function _pollSwarm() {
   try {
-    const r = await fetch("/swarm/activity?limit=60");
+    const currentFilterKey = _swarmCurrentFilterKey();
+    if (currentFilterKey !== _swarmActivityFilterKey) {
+      _swarmActivityFilterKey = currentFilterKey;
+      _lastSwarmTotal = 0;
+    }
+    const r = await fetch(_swarmActivityQuery());
     if (!r.ok) return;
     const d = await r.json();
+    if (d.source === "persistent" && d.filters && d.filters.action === "strict_clone_bootstrap_exception") {
+      const latestTs = d.events && d.events.length > 0 ? (d.events[d.events.length - 1].ts || null) : null;
+      _setSwarmCloneBypassBadge(d.unfiltered_total || d.total || 0, latestTs);
+      _swarmBypassBadgeUpdatedAt = Date.now();
+    } else {
+      swarmRefreshCloneBypassBadge(false);
+    }
     const feed   = document.getElementById("swarm-feed");
     const countEl = document.getElementById("swarm-count");
     if (!feed) return;
@@ -232,12 +288,20 @@ async function _pollSwarm() {
       const ts  = ev.ts
         ? new Date(ev.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
         : "";
+      const meta = [];
+      if (Array.isArray(ev.reason_codes) && ev.reason_codes.length) {
+        meta.push(ev.reason_codes.join(", "));
+      }
       row.style.cssText = "display:flex;align-items:center;gap:6px;padding:3px 6px;border-radius:6px;background:var(--surface2);font-size:.72rem;";
-      row.innerHTML = `<span style="color:${clr};font-weight:700;min-width:90px;">${esc(ev.action || "?")}</span><span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(ev.label || "")}</span><span style="color:var(--muted);font-size:.65rem;">${ts}</span>`;
+      row.innerHTML = `<span style="color:${clr};font-weight:700;min-width:90px;">${esc(ev.action || "?")}</span><span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${esc(ev.label || "")}${meta.length ? ` <span style="color:var(--muted)">· ${esc(meta.join(" | "))}</span>` : ""}</span><span style="color:var(--muted);font-size:.65rem;">${ts}</span>`;
       feed.appendChild(row);
     }
     feed.scrollTop = feed.scrollHeight;
-    if (countEl) countEl.textContent = d.total + " event" + (d.total === 1 ? "" : "s");
+    if (countEl) {
+      const sourceLabel = d.source === "persistent" ? " historical" : " retained";
+      const suffix = d.filters && (d.filters.action || d.filters.since_ts) ? ` filtered · ${d.unfiltered_total || d.total}${sourceLabel}` : "";
+      countEl.textContent = d.total + " event" + (d.total === 1 ? "" : "s") + suffix;
+    }
   } catch (_) {}
 }
 

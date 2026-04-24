@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSO
 from pydantic import ValidationError
 
 router = APIRouter()
-from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_provider_health, get_provider_capabilities, set_provider_persona_override, get_provider_persona_override, get_config, update_config, call_llm_with_fallback, call_llm_smart, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event, AllProvidersExhausted, warmup_agent)
+from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_provider_health, get_provider_capabilities, get_free_provider_diagnostics, set_provider_persona_override, get_provider_persona_override, get_config, update_config, call_llm_with_fallback, call_llm_smart, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event, AllProvidersExhausted, warmup_agent)
 from ..approvals import list_tool_approvals, decide_tool_approval
 from ..auth import JWT_SECRET, JWT_ALGO, JWT_EXPIRE_H, AuthManager, MULTI_USER
 from ..scheduler import (
@@ -22,6 +22,7 @@ from ..scheduler import (
 )
 from ..gist_backup import restore_from_gist, push_now as gist_push_now
 from ..db import (init_db, save_chat as db_save_chat, load_chats as db_load_chats, load_chat as db_load_chat, delete_chat as db_delete_chat, save_share as db_save_share, load_share as db_load_share, init_projects_table, save_project as db_save_project, load_projects as db_load_projects, delete_project as db_delete_project, assign_chat_to_project, get_project_chats, save_custom_instructions as db_save_ci, load_custom_instructions as db_load_ci, update_memory_entry as db_update_memory, delete_memory_entry as db_delete_memory, pin_chat as db_pin_chat, get_pinned_chats, search_chats as db_search_chats, get_usage_stats, get_usage_daily, get_usage_records, get_usage_by_user, init_usage_table, save_custom_persona as db_save_persona, load_custom_personas as db_load_custom_personas, delete_custom_persona as db_del_persona, load_pref as db_load_pref, save_pref as db_save_pref, save_self_review as db_save_self_review, list_self_reviews as db_list_self_reviews, load_safety_audit_entries as db_load_safety_audit_entries, list_users as db_list_users, update_user_role as db_update_user_role, get_user as db_get_user, _backend as db_backend, update_user_email as db_update_user_email, create_api_key as db_create_api_key, list_api_keys as db_list_api_keys, get_api_key_by_hash as db_get_api_key_by_hash, revoke_api_key as db_revoke_api_key, touch_api_key as db_touch_api_key, get_or_create_oauth_user as db_get_or_create_oauth_user, create_fine_tuning_job as db_create_fine_tuning_job, get_fine_tuning_job as db_get_fine_tuning_job, list_fine_tuning_jobs as db_list_fine_tuning_jobs, update_fine_tuning_job as db_update_fine_tuning_job, create_fine_tuning_job_event as db_create_fine_tuning_job_event, list_fine_tuning_job_events as db_list_fine_tuning_job_events, save_execution_trace as db_save_execution_trace, load_execution_trace as db_load_execution_trace, list_execution_traces as db_list_execution_traces, delete_execution_trace as db_delete_execution_trace, save_autonomy_trace as db_save_autonomy_trace, load_autonomy_trace as db_load_autonomy_trace, db_set_shared_memory, db_get_shared_memory, db_delete_shared_memory, db_list_shared_memory, db_save_task_job, db_list_task_jobs, save_ft_training_sample as db_save_ft_training_sample, list_ft_training_samples as db_list_ft_training_samples)
+from ..db import list_strict_clone_bypass_events as db_list_strict_clone_bypass_events, count_strict_clone_bypass_events as db_count_strict_clone_bypass_events, daily_strict_clone_bypass_totals as db_daily_bypass_totals
 from ..personas import list_personas, set_persona, get_active_persona_name, get_persona
 from ..memory import (
     add_memory,
@@ -79,6 +80,19 @@ from .state import (
     execution_traces,
     get_rag_system,
 )
+
+_DEFAULT_AGENT_REQUEST_TIMEOUT_S = max(30.0, float(os.getenv("AGENT_REQUEST_TIMEOUT_S", "180")))
+
+
+def _resolve_request_timeout_seconds(data: dict) -> float:
+    """Resolve per-request timeout with sane bounds and env-configurable default."""
+    raw = data.get("request_timeout_s")
+    if raw is None:
+        return _DEFAULT_AGENT_REQUEST_TIMEOUT_S
+    try:
+        return max(10.0, min(float(raw), 600.0))
+    except (TypeError, ValueError):
+        return _DEFAULT_AGENT_REQUEST_TIMEOUT_S
 
 # ── API helpers ─────────────────────────────────────────────────────────────
 
@@ -148,79 +162,18 @@ def _normalize_response_format(response_format):
 
 
 def _builtin_chat_fallback(task: str, reason: str = "timeout") -> str:
-    task_lc = (task or "").strip().lower()
-    if any(phrase in task_lc for phrase in ("what can you do", "what do you do", "help me", "help")):
-        return (
-            "I can help with coding, debugging, architecture, API design, tests, documentation, refactors, "
-            "code review, and step-by-step implementation guidance. I can also inspect project files, explain "
-            "errors, and suggest concrete fixes."
-        )
-    if task_lc in {"hi", "hello", "hey", "yo"} or task_lc.startswith(("hi ", "hello ", "hey ")):
-        return "Hello. I can help with coding, debugging, design, documentation, and project-level problem solving."
     if reason == "provider_unavailable":
         return (
-            "I could not reach any model provider for this turn. "
-            "Please retry in a moment, or enable at least one provider key / local Ollama model."
+            "No model provider could be reached for this turn. "
+            "Please check your provider keys in Settings and retry."
         )
     return (
-        "This request timed out before a model response completed. "
-        "Please retry with the same message, or send a shorter task and I will continue."
+        "The request timed out before a response was received. "
+        "Please retry — if the problem persists, try a shorter message or check provider availability."
     )
 
 
 def _builtin_coding_fallback(task: str, reason: str = "timeout") -> str:
-    """Return a concrete, useful coding answer for common prompts when providers fail."""
-    task_lc = (task or "").strip().lower()
-    is_python_request = "python" in task_lc
-    is_sort_files_mtime = (
-        is_python_request
-        and "sort" in task_lc
-        and "file" in task_lc
-        and (
-            "date modified" in task_lc
-            or "modified date" in task_lc
-            or "last modified" in task_lc
-            or "mtime" in task_lc
-        )
-    )
-
-    if is_sort_files_mtime:
-        return (
-            "I could not reach a model provider for this turn, but here is a direct built-in answer:\n\n"
-            "```python\n"
-            "#!/usr/bin/env python3\n"
-            "from pathlib import Path\n"
-            "import argparse\n\n"
-            "def main() -> None:\n"
-            "    parser = argparse.ArgumentParser(description='Sort files by last modified time.')\n"
-            "    parser.add_argument('directory', nargs='?', default='.', help='Directory to scan (default: current directory)')\n"
-            "    parser.add_argument('--desc', action='store_true', help='Sort newest first')\n"
-            "    args = parser.parse_args()\n\n"
-            "    root = Path(args.directory).expanduser().resolve()\n"
-            "    files = [p for p in root.iterdir() if p.is_file()]\n"
-            "    files_sorted = sorted(files, key=lambda p: p.stat().st_mtime, reverse=args.desc)\n\n"
-            "    for f in files_sorted:\n"
-            "        ts = f.stat().st_mtime\n"
-            "        print(f\"{f.name}\t{ts:.0f}\")\n\n"
-            "if __name__ == '__main__':\n"
-            "    main()\n"
-            "```\n\n"
-            f"Fallback reason: `{reason}`."
-        )
-
-    if is_python_request and any(token in task_lc for token in ("script", "function", "class", "code")):
-        return (
-            "I could not reach a model provider for this turn, but here is a useful starting template:\n\n"
-            "```python\n"
-            "def main() -> None:\n"
-            "    # TODO: implement your task logic here\n"
-            "    pass\n\n"
-            "if __name__ == '__main__':\n"
-            "    main()\n"
-            "```\n\n"
-            "If you retry once providers recover, I will generate the full task-specific implementation."
-        )
-
     return ""
 
 
@@ -2087,6 +2040,11 @@ def system_resources(): return get_system_resources()
 def providers(): return {"providers":get_providers_list()}
 
 
+@router.get("/providers/free-diagnostics")
+def providers_free_diagnostics():
+    return get_free_provider_diagnostics()
+
+
 @router.get("/providers/health")
 def providers_health():
     """Return per-provider health status including rate limits, capabilities, and benchmarks."""
@@ -2157,10 +2115,49 @@ def v1_get_model(model_id: str):
 # ── Swarm View ────────────────────────────────────────────────────────────────
 
 @router.get("/swarm/activity")
-def swarm_activity(limit: int = 50):
+def swarm_activity(limit: int = 50, action: str = "", since_ts: float = 0.0):
     """Return the most recent swarm activity events (capped at _MAX_ACTIVITY)."""
     limit = max(1, min(limit, _MAX_ACTIVITY))
-    return {"events": activity_log[-limit:], "total": len(activity_log)}
+    action_filter = str(action or "").strip()
+    if action_filter == "strict_clone_bootstrap_exception":
+        events = db_list_strict_clone_bypass_events(limit=limit, since_ts=since_ts)
+        return {
+            "events": list(reversed(events)),
+            "total": db_count_strict_clone_bypass_events(since_ts=since_ts),
+            "unfiltered_total": db_count_strict_clone_bypass_events(),
+            "source": "persistent",
+            "filters": {
+                "action": action_filter,
+                "since_ts": since_ts if since_ts > 0 else None,
+            },
+        }
+    events = activity_log
+    if action_filter:
+        events = [event for event in events if str(event.get("action") or "") == action_filter]
+    if since_ts > 0:
+        events = [event for event in events if float(event.get("ts") or 0.0) >= since_ts]
+    return {
+        "events": events[-limit:],
+        "total": len(events),
+        "unfiltered_total": len(activity_log),
+        "source": "activity_log",
+        "filters": {
+            "action": action_filter or None,
+            "since_ts": since_ts if since_ts > 0 else None,
+        },
+    }
+
+
+@router.get("/admin/bypass-history")
+def admin_bypass_history(days: int = 30):
+    """Daily bypass totals for the last `days` calendar days (max 365)."""
+    days = max(1, min(int(days), 365))
+    daily = db_daily_bypass_totals(days=days)
+    return {
+        "days": days,
+        "total": sum(r["count"] for r in daily),
+        "daily": daily,
+    }
 
 
 @router.get("/swarm/live")
@@ -6490,7 +6487,7 @@ async def agent_post(request: Request):
     except (TypeError, ValueError):
         return _api_error("invalid numeric controls: max_tool_calls, max_time_s, max_tokens_out", "validation_error", 422)
 
-    timeout_s = float(data.get("request_timeout_s") or 60.0)
+    timeout_s = _resolve_request_timeout_seconds(data)
     loop = asyncio.get_running_loop()
     try:
         result = await asyncio.wait_for(
@@ -6606,7 +6603,7 @@ async def agent_stream(request: Request):
             kwargs["max_time_s"] = float(data.get("max_time_s"))
         if data.get("max_tokens_out") is not None:
             kwargs["budget_tokens_out"] = int(data.get("max_tokens_out"))
-        timeout_s = float(data.get("request_timeout_s") or 60.0)
+        timeout_s = _resolve_request_timeout_seconds(data)
 
         loop = asyncio.get_running_loop()
         try:
@@ -6660,6 +6657,11 @@ async def agent_stream(request: Request):
             "provider_precheck": result.get("provider_precheck") or provider_precheck,
         }
 
+        clarify_evt = None
+        if isinstance(result.get("clarify_event"), dict):
+            clarify_evt = result.get("clarify_event")
+            execution_traces[trace_id].append(clarify_evt)
+
         diagnostic_evt = None
         if done_evt.get("fallback_reason") or done_evt.get("provider_attempt_chain"):
             diagnostic_evt = {
@@ -6676,6 +6678,8 @@ async def agent_stream(request: Request):
         parts = [f"data: {json.dumps(status_evt)}\n\n"]
         if diagnostic_evt is not None:
             parts.append(f"data: {json.dumps(diagnostic_evt, default=str)}\n\n")
+        if clarify_evt is not None:
+            parts.append(f"data: {json.dumps(clarify_evt, default=str)}\n\n")
         parts.append(f"data: {json.dumps(done_evt, default=str)}\n\n")
         parts.append("data: [DONE]\n\n")
         body = "".join(parts)

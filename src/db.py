@@ -507,10 +507,23 @@ class SQLiteBackend(DatabaseBackend):
                 severity    TEXT NOT NULL DEFAULT 'info',
                 details     TEXT NOT NULL DEFAULT '{}'
             );
+            CREATE TABLE IF NOT EXISTS strict_clone_bypass_events (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts            REAL NOT NULL,
+                session_id    TEXT NOT NULL DEFAULT '',
+                repo_url      TEXT NOT NULL DEFAULT '',
+                label         TEXT NOT NULL DEFAULT '',
+                reason_codes  TEXT NOT NULL DEFAULT '[]',
+                details       TEXT NOT NULL DEFAULT '{}'
+            );
             CREATE INDEX IF NOT EXISTS idx_safety_audit_ts
                 ON safety_audit_events (ts);
             CREATE INDEX IF NOT EXISTS idx_safety_audit_event_type
                 ON safety_audit_events (event_type);
+            CREATE INDEX IF NOT EXISTS idx_strict_clone_bypass_ts
+                ON strict_clone_bypass_events (ts);
+            CREATE INDEX IF NOT EXISTS idx_strict_clone_bypass_session
+                ON strict_clone_bypass_events (session_id);
             CREATE INDEX IF NOT EXISTS idx_attribution_log_ts
                 ON attribution_log (ts);
             CREATE INDEX IF NOT EXISTS idx_attribution_log_team
@@ -1162,6 +1175,19 @@ class PostgresBackend(DatabaseBackend):
                     metadata    TEXT NOT NULL DEFAULT '{}',
                     request_id  TEXT NOT NULL DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS strict_clone_bypass_events (
+                    id           SERIAL PRIMARY KEY,
+                    ts           DOUBLE PRECISION NOT NULL,
+                    session_id   TEXT NOT NULL DEFAULT '',
+                    repo_url     TEXT NOT NULL DEFAULT '',
+                    label        TEXT NOT NULL DEFAULT '',
+                    reason_codes TEXT NOT NULL DEFAULT '[]',
+                    details      TEXT NOT NULL DEFAULT '{}'
+                );
+                CREATE INDEX IF NOT EXISTS idx_strict_clone_bypass_ts
+                    ON strict_clone_bypass_events (ts);
+                CREATE INDEX IF NOT EXISTS idx_strict_clone_bypass_session
+                    ON strict_clone_bypass_events (session_id);
                 CREATE TABLE IF NOT EXISTS feature_flags (
                     name                TEXT PRIMARY KEY,
                     enabled             INTEGER NOT NULL DEFAULT 0,
@@ -1937,6 +1963,108 @@ def add_safety_audit_entry(entry: dict):
 
 def clear_safety_audit_entries():
     _save_json_pref("safety_audit_log", [])
+
+
+def record_strict_clone_bypass_event(
+    ts: float,
+    session_id: str = "",
+    repo_url: str = "",
+    label: str = "",
+    reason_codes: list[str] | None = None,
+    details: dict | None = None,
+) -> None:
+    payload = (
+        float(ts or time.time()),
+        str(session_id or "")[:120],
+        str(repo_url or "")[:500],
+        str(label or "")[:240],
+        json.dumps(list(reason_codes or []), separators=(",", ":")),
+        json.dumps(details or {}, separators=(",", ":"), default=str),
+    )
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute(
+            "INSERT INTO strict_clone_bypass_events(ts,session_id,repo_url,label,reason_codes,details) VALUES(?,?,?,?,?,?)",
+            payload,
+        )
+    else:
+        _sql_execute(
+            "INSERT INTO strict_clone_bypass_events(ts,session_id,repo_url,label,reason_codes,details) VALUES(%s,%s,%s,%s,%s,%s)",
+            payload,
+        )
+
+
+def count_strict_clone_bypass_events(since_ts: float = 0.0) -> int:
+    query = "SELECT COUNT(*) AS n FROM strict_clone_bypass_events"
+    params: tuple[Any, ...] = ()
+    if since_ts > 0:
+        placeholder = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+        query += f" WHERE ts >= {placeholder}"
+        params = (float(since_ts),)
+    rows = _sql_fetchall(query, params)
+    if not rows:
+        return 0
+    return int(rows[0].get("n") or 0)
+
+
+def list_strict_clone_bypass_events(limit: int = 100, since_ts: float = 0.0) -> list[dict]:
+    safe_limit = max(1, min(int(limit), 5000))
+    placeholder = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    clauses: list[str] = []
+    params: list[Any] = []
+    if since_ts > 0:
+        clauses.append(f"ts >= {placeholder}")
+        params.append(float(since_ts))
+    where_sql = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+    rows = _sql_fetchall(
+        f"SELECT ts, session_id, repo_url, label, reason_codes, details FROM strict_clone_bypass_events{where_sql} ORDER BY ts DESC LIMIT {safe_limit}",
+        tuple(params),
+    )
+    result: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        try:
+            item["reason_codes"] = json.loads(item.get("reason_codes") or "[]")
+        except Exception:
+            item["reason_codes"] = []
+        try:
+            item["details"] = json.loads(item.get("details") or "{}")
+        except Exception:
+            item["details"] = {}
+        item["action"] = "strict_clone_bootstrap_exception"
+        item["status"] = item.get("details", {}).get("status") or "allowed"
+        item["session"] = item.get("session_id") or None
+        result.append(item)
+    return result
+
+
+def clear_strict_clone_bypass_events() -> None:
+    if isinstance(_backend, SQLiteBackend):
+        _sql_execute("DELETE FROM strict_clone_bypass_events", ())
+    else:
+        _sql_execute("DELETE FROM strict_clone_bypass_events", ())
+
+
+def daily_strict_clone_bypass_totals(days: int = 30) -> list[dict]:
+    """Return per-day bypass counts for the last `days` calendar days, newest first."""
+    safe_days = max(1, min(int(days), 365))
+    cutoff_ts = time.time() - safe_days * 86400
+    placeholder = "?" if isinstance(_backend, SQLiteBackend) else "%s"
+    if isinstance(_backend, SQLiteBackend):
+        day_expr = "date(ts, 'unixepoch')"
+    else:
+        day_expr = "TO_CHAR(TO_TIMESTAMP(ts), 'YYYY-MM-DD')"
+    rows = _sql_fetchall(
+        f"SELECT {day_expr} AS day, COUNT(*) AS count, MAX(ts) AS latest_ts"
+        f" FROM strict_clone_bypass_events"
+        f" WHERE ts >= {placeholder}"
+        f" GROUP BY {day_expr}"
+        f" ORDER BY {day_expr} DESC",
+        (float(cutoff_ts),),
+    )
+    return [
+        {"day": str(r.get("day") or ""), "count": int(r.get("count") or 0), "latest_ts": float(r.get("latest_ts") or 0)}
+        for r in rows
+    ]
 
 
 def save_benchmark_result(
