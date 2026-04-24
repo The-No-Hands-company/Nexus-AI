@@ -2160,6 +2160,34 @@ def admin_bypass_history(days: int = 30):
     }
 
 
+@router.post("/admin/reset-providers")
+def admin_reset_providers():
+    """Clear all provider demotion flags, warmup strike counters, and rate-limit cooldowns.
+
+    Call this when providers appear unavailable after a bad startup or a temporary
+    network blip that triggered the warmup demotion penalty.  The circuit-breaker
+    half-open transition is handled automatically; this only clears the *demotion*
+    and *cooldown* state that is tracked separately.
+    """
+    from ..agent import (
+        _provider_demotion_until,
+        _provider_demotion_reasons,
+        _provider_warmup_failure_strikes,
+        _cooldowns,
+    )
+    demotions_cleared = list(_provider_demotion_until.keys())
+    _provider_demotion_until.clear()
+    _provider_demotion_reasons.clear()
+    _provider_warmup_failure_strikes.clear()
+    cooldowns_cleared = list(_cooldowns.keys())
+    _cooldowns.clear()
+    return {
+        "ok": True,
+        "demotions_cleared": demotions_cleared,
+        "cooldowns_cleared": cooldowns_cleared,
+    }
+
+
 @router.get("/swarm/live")
 async def swarm_live_stream():
     """SSE stream of swarm activity events as they are pushed to activity_log."""
