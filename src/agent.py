@@ -3355,9 +3355,11 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                               for dp,_,fs in os.walk(rdir) for f in fs][:50]
         file_ctx = "\n".join(all_files[:60])
         clean_task = (f"[REPOS ALREADY CLONED — do NOT call clone_repo again]\n"
-                      f"Cloned to {workdir}.\nFiles:\n{file_ctx}\n\n"
+                      f"Cloned to {workdir}. Use these relative paths for read_file:\n{file_ctx}\n\n"
                       f"Original task: {clean_task}\n\n"
-                      f"Now read key files, make improvements, commit and push.")
+                      f"Read the key files listed above, then respond with: what the project is, "
+                      f"its current state, your assessment, and 3-5 prioritised next steps. "
+                      f"Do NOT call write_file or run_command on this first turn.")
 
     history_list = list(history)
     raw_tokens = sum(item.get("tokens", 0) for item in CONTEXT_WINDOW.token_breakdown(history_list))
@@ -4192,7 +4194,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     continue
 
         builtin_result = None
-        if kind not in {"web_search", "write_file"}:
+        # read_file and list_files must use the session workdir, not dispatch_builtin's
+        # action.get("workdir", "/tmp") default — keep them in the explicit elif chain below.
+        if kind not in {"web_search", "write_file", "read_file", "list_files", "delete_file"}:
             builtin_result = _dispatch_builtin_traced(action, sid=sid)
 
         icon  = TOOL_ICONS.get(kind, "🔧")
