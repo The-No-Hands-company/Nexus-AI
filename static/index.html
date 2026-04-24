@@ -1524,6 +1524,7 @@
         </div>
       </div>
       <div style="display:flex;align-items:center;gap:6px;">
+        <span id="swarm-clone-bypass-badge" style="display:inline-flex;align-items:center;font-size:.6rem;background:#6c52d9;color:#fff;border-radius:999px;padding:2px 6px;font-weight:700;">BYPASS 0</span><span id="swarm-bypass-latest-ts" style="font-size:.55rem;color:var(--muted);white-space:nowrap;"></span>
         <span id="swarm-pause-badge" style="display:none;font-size:.6rem;background:#e55;color:#fff;border-radius:4px;padding:1px 5px;font-weight:700;">PAUSED</span>
         <button id="swarm-pause-btn" onclick="swarmTogglePause()" title="Pause / Resume swarm" style="background:none;border:1px solid var(--border);border-radius:5px;padding:2px 7px;font-size:.68rem;color:var(--muted);cursor:pointer;">⏸</button>
         <button class="panel-btn" onclick="closeSwarmPanel()" title="Close">✕</button>
@@ -1532,6 +1533,19 @@
 
     <!-- Tab: Activity -->
     <div id="swarm-pane-activity" style="display:flex;flex-direction:column;flex:1;min-height:0;">
+      <div style="padding:8px 10px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center;flex-wrap:wrap;flex-shrink:0;">
+        <select id="swarm-activity-action" onchange="swarmApplyActivityFilters()" style="flex:1;min-width:150px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.74rem;">
+          <option value="">All actions</option>
+          <option value="strict_clone_bootstrap_exception">Strict clone bypasses</option>
+        </select>
+        <select id="swarm-activity-window" onchange="swarmApplyActivityFilters()" style="min-width:128px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.74rem;">
+          <option value="0">All retained</option>
+          <option value="300">Last 5m</option>
+          <option value="900" selected>Last 15m</option>
+          <option value="3600">Last 1h</option>
+          <option value="86400">Last 24h</option>
+        </select>
+      </div>
       <div id="swarm-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:4px;min-height:60px;"></div>
       <div style="padding:6px 14px;border-top:1px solid var(--border);font-size:.65rem;color:var(--muted);display:flex;justify-content:space-between;flex-shrink:0;">
         <span id="swarm-count">0 events</span>
@@ -2350,11 +2364,51 @@ async function send(){
   let sawAnySseEvent=false;
   let sawTerminalEvent=false;
   let sawDoneMarker=false;
+  let sawClarifyEvent=false;
+
+  const recoverTerminalEventFromTrace = async(traceId)=>{
+    if(!traceId) return false;
+    const retryDelays=[120,420];
+    for(const delayMs of retryDelays){
+      if(delayMs>0) await new Promise(r=>setTimeout(r,delayMs));
+      try{
+        const tr=await fetch(`/agent/trace/${encodeURIComponent(traceId)}`, {cache:'no-store'});
+        if(!tr.ok) continue;
+        const payload=await tr.json();
+        const events=Array.isArray(payload?.events)?payload.events:[];
+        const terminal=[...events].reverse().find(e=>e && (e.type==='done' || e.type==='error'));
+        if(!terminal) continue;
+
+        sawTerminalEvent=true;
+        agentBub.querySelector('[data-stream-status="1"]')?.remove();
+
+        if(terminal.type==='error'){
+          const errEl=document.createElement('div');
+          errEl.style.cssText='color:var(--red);font-size:.82rem;margin-top:4px';
+          errEl.textContent='⚠️ '+normalizeFrontendErrorMessage(String(terminal.message||'Unknown error'));
+          agentBub.appendChild(errEl);
+          return true;
+        }
+
+        const recoveredText=String(terminal.content||'').trim() || 'Request completed without a text payload.';
+        const recoveredMeta=document.createElement('div');
+        recoveredMeta.className='msg-meta';
+        recoveredMeta.textContent='Recovered final response from trace.';
+        agentBub.appendChild(recoveredMeta);
+        const recoveredBody=document.createElement('div');
+        recoveredBody.innerHTML=renderMd(recoveredText);
+        enhanceRenderedContent(recoveredBody);
+        agentBub.appendChild(recoveredBody);
+        return true;
+      }catch{}
+    }
+    return false;
+  };
 
   try{
     const resp=await fetch('/agent/stream',{
       method:'POST',signal:abortController.signal,
-      headers:{'Content-Type':'application/json'},
+      headers:{'Content-Type':'application/json','X-Nexus-Session-Id':sid||''},
       body:JSON.stringify({task:val,session_id:sid,files,stream_id:currentStreamId}),
     });
     if(!resp.ok){
@@ -2412,6 +2466,7 @@ async function send(){
         if(!gotFirst){showTyping(false);gotFirst=true}
 
         if(evt.type==='clarify'){
+          sawClarifyEvent = true;
           // Render interactive clarify card
           const cardModel=evt.card||{};
           const card=document.createElement('div');card.className='clarify-card';
@@ -2712,6 +2767,38 @@ async function send(){
           if(toolContainer){agentBub.appendChild(document.createElement('hr'))}
           const finalText = evt.content||'';
           const combinedText = streamedMarkdown || finalText;
+          const isClarifyTerminal = finalText.trim().startsWith('Clarification required before I can continue');
+          if(isClarifyTerminal && !sawClarifyEvent && !agentBub.querySelector('.clarify-card')){
+            const fallbackCard=document.createElement('div');fallbackCard.className='clarify-card';
+            const title=document.createElement('div');title.className='clarify-title';
+            title.textContent='Clarification required before execution';
+            fallbackCard.appendChild(title);
+            const why=document.createElement('div');why.className='clarify-why';
+            why.textContent='Please provide the missing details so I can continue correctly.';
+            fallbackCard.appendChild(why);
+            const qDiv=document.createElement('div');qDiv.className='clarify-q';
+            const qText=document.createElement('div');qText.className='clarify-q-text';
+            qText.textContent='What should I focus on first?';
+            qDiv.appendChild(qText);
+            const inp=document.createElement('input');
+            inp.type='text';inp.placeholder='Example: optimize combat loop and fix save bug';
+            inp.style.cssText='width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:7px 11px;color:var(--text);font-size:.82rem;outline:none;margin-top:2px';
+            qDiv.appendChild(inp);
+            fallbackCard.appendChild(qDiv);
+            const sub=document.createElement('button');sub.className='clarify-submit';
+            sub.textContent='Continue →';
+            sub.onclick=async()=>{
+              const ans=(inp.value||'').trim();
+              if(!ans){alert('Please enter a clarification first.');return;}
+              fallbackCard.style.opacity='.5';fallbackCard.style.pointerEvents='none';
+              const original=window._lastTask||'';
+              ta.value=`[Clarification answers for: "${original}"]\nfocus: ${ans}\n\nNow proceed with the original task.`;
+              await new Promise(r=>setTimeout(r,100));
+              send();
+            };
+            fallbackCard.appendChild(sub);
+            agentBub.appendChild(fallbackCard);
+          }
           // Only render a text node if there is actual content to show.
           // When the agent emits done with empty content (e.g. after a clarify card)
           // we skip rendering to avoid leaving an empty container in the bubble.

@@ -3,7 +3,7 @@ import urllib.request
 from functools import lru_cache
 from datetime import datetime, timezone
 from contextlib import nullcontext
-from typing import Dict, Any, List, Iterator, Optional
+from typing import Dict, Any, List, Iterator, Optional, Pattern
 from pathlib import Path
 from .tools_builtin import dispatch_builtin
 from .autonomy import Orchestrator, classify_subtask, PlanningSystem
@@ -19,7 +19,7 @@ from .thinking import (
 )
 from .context_window import ContextWindowManager
 from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk, get_ensemble_enabled, set_ensemble_enabled
-from .db import load_custom_instructions, log_usage, init_usage_table, add_safety_audit_entry
+from .db import load_custom_instructions, log_usage, init_usage_table, add_safety_audit_entry, record_strict_clone_bypass_event, count_strict_clone_bypass_events, list_strict_clone_bypass_events
 from .knowledge_graph import kg_to_context_string
 from .execution_trace import save_checkpoint as _save_checkpoint
 from .safety_pipeline import SAFETY_POLICY_PROFILES, describe_block, screen_output, screen_tool_action
@@ -85,7 +85,7 @@ except Exception:
 # ── runtime config ────────────────────────────────────────────────────────────
 _config: Dict[str, Any] = {
     "provider":           os.getenv("PROVIDER", "auto").lower(),
-    "model":              os.getenv("LLM_MODEL", ""),
+    "model":              os.getenv("LLM_MODEL", os.getenv("DEFAULT_MODEL", "")),
     "temperature":        float(os.getenv("LLM_TEMPERATURE", "0.2")),
     "persona":            os.getenv("PERSONA", "general"),
     "ensemble_mode":      True,
@@ -325,230 +325,508 @@ def set_session_safety_profile(sid: str, profile: str) -> None:
     get_session_state(sid)["safety_profile"] = profile
 
 # ── provider registry ─────────────────────────────────────────────────────────
+# ── provider registry ─────────────────────────────────────────────────────────
+# free_tier schema:
+#   available   – True if a genuine zero-cost tier exists (even if key signup is needed)
+#   cc_required – True if a credit card is required to unlock the free tier
+#   signup_url  – Where to obtain a free API key
+#   limits      – Human-readable rate/quota summary
+#   free_model  – If set, use this model name instead of default_model when FREE_ONLY_MODE=true
+#                 (needed for providers like OpenRouter where free models have a :free suffix)
+#   notes       – Any other setup instructions
 PROVIDERS: Dict[str, Dict] = {
-    "llm7":    {"label":"LLM7.io","base_url":"https://api.llm7.io/v1",
-                "env_key":"LLM7_API_KEY","default_model":"meta-llama/Llama-3.2-3B-Instruct",
-                "openai_compat":True,"keyless":True},
-    "groq":    {"label":"Groq","base_url":"https://api.groq.com/openai/v1",
-                "env_key":"GROQ_API_KEY","default_model":"llama-3.3-70b-versatile",
-                "openai_compat":True},
-    "cerebras":{"label":"Cerebras","base_url":"https://api.cerebras.ai/v1",
-                "env_key":"CEREBRAS_API_KEY","default_model":"llama-3.3-70b",
-                "openai_compat":True},
-    "gemini":  {"label":"Google Gemini",
-                "base_url":"https://generativelanguage.googleapis.com/v1beta/openai",
-                "env_key":"GEMINI_API_KEY","default_model":"gemini-2.0-flash",
-                "openai_compat":True},
-    "gemma":   {"label":"Google Gemma 4",
-                "base_url":"https://generativelanguage.googleapis.com/v1beta/openai",
-                "env_key":"GEMINI_API_KEY","default_model":"gemma-3-27b-it",
-                "openai_compat":True},
-    "mistral": {"label":"Mistral AI","base_url":"https://api.mistral.ai/v1",
-                "env_key":"MISTRAL_API_KEY","default_model":"mistral-small-latest",
-                "openai_compat":True},
-    "openrouter":{"label":"OpenRouter","base_url":"https://openrouter.ai/api/v1",
-                  "env_key":"OPENROUTER_API_KEY",
-                  "default_model":"meta-llama/llama-3.3-70b-instruct:free",
-                  "openai_compat":True},
-    "nvidia":  {"label":"NVIDIA NIM","base_url":"https://integrate.api.nvidia.com/v1",
-                "env_key":"NVIDIA_API_KEY","default_model":"meta/llama-3.3-70b-instruct",
-                "openai_compat":True},
-    "cohere":  {"label":"Cohere","base_url":"https://api.cohere.com/compatibility/v1",
-                "env_key":"COHERE_API_KEY","default_model":"command-r-plus",
-                "openai_compat":True},
-    "github_models":{"label":"GitHub Models",
-                     "base_url":"https://models.inference.ai.azure.com",
-                     "env_key":"GITHUB_MODELS_TOKEN",
-                     "default_model":"meta-llama/Llama-3.3-70B-Instruct",
-                     "openai_compat":True},
-    "grok":    {"label":"Grok (xAI)","env_key":"GROK_API_KEY",
-                "default_model":"grok-3","openai_compat":False},
-    "claude":  {"label":"Claude (Anthropic)","env_key":"CLAUDE_API_KEY",
-                "default_model":"claude-sonnet-4-20250514","openai_compat":False},
-    "ollama":  {"label":"Ollama (Local)","base_url": os.getenv("OLLAMA_BASE_URL","http://localhost:11434/v1"),
-                "env_key":"","default_model":"glm-5.1:cloud","openai_compat":True,"keyless":True,"local":True},
-    # ── Free-tier cloud providers ─────────────────────────────────────────────
-    "moonshot":    {"label":"Moonshot AI (Kimi K2.5)",
-                    "base_url":"https://api.moonshot.cn/v1",
-                    "env_key":"MOONSHOT_API_KEY","default_model":"kimi-k2-5",
-                    "openai_compat":True},
-    "sambanova":   {"label":"SambaNova Cloud",
-                    "base_url":"https://api.sambanova.ai/v1",
-                    "env_key":"SAMBANOVA_API_KEY",
-                    "default_model":"Meta-Llama-3.3-70B-Instruct",
-                    "openai_compat":True},
-    "together":    {"label":"Together AI",
-                    "base_url":"https://api.together.xyz/v1",
-                    "env_key":"TOGETHER_API_KEY",
-                    "default_model":"meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
-                    "openai_compat":True},
-    "huggingface": {"label":"HuggingFace Inference",
-                    "base_url":"https://api-inference.huggingface.co/v1",
-                    "env_key":"HF_TOKEN",
-                    "default_model":"meta-llama/Llama-3.3-70B-Instruct",
-                    "openai_compat":True},
-    "fireworks":   {"label":"Fireworks AI",
-                    "base_url":"https://api.fireworks.ai/inference/v1",
-                    "env_key":"FIREWORKS_API_KEY",
-                    "default_model":"accounts/fireworks/models/llama-v3p3-70b-instruct",
-                    "openai_compat":True},
-    "deepinfra":   {"label":"DeepInfra",
-                    "base_url":"https://api.deepinfra.com/v1/openai",
-                    "env_key":"DEEPINFRA_API_KEY",
-                    "default_model":"meta-llama/Llama-3.3-70B-Instruct-Turbo",
-                    "openai_compat":True},
-    "hyperbolic":  {"label":"Hyperbolic",
-                    "base_url":"https://api.hyperbolic.xyz/v1",
-                    "env_key":"HYPERBOLIC_API_KEY",
-                    "default_model":"meta-llama/Llama-3.3-70B-Instruct",
-                    "openai_compat":True},
-    "novita":      {"label":"Novita AI",
-                    "base_url":"https://api.novita.ai/v3/openai",
-                    "env_key":"NOVITA_API_KEY",
-                    "default_model":"meta-llama/llama-3.3-70b-instruct",
-                    "openai_compat":True},
-    "glhf":        {"label":"GLHF.chat",
-                    "base_url":"https://glhf.chat/api/openai/v1",
-                    "env_key":"GLHF_API_KEY",
-                    "default_model":"hf:meta-llama/Llama-3.3-70B-Instruct",
-                    "openai_compat":True},
-    "chutes":      {"label":"Chutes AI",
-                    "base_url":"https://llm.chutes.ai/v1",
-                    "env_key":"CHUTES_API_KEY",
-                    "default_model":"deepseek-ai/DeepSeek-V3-0324",
-                    "openai_compat":True},
-    "featherless": {"label":"Featherless AI",
-                    "base_url":"https://api.featherless.ai/v1",
-                    "env_key":"FEATHERLESS_API_KEY",
-                    "default_model":"meta-llama/Meta-Llama-3.1-70B-Instruct",
-                    "openai_compat":True},
-    "kluster":     {"label":"Kluster AI",
-                    "base_url":"https://api.kluster.ai/v1",
-                    "env_key":"KLUSTER_API_KEY",
-                    "default_model":"klusterai/Meta-Llama-3.3-70B-Instruct-Turbo",
-                    "openai_compat":True},
-    "aimlapi":     {"label":"AI/ML API",
-                    "base_url":"https://api.aimlapi.com/v1",
-                    "env_key":"AIMLAPI_KEY",
-                    "default_model":"meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
-                    "openai_compat":True},
-    "nebius":      {"label":"Nebius AI Studio",
-                    "base_url":"https://api.studio.nebius.ai/v1",
-                    "env_key":"NEBIUS_API_KEY",
-                    "default_model":"meta-llama/Meta-Llama-3.1-70B-Instruct",
-                    "openai_compat":True},
-    "deepseek":    {"label":"DeepSeek",
-                    "base_url":"https://api.deepseek.com/v1",
-                    "env_key":"DEEPSEEK_API_KEY",
-                    "default_model":"deepseek-chat",
-                    "openai_compat":True},
-    "scaleway":    {"label":"Scaleway Generative APIs",
-                    "base_url":"https://api.scaleway.ai/v1",
-                    "env_key":"SCALEWAY_API_KEY",
-                    "default_model":"llama-3.3-70b-instruct",
-                    "openai_compat":True},
-    "lambda":      {"label":"Lambda Labs",
-                    "base_url":"https://api.lambdalabs.com/v1",
-                    "env_key":"LAMBDA_API_KEY",
-                    "default_model":"llama3.3-70b-instruct-fp8",
-                    "openai_compat":True},
-    "perplexity":  {"label":"Perplexity AI",
-                    "base_url":"https://api.perplexity.ai",
-                    "env_key":"PERPLEXITY_API_KEY",
-                    "default_model":"sonar",
-                    "openai_compat":True},
-    "mistral_codestral": {"label":"Codestral (Mistral)",
-                    "base_url":"https://codestral.mistral.ai/v1",
-                    "env_key":"MISTRAL_API_KEY",
-                    "default_model":"codestral-latest",
-                    "openai_compat":True},
-    "neets":       {"label":"Neets AI",
-                    "base_url":"https://api.neets.ai/v1",
-                    "env_key":"NEETS_API_KEY",
-                    "default_model":"meta-llama/llama-3-70b-instruct",
-                    "openai_compat":True},
-    "inference_net":{"label":"Inference.net",
-                    "base_url":"https://api.inference.net/v1",
-                    "env_key":"INFERENCE_NET_API_KEY",
-                    "default_model":"meta-llama/llama-3.3-70b-instruct/fp-8",
-                    "openai_compat":True},
-    "lepton":      {"label":"Lepton AI",
-                    "base_url":"https://llama3-3-70b.lepton.run/api/v1",
-                    "env_key":"LEPTON_API_KEY",
-                    "default_model":"llama3-3-70b",
-                    "openai_compat":True},
-    "cloudflare":  {"label":"Cloudflare Workers AI",
-                    "base_url":f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CF_ACCOUNT_ID','')}/ai/v1",
-                    "env_key":"CF_API_TOKEN",
-                    "default_model":"@cf/meta/llama-3.3-70b-instruct-fp8-fast",
-                    "openai_compat":True},
-    "openai":      {"label":"OpenAI",
-                    "base_url":"https://api.openai.com/v1",
-                    "env_key":"OPENAI_API_KEY",
-                    "default_model":"gpt-4o-mini",
-                    "openai_compat":True},
+    # ── Keyless / local (no signup required, always available) ────────────────
+    "llm7": {
+        "label":"LLM7.io","base_url":"https://api.llm7.io/v1",
+        "env_key":"LLM7_API_KEY","default_model":"meta-llama/Llama-3.2-3B-Instruct",
+        "openai_compat":True,"keyless":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://llm7.io","limits":"Community rate limits",
+                     "free_model":None,"notes":"No API key required. Anonymous access."},
+    },
+    "ollama": {
+        "label":"Ollama (Local)",
+        "base_url":os.getenv("OLLAMA_BASE_URL","http://localhost:11434/v1"),
+        "env_key":"","default_model":"llama3.2","openai_compat":True,"keyless":True,"local":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://ollama.com","limits":"Unlimited — local hardware only",
+                     "free_model":None,"notes":"Install Ollama then `ollama pull <model>`."},
+    },
+    "lmstudio": {
+        "label":"LM Studio (Local)",
+        "base_url":os.getenv("LMSTUDIO_BASE_URL","http://localhost:1234/v1"),
+        "env_key":"","default_model":"local-model","openai_compat":True,"keyless":True,"local":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://lmstudio.ai","limits":"Unlimited — local hardware only",
+                     "free_model":None,"notes":"Enable local server in LM Studio settings (default port 1234)."},
+    },
+    # ── Ongoing free tier — API key required, no credit card ──────────────────
+    "groq": {
+        "label":"Groq","base_url":"https://api.groq.com/openai/v1",
+        "env_key":"GROQ_API_KEY","default_model":"llama-3.3-70b-versatile",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://console.groq.com",
+                     "limits":"30–60 RPM · 1K–14.4K req/day (model-dependent)",
+                     "free_model":None,"notes":"No CC. Free key at console.groq.com. Also covers Whisper STT."},
+    },
+    "cerebras": {
+        "label":"Cerebras","base_url":"https://api.cerebras.ai/v1",
+        "env_key":"CEREBRAS_API_KEY","default_model":"llama-3.3-70b",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://cloud.cerebras.ai",
+                     "limits":"1M tokens/day · 30 RPM · 60K TPM · 8K ctx on free tier",
+                     "free_model":None,"notes":"No waitlist, no CC. Fastest inference on planet via custom silicon."},
+    },
+    "gemini": {
+        "label":"Google Gemini",
+        "base_url":"https://generativelanguage.googleapis.com/v1beta/openai",
+        "env_key":"GEMINI_API_KEY","default_model":"gemini-2.0-flash",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://ai.google.dev",
+                     "limits":"1500 req/day · 15 RPM · 1M token context",
+                     "free_model":None,"notes":"Get free key at ai.google.dev (Google AI Studio). Multimodal: image/audio/video."},
+    },
+    "gemma": {
+        "label":"Google Gemma 4",
+        "base_url":"https://generativelanguage.googleapis.com/v1beta/openai",
+        "env_key":"GEMINI_API_KEY","default_model":"gemma-3-27b-it",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://ai.google.dev",
+                     "limits":"Shared with GEMINI_API_KEY free tier",
+                     "free_model":None,"notes":"Same GEMINI_API_KEY as Gemini — one signup covers both."},
+    },
+    "mistral": {
+        "label":"Mistral AI","base_url":"https://api.mistral.ai/v1",
+        "env_key":"MISTRAL_API_KEY","default_model":"mistral-small-latest",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://console.mistral.ai",
+                     "limits":"2 RPM · 500K TPM · 1B tokens/month",
+                     "free_model":None,"notes":"EU-hosted. No CC. Includes Codestral + OCR in same token budget."},
+    },
+    "mistral_codestral": {
+        "label":"Codestral (Mistral)","base_url":"https://codestral.mistral.ai/v1",
+        "env_key":"MISTRAL_API_KEY","default_model":"codestral-latest",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://console.mistral.ai",
+                     "limits":"Shared with MISTRAL_API_KEY 1B tokens/month",
+                     "free_model":None,"notes":"Best free code-gen model. Same key as Mistral."},
+    },
+    "cohere": {
+        "label":"Cohere","base_url":"https://api.cohere.com/compatibility/v1",
+        "env_key":"COHERE_API_KEY","default_model":"command-r-plus",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://dashboard.cohere.com",
+                     "limits":"20 RPM · 1K req/month — non-commercial only",
+                     "free_model":None,"notes":"Instant trial key, no CC. Covers Embed 4 + Rerank 3.5 for full RAG."},
+    },
+    "github_models": {
+        "label":"GitHub Models","base_url":"https://models.inference.ai.azure.com",
+        "env_key":"GITHUB_MODELS_TOKEN","default_model":"meta-llama/Llama-3.3-70B-Instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://github.com/marketplace/models",
+                     "limits":"50 chat + 2K completions/month · 50–150 req/day per model",
+                     "free_model":None,"notes":"Non-commercial/prototyping only. Use a GitHub personal access token."},
+    },
+    "huggingface": {
+        "label":"HuggingFace Inference","base_url":"https://api-inference.huggingface.co/v1",
+        "env_key":"HF_TOKEN","default_model":"meta-llama/Llama-3.3-70B-Instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://huggingface.co/settings/tokens",
+                     "limits":"Free serverless inference for community models",
+                     "free_model":None,"notes":"100K+ open-source models available free. HF token at huggingface.co/settings/tokens."},
+    },
+    "sambanova": {
+        "label":"SambaNova Cloud","base_url":"https://api.sambanova.ai/v1",
+        "env_key":"SAMBANOVA_API_KEY","default_model":"Meta-Llama-3.3-70B-Instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://cloud.sambanova.ai",
+                     "limits":"$5 credits on signup (30-day) + persistent free tier after",
+                     "free_model":None,"notes":"Custom RDU silicon. No CC. 10–30 RPM."},
+    },
+    "siliconflow": {
+        "label":"SiliconFlow","base_url":"https://api.siliconflow.cn/v1",
+        "env_key":"SILICONFLOW_API_KEY","default_model":"Qwen/Qwen3-8B",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://siliconflow.cn",
+                     "limits":"1K RPM · 50K TPM",
+                     "free_model":None,"notes":"Best coverage of Qwen/GLM/DeepSeek family. No CC."},
+    },
+    "scaleway": {
+        "label":"Scaleway Generative APIs","base_url":"https://api.scaleway.ai/v1",
+        "env_key":"SCALEWAY_API_KEY","default_model":"llama-3.3-70b-instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://www.scaleway.com/en/generative-apis/",
+                     "limits":"1M tokens — permanent, no expiry",
+                     "free_model":None,"notes":"EU-hosted, GDPR-friendly. Best for European data residency."},
+    },
+    "cloudflare": {
+        "label":"Cloudflare Workers AI",
+        "base_url":f"https://api.cloudflare.com/client/v4/accounts/{os.getenv('CF_ACCOUNT_ID','')}/ai/v1",
+        "env_key":"CF_API_TOKEN","default_model":"@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://developers.cloudflare.com/workers-ai",
+                     "limits":"10K neurons/day (shared: text + image + STT)",
+                     "free_model":None,"notes":"Edge-deployed, no cold starts. Set CF_ACCOUNT_ID + CF_API_TOKEN from Cloudflare dashboard."},
+    },
+    "fireworks": {
+        "label":"Fireworks AI","base_url":"https://api.fireworks.ai/inference/v1",
+        "env_key":"FIREWORKS_API_KEY","default_model":"accounts/fireworks/models/llama-v3p3-70b-instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://fireworks.ai",
+                     "limits":"10 RPM without CC ($1 permanent credits on signup)",
+                     "free_model":None,"notes":"6K RPM after adding a card. $1 signup credits permanent."},
+    },
+    "deepinfra": {
+        "label":"DeepInfra","base_url":"https://api.deepinfra.com/v1/openai",
+        "env_key":"DEEPINFRA_API_KEY","default_model":"meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://deepinfra.com",
+                     "limits":"~40 RPM · 1K free credits on signup",
+                     "free_model":None,"notes":"No CC required. Popular open-source model hosting."},
+    },
+    "hyperbolic": {
+        "label":"Hyperbolic","base_url":"https://api.hyperbolic.xyz/v1",
+        "env_key":"HYPERBOLIC_API_KEY","default_model":"meta-llama/Llama-3.3-70B-Instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://app.hyperbolic.xyz",
+                     "limits":"$1 permanent credits on signup",
+                     "free_model":None,"notes":"No CC. 13 models including Llama and DeepSeek variants."},
+    },
+    "novita": {
+        "label":"Novita AI","base_url":"https://api.novita.ai/v3/openai",
+        "env_key":"NOVITA_API_KEY","default_model":"meta-llama/llama-3.3-70b-instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://novita.ai",
+                     "limits":"$0.50 free credits (1-year expiry)",
+                     "free_model":None,"notes":"No CC required."},
+    },
+    "nebius": {
+        "label":"Nebius AI Studio","base_url":"https://api.studio.nebius.ai/v1",
+        "env_key":"NEBIUS_API_KEY","default_model":"meta-llama/Meta-Llama-3.1-70B-Instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://studio.nebius.ai",
+                     "limits":"$1 permanent credits on signup",
+                     "free_model":None,"notes":"No CC. Covers FLUX image gen + DeepSeek-R1."},
+    },
+    "inference_net": {
+        "label":"Inference.net","base_url":"https://api.inference.net/v1",
+        "env_key":"INFERENCE_NET_API_KEY","default_model":"meta-llama/llama-3.3-70b-instruct/fp-8",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://inference.net",
+                     "limits":"$1 on signup + $25 after completing survey — permanent",
+                     "free_model":None,"notes":"No CC required. Complete onboarding survey for extra credits."},
+    },
+    "nvidia": {
+        "label":"NVIDIA NIM","base_url":"https://integrate.api.nvidia.com/v1",
+        "env_key":"NVIDIA_API_KEY","default_model":"meta/llama-3.3-70b-instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://build.nvidia.com",
+                     "limits":"1K API credits on signup · 40 RPM (4K more available on request)",
+                     "free_model":None,"notes":"91 free model endpoints. Docker self-host for NVIDIA Developer Program members."},
+    },
+    "aimlapi": {
+        "label":"AI/ML API","base_url":"https://api.aimlapi.com/v1",
+        "env_key":"AIMLAPI_KEY","default_model":"meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://aimlapi.com",
+                     "limits":"Free starter credits on signup",
+                     "free_model":None,"notes":"200+ models: text, image, video, TTS."},
+    },
+    "kluster": {
+        "label":"Kluster AI","base_url":"https://api.kluster.ai/v1",
+        "env_key":"KLUSTER_API_KEY","default_model":"klusterai/Meta-Llama-3.3-70B-Instruct-Turbo",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://kluster.ai",
+                     "limits":"Free trial credits on signup",
+                     "free_model":None,"notes":"No CC required."},
+    },
+    "glhf": {
+        "label":"GLHF.chat","base_url":"https://glhf.chat/api/openai/v1",
+        "env_key":"GLHF_API_KEY","default_model":"hf:meta-llama/Llama-3.3-70B-Instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://glhf.chat",
+                     "limits":"Free community tier — rate limits apply",
+                     "free_model":None,"notes":"No CC. All HuggingFace models via hf: prefix."},
+    },
+    "chutes": {
+        "label":"Chutes AI","base_url":"https://llm.chutes.ai/v1",
+        "env_key":"CHUTES_API_KEY","default_model":"deepseek-ai/DeepSeek-V3-0324",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://chutes.ai",
+                     "limits":"Free community access",
+                     "free_model":None,"notes":"No CC required."},
+    },
+    "featherless": {
+        "label":"Featherless AI","base_url":"https://api.featherless.ai/v1",
+        "env_key":"FEATHERLESS_API_KEY","default_model":"meta-llama/Meta-Llama-3.1-70B-Instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://featherless.ai",
+                     "limits":"Free community tier",
+                     "free_model":None,"notes":"No CC required."},
+    },
+    "neets": {
+        "label":"Neets AI","base_url":"https://api.neets.ai/v1",
+        "env_key":"NEETS_API_KEY","default_model":"meta-llama/llama-3-70b-instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://neets.ai",
+                     "limits":"Free community tier",
+                     "free_model":None,"notes":"No CC required."},
+    },
+    "lepton": {
+        "label":"Lepton AI","base_url":"https://llama3-3-70b.lepton.run/api/v1",
+        "env_key":"LEPTON_API_KEY","default_model":"llama3-3-70b",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://lepton.ai",
+                     "limits":"Free community tier",
+                     "free_model":None,"notes":"No CC required."},
+    },
+    "lambda": {
+        "label":"Lambda Labs","base_url":"https://api.lambdalabs.com/v1",
+        "env_key":"LAMBDA_API_KEY","default_model":"llama3.3-70b-instruct-fp8",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://lambdalabs.com",
+                     "limits":"Free inference credits on signup",
+                     "free_model":None,"notes":"No CC required. Primarily GPU compute but free inference API available."},
+    },
+    # ── Aggregators with model-specific free access ───────────────────────────
+    "openrouter": {
+        "label":"OpenRouter",
+        "base_url":os.getenv("OPENROUTER_BASE_URL","https://openrouter.ai/api/v1"),
+        "env_key":"OPENROUTER_API_KEY",
+        "default_model":os.getenv("OPENROUTER_MODEL","meta-llama/llama-3.3-70b-instruct:free"),
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://openrouter.ai",
+                     "limits":"~30 free models · 20 RPM · 50 req/day (1K/day after $10 lifetime topup)",
+                     "free_model":"meta-llama/llama-3.3-70b-instruct:free",
+                     "notes":"Models with ':free' suffix are zero-cost. Browse free models at openrouter.ai/models?q=%3Afree"},
+    },
+    "together": {
+        "label":"Together AI","base_url":"https://api.together.xyz/v1",
+        "env_key":"TOGETHER_API_KEY",
+        "default_model":"meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://api.together.ai",
+                     "limits":"Models with '-Free' suffix are zero-cost · $5 min to unlock full catalog",
+                     "free_model":"meta-llama/Llama-3.3-70B-Instruct-Turbo-Free",
+                     "notes":"Use *-Free suffix models for zero-cost. Full catalog needs $5 min credit topup."},
+    },
+    # ── Signup credits (one-time or expiring, no CC required) ─────────────────
+    "moonshot": {
+        "label":"Moonshot AI (Kimi K2.5)","base_url":"https://api.moonshot.cn/v1",
+        "env_key":"MOONSHOT_API_KEY","default_model":"kimi-k2-5",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://platform.moonshot.cn",
+                     "limits":"Free credits on signup",
+                     "free_model":None,"notes":"Long-context specialist. Chinese provider."},
+    },
+    "deepseek": {
+        "label":"DeepSeek","base_url":"https://api.deepseek.com/v1",
+        "env_key":"DEEPSEEK_API_KEY","default_model":"deepseek-chat",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://platform.deepseek.com",
+                     "limits":"5M free tokens on signup (30-day) · ~$0.14/M input after",
+                     "free_model":None,"notes":"No CC. Quasi-free even after signup credits expire."},
+    },
+    "dashscope": {
+        "label":"Alibaba DashScope (Qwen)",
+        "base_url":"https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "env_key":"DASHSCOPE_API_KEY","default_model":"qwen-plus",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://dashscope.aliyuncs.com",
+                     "limits":"1M tokens per model (90-day expiry on signup)",
+                     "free_model":None,"notes":"Best source for Qwen family. No CC required."},
+    },
+    "ai21": {
+        "label":"AI21 Labs","base_url":"https://api.ai21.com/studio/v1",
+        "env_key":"AI21_API_KEY","default_model":"jamba-large",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://studio.ai21.com",
+                     "limits":"$10 free credits (3-month expiry)",
+                     "free_model":None,"notes":"Jamba Large + Jamba Mini. No CC."},
+    },
+    "upstage": {
+        "label":"Upstage (Solar)","base_url":"https://api.upstage.ai/v1",
+        "env_key":"UPSTAGE_API_KEY","default_model":"solar-pro",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://console.upstage.ai",
+                     "limits":"$10 free credits (3-month expiry)",
+                     "free_model":None,"notes":"Solar Pro — excellent quality per parameter. No CC."},
+    },
+    "ovh": {
+        "label":"OVH AI Endpoints",
+        "base_url":"https://oai.endpoints.kepler.ai.cloud.ovh.net/v1",
+        "env_key":"OVH_API_KEY","default_model":"Llama-3.3-70B-Instruct",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://endpoints.ai.cloud.ovh.net",
+                     "limits":"Free tier for select open-source models",
+                     "free_model":None,"notes":"EU-hosted. Alternative to Scaleway for European data residency."},
+    },
+    "grok": {
+        "label":"Grok (xAI)","env_key":"GROK_API_KEY","default_model":"grok-3",
+        "openai_compat":False,"opt_in":True,
+        "free_tier":{"available":True,"cc_required":False,
+                     "signup_url":"https://console.x.ai",
+                     "limits":"$25 one-time credits · $150/month more via data sharing opt-in",
+                     "free_model":None,"notes":"No CC to start. Data sharing opt-in requires $5 prior spend first."},
+    },
+    "perplexity": {
+        "label":"Perplexity AI","base_url":"https://api.perplexity.ai",
+        "env_key":"PERPLEXITY_API_KEY","default_model":"sonar",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":False,"cc_required":True,
+                     "signup_url":"https://perplexity.ai",
+                     "limits":"Primarily paid as of 2026 — periodic developer trials appear",
+                     "free_model":None,"notes":"Check their Labs section for any active free tiers."},
+    },
+    # ── Paid API only (no free tier) ──────────────────────────────────────────
+    "claude": {
+        "label":"Claude (Anthropic)","env_key":"CLAUDE_API_KEY",
+        "default_model":"claude-sonnet-4-20250514","openai_compat":False,"opt_in":True,
+        "free_tier":{"available":False,"cc_required":True,
+                     "signup_url":"https://console.anthropic.com",
+                     "limits":"No free API tier — paid only",
+                     "free_model":None,"notes":"Free via web UI but API requires payment."},
+    },
+    "openai": {
+        "label":"OpenAI","base_url":"https://api.openai.com/v1",
+        "env_key":"OPENAI_API_KEY","default_model":"gpt-4o-mini",
+        "openai_compat":True,"opt_in":True,
+        "free_tier":{"available":False,"cc_required":True,
+                     "signup_url":"https://platform.openai.com",
+                     "limits":"No free API tier as of 2025",
+                     "free_model":None,"notes":"Free credits discontinued mid-2025. Paid API only."},
+    },
 }
 
 # ── complexity + provider routing ─────────────────────────────────────────────
 PROVIDER_TIERS = {
-    "high":   ["ollama","claude","grok","gemini","gemma","openrouter","mistral",
-               "moonshot","sambanova","together","deepseek","perplexity",
-               "hyperbolic","fireworks","chutes","kluster","nebius","openai"],
-    "medium": ["groq","cerebras","cohere","github_models","nvidia","gemma",
-               "huggingface","deepinfra","novita","glhf","featherless",
-               "aimlapi","scaleway","lambda","inference_net","lepton",
+    "high":   ["ollama","lmstudio","claude","grok","gemini","gemma","openrouter","mistral",
+               "moonshot","sambanova","together","deepseek","dashscope",
+               "hyperbolic","fireworks","chutes","kluster","nebius","upstage","ai21","openai"],
+    "medium": ["groq","cerebras","cohere","github_models","nvidia","gemma","siliconflow",
+               "huggingface","deepinfra","novita","glhf","featherless","ovh",
+               "aimlapi","scaleway","lambda","inference_net","lepton","perplexity",
                "cloudflare","mistral_codestral"],
     "low":    ["llm7","groq","cerebras","gemma","neets","glhf","cloudflare",
-               "inference_net"],
+               "inference_net","siliconflow"],
 }
 
 # ── budget-aware routing ───────────────────────────────────────────────────────
-# Approximate cost in USD per 1K output tokens (used for budget-tier filtering)
+# Approximate cost in USD per 1K output tokens.
+# 0.000 = free tier available. Used for BUDGET_TIER filtering only;
+# FREE_ONLY_MODE uses free_tier["available"] from each provider config instead.
 _PROVIDER_COST_PER_1K_TOKENS: Dict[str, float] = {
+    # Always free — local / keyless
     "ollama":           0.000,
+    "lmstudio":         0.000,
     "llm7":             0.000,
-    "github_models":    0.000,
+    # Ongoing free tier — API key required, no CC
+    "groq":             0.000,
+    "cerebras":         0.000,
+    "gemini":           0.000,
     "gemma":            0.000,
+    "mistral":          0.000,
+    "mistral_codestral":0.000,
+    "cohere":           0.000,
+    "github_models":    0.000,
+    "huggingface":      0.000,
     "sambanova":        0.000,
+    "siliconflow":      0.000,
+    "scaleway":         0.000,
+    "cloudflare":       0.000,
+    "fireworks":        0.000,
+    "deepinfra":        0.000,
+    "hyperbolic":       0.000,
+    "novita":           0.000,
+    "nebius":           0.000,
+    "inference_net":    0.000,
+    "nvidia":           0.000,
+    "aimlapi":          0.000,
+    "kluster":          0.000,
     "glhf":             0.000,
     "chutes":           0.000,
-    "neets":            0.000,
-    "cloudflare":       0.000,
-    "lepton":           0.000,
     "featherless":      0.000,
-    "groq":             0.001,
-    "cerebras":         0.001,
-    "deepinfra":        0.001,
-    "together":         0.001,
-    "huggingface":      0.001,
-    "inference_net":    0.001,
-    "kluster":          0.001,
-    "scaleway":         0.001,
-    "lambda":           0.001,
-    "novita":           0.001,
-    "cohere":           0.002,
-    "mistral":          0.002,
-    "mistral_codestral":0.002,
-    "hyperbolic":       0.002,
-    "aimlapi":          0.002,
-    "nebius":           0.002,
-    "nvidia":           0.003,
-    "deepseek":         0.003,
-    "moonshot":         0.003,
-    "gemini":           0.004,
-    "openrouter":       0.005,
+    "neets":            0.000,
+    "lepton":           0.000,
+    "lambda":           0.000,
+    # Aggregators with free model variants
+    "openrouter":       0.000,
+    "together":         0.000,
+    # Signup credits (one-time / expiring)
+    "moonshot":         0.001,
+    "deepseek":         0.001,
+    "dashscope":        0.001,
+    "ai21":             0.001,
+    "upstage":          0.001,
+    "ovh":              0.001,
+    "grok":             0.002,
+    # Paid only
     "perplexity":       0.005,
     "openai":           0.006,
-    "grok":             0.010,
     "claude":           0.015,
 }
 BUDGET_TIER: str = os.getenv("BUDGET_TIER", "any").lower()   # free | low | medium | any
+FREE_ONLY_MODE: bool = os.getenv("FREE_ONLY_MODE", "false").lower() in ("1", "true", "yes", "on")
+WARMUP_DEMOTION_STRIKES: int = max(1, int(os.getenv("WARMUP_DEMOTION_STRIKES", "2")))
+WARMUP_DEMOTION_SECONDS: int = max(30, int(os.getenv("WARMUP_DEMOTION_SECONDS", "1800")))
 _BUDGET_MAX_COST: Dict[str, float] = {
     "free":   0.000,
     "low":    0.002,
     "medium": 0.008,
     "any":    999.0,
 }
+
+# Model-name allowlist: only for providers where free access requires a specific
+# model name pattern (e.g. OpenRouter ':free' suffix, Together '*-Free' suffix).
+# All other providers with free_tier["available"]=True accept any model name.
+_FREE_MODEL_ALLOWLIST_RAW: Dict[str, List[str]] = {
+    "openrouter": [r"(?i):free$", r"(?i)\bfree\b"],
+    "together":   [r"(?i)free"],
+}
+_FREE_MODEL_ALLOWLIST: Dict[str, List[Pattern[str]]] = {
+    pid: [re.compile(pat) for pat in pats]
+    for pid, pats in _FREE_MODEL_ALLOWLIST_RAW.items()
+}
+
+_provider_demotion_until: Dict[str, float] = {}
+_provider_demotion_reasons: Dict[str, str] = {}
+_provider_warmup_failure_strikes: Dict[str, int] = {}
 
 # ── Mixture-of-Experts specialization routing ─────────────────────────────────
 PROVIDER_SPECIALIZATIONS: Dict[str, List[str]] = {
@@ -899,6 +1177,14 @@ def _provider_circuit(pid: str):
 
 def _is_rate_limited(pid): return time.time() < _cooldowns.get(pid, 0)
 
+
+def _is_demoted(pid: str) -> bool:
+    return time.time() < float(_provider_demotion_until.get(pid, 0.0) or 0.0)
+
+
+def _demotion_remaining_seconds(pid: str) -> int:
+    return max(0, int(float(_provider_demotion_until.get(pid, 0.0) or 0.0) - time.time()))
+
 def _is_circuit_open(pid: str) -> bool:
     try:
         return _provider_circuit(pid).state == CircuitState.OPEN
@@ -907,11 +1193,83 @@ def _is_circuit_open(pid: str) -> bool:
 
 
 def _provider_temporarily_unavailable(pid: str) -> bool:
-    return _is_rate_limited(pid) or _is_circuit_open(pid)
+    return _is_rate_limited(pid) or _is_circuit_open(pid) or _is_demoted(pid)
 
 def _mark_rate_limited(pid):
     cd = 15 if PROVIDERS.get(pid,{}).get("keyless") else COOLDOWN_SECONDS
     _cooldowns[pid] = time.time() + cd
+
+
+def _error_category(error_text: str) -> str:
+    msg = str(error_text or "").lower()
+    if "429" in msg or "rate limit" in msg or "too many requests" in msg or "quota" in msg or "throttl" in msg:
+        return "rate"
+    if "401" in msg or "unauthorized" in msg or "invalid api key" in msg or "not authenticated" in msg:
+        return "auth"
+    if "402" in msg or "payment" in msg or "subscription" in msg or "upgrade" in msg or "insufficient credits" in msg:
+        return "payment"
+    return "other"
+
+
+def _effective_model_for_provider(pid: str, cfg: Dict[str, Any]) -> str:
+    preferred = (
+        str(_config.get("model") or "").strip()
+        or str(cfg.get("_selected_model") or "").strip()
+        or str(cfg.get("default_model") or "").strip()
+    )
+    if not FREE_ONLY_MODE:
+        return preferred
+    # In FREE_ONLY_MODE, use provider's declared free_model first (e.g. openrouter :free).
+    free_model = str((cfg.get("free_tier") or {}).get("free_model") or "").strip()
+    if free_model:
+        return free_model
+    # For providers with model-name allowlist patterns, enforce them.
+    allow_patterns = _FREE_MODEL_ALLOWLIST.get(pid, [])
+    if allow_patterns:
+        if any(p.search(preferred) for p in allow_patterns):
+            return preferred
+        fallback = str(cfg.get("default_model") or "").strip()
+        if fallback and any(p.search(fallback) for p in allow_patterns):
+            return fallback
+        if fallback and (":free" in fallback.lower() or "free" in fallback.lower()):
+            return fallback
+    # All other free-tier providers: preferred model is fine as-is.
+    return preferred
+
+
+def _is_provider_free_usable(pid: str, cfg: Dict[str, Any]) -> bool:
+    """Return True if this provider can be used at zero cost."""
+    free_tier = cfg.get("free_tier") or {}
+    if not free_tier.get("available", False):
+        return False
+    # Keyless providers are always free regardless of model.
+    if cfg.get("keyless", False):
+        return True
+    # opt_in providers must have a configured key to be usable.
+    if not _has_key(cfg):
+        return False
+    # For providers with model-name restrictions, the selected model must match.
+    patterns = _FREE_MODEL_ALLOWLIST.get(pid)
+    if patterns:
+        model = _effective_model_for_provider(pid, cfg)
+        return any(p.search(model) for p in patterns)
+    return True
+
+def _record_provider_failure(pid: str, error_text: str, source: str = "runtime") -> None:
+    category = _error_category(error_text)
+    if category not in ("auth", "payment", "rate"):
+        return
+    if source == "warmup":
+        strikes = int(_provider_warmup_failure_strikes.get(pid, 0)) + 1
+        _provider_warmup_failure_strikes[pid] = strikes
+        if strikes >= WARMUP_DEMOTION_STRIKES:
+            _provider_demotion_until[pid] = time.time() + WARMUP_DEMOTION_SECONDS
+            _provider_demotion_reasons[pid] = f"warmup_{category}"
+    elif category == "rate":
+        # Runtime rate-limit events are already managed by cooldown; keep a short demotion
+        # so routing avoids immediately retrying noisy providers.
+        _provider_demotion_until[pid] = max(_provider_demotion_until.get(pid, 0.0), time.time() + 30)
+        _provider_demotion_reasons[pid] = "runtime_rate"
 def _is_rl_error(exc):
     msg = str(exc).lower()
     if isinstance(exc, __import__('requests').HTTPError):
@@ -938,17 +1296,39 @@ def _provider_api_key(cfg: Dict[str, Any]) -> str:
     return raw
 
 
-def _has_key(cfg):
-    return cfg.get("keyless", False) or bool(_provider_api_key(cfg))
+def _has_key(cfg: Dict[str, Any]) -> bool:
+    """Return True if the provider can be used without user opt-in, or the user has supplied a key.
+
+    Providers with ``opt_in: True`` require the user to explicitly configure an API key.
+    They are **never** included in routing unless a valid key is present.
+    Keyless providers (``keyless: True``) are always available.
+    """
+    if cfg.get("keyless", False):
+        return True
+    # opt_in providers are excluded unless the user has configured a key.
+    if cfg.get("opt_in", False):
+        return bool(_provider_api_key(cfg))
+    # Legacy providers without the opt_in flag: require a key.
+    return bool(_provider_api_key(cfg))
+
+_FREE_PROVIDERS: frozenset = frozenset(
+    pid for pid, cfg in PROVIDERS.items() if cfg.get("keyless", False)
+)
 
 def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[str]:
     pref = _config["provider"]
-    avail = {pid for pid,cfg in PROVIDERS.items() if _has_key(cfg) and not _provider_temporarily_unavailable(pid)}
-    # Keep ordering deterministic in keyless/local test environments where no provider key is configured.
+    avail = {pid for pid, cfg in PROVIDERS.items() if _has_key(cfg) and not _provider_temporarily_unavailable(pid)}
+    # When no opt-in providers are configured, fall back to genuinely free/keyless
+    # providers only.  Never silently attempt paid providers without user consent.
     if not avail:
-        avail = {pid for pid in PROVIDERS if not _provider_temporarily_unavailable(pid)}
+        avail = {pid for pid in _FREE_PROVIDERS if not _provider_temporarily_unavailable(pid)}
     if not avail:
-        avail = set(PROVIDERS.keys())
+        avail = set(_FREE_PROVIDERS)
+
+    if FREE_ONLY_MODE:
+        free_avail = {pid for pid in avail if _is_provider_free_usable(pid, PROVIDERS.get(pid, {}))}
+        if free_avail:
+            avail = free_avail
     complexity_profile = _build_complexity_profile(task)
     complexity = complexity_profile["label"]
     resource_hint = _resource_tier(resources or get_system_resources())
@@ -1008,9 +1388,11 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
     except Exception:
         pass
 
-    # Budget-aware filtering: drop providers that exceed the cost ceiling
-    if BUDGET_TIER != "any":
-        max_cost = _BUDGET_MAX_COST.get(BUDGET_TIER, 999.0)
+    # Budget-aware filtering: drop providers that exceed the cost ceiling.
+    # FREE_ONLY_MODE forces free-tier provider routing globally.
+    budget_tier = "free" if FREE_ONLY_MODE else BUDGET_TIER
+    if budget_tier != "any":
+        max_cost = _BUDGET_MAX_COST.get(budget_tier, 999.0)
         affordable = [pid for pid in ordered if _PROVIDER_COST_PER_1K_TOKENS.get(pid, 0.0) <= max_cost]
         if affordable:
             ordered = affordable
@@ -1663,15 +2045,25 @@ _WEATHER_RE = re.compile(r'\bweather\b.*\bin\b|\bweather\b.*\bfor\b|\b(forecast|
 _CURRENCY_RE = re.compile(r'(\d[\d,\.]*)\s*([A-Z]{3})\s+(?:to|in|→)\s*([A-Z]{3})',re.IGNORECASE)
 _CONVERT_RE = re.compile(r'(\d[\d,\.]*)\s*([\w]+)\s+(?:to|in|→)\s*([\w]+)',re.IGNORECASE)
 
+
+
+def _clarification_terminal_message() -> str:
+    return (
+        "Clarification required before I can continue. Please answer the clarification questions and I will proceed."
+    )
+
+
+def _budget_terminal_message(reason: str, elapsed_s: float = 0.0, tool_calls: int = 0) -> str:
+    if reason == "max_time_s":
+        suffix = f" (elapsed: {elapsed_s:.1f}s)" if elapsed_s else ""
+        return f"Execution budget reached: maximum runtime exceeded{suffix}. Please retry or narrow the task scope."
+    if reason == "max_tool_calls":
+        suffix = f" ({tool_calls} tool calls used)" if tool_calls else ""
+        return f"Execution budget reached: maximum tool calls exceeded{suffix}. Please retry with a tighter objective."
+    return "Execution budget reached before completion. Please retry with a narrower request."
+
 def _try_direct(task: str) -> Optional[str]:
     task_lc = (task or "").strip().lower()
-    if any(phrase in task_lc for phrase in ("what can you do", "what do you do", "help me", "help")):
-        return (
-            "I can help with coding, debugging, architecture, API design, tests, documentation, refactors, "
-            "code review, and implementation guidance. I can also inspect files, explain errors, and suggest fixes."
-        )
-    if task_lc in {"hi", "hello", "hey", "yo"} or task_lc.startswith(("hi ", "hello ", "hey ")):
-        return "Hello. I can help with coding, debugging, design, documentation, and project-level problem solving."
     if _TIME_RE2.search(task):
         loc = re.search(r'\b(?:in|at|for)\s+([A-Za-z][A-Za-z\s/]{1,30})\??$',task,re.IGNORECASE)
         return tool_get_time(loc.group(1).strip() if loc else "UTC")
@@ -1682,6 +2074,13 @@ def _try_direct(task: str) -> Optional[str]:
         from .tools_builtin import tool_currency
         return tool_currency(float(m.group(1).replace(',','')), m.group(2), m.group(3))
     return None
+
+
+def _provider_unavailable_message(task: str) -> str:
+    return (
+        "I could not reach any model provider for this turn. "
+        "Please retry in a moment, or configure at least one active provider key in Settings."
+    )
 
 
 _STRICT_HIGH_RISK_ACTIONS = {
@@ -1856,10 +2255,18 @@ def _strict_doubt_assessment(
     recent_conflict: str,
     confidence_threshold: float,
     evidence_threshold: int,
+    strict_no_guess_mode: bool = False,
+    session_id: str = "",
 ) -> Dict[str, Any]:
     reasons: List[str] = []
+    suppressed_reasons: List[str] = []
     score = 0.0
     kind = str(action.get("action", "")).strip()
+    clone_url = str(action.get("url", "") or "").strip()
+    explicit_repo_clone = (
+        kind == "clone_repo"
+        and bool(_GITHUB_URL_RE.search(task or "") or _GITHUB_URL_RE.search(clone_url))
+    )
 
     missing_fields = _missing_required_fields(action)
     if missing_fields:
@@ -1878,35 +2285,84 @@ def _strict_doubt_assessment(
         reasons.append("conflicting_tool_output")
         score += 0.20
 
-    if kind in _STRICT_HIGH_RISK_ACTIONS and llm_confidence < confidence_threshold:
-        reasons.append("low_model_confidence")
-        score += 0.20
+    if (
+        (strict_no_guess_mode or kind in _STRICT_HIGH_RISK_ACTIONS)
+        and llm_confidence < confidence_threshold
+    ):
+        if explicit_repo_clone:
+            suppressed_reasons.append("low_model_confidence")
+        else:
+            reasons.append("low_model_confidence")
+            score += 0.20
 
     if kind in _STRICT_HIGH_RISK_ACTIONS and evidence_hits < evidence_threshold:
-        reasons.append("weak_retrieval_evidence")
-        score += 0.25
+        if explicit_repo_clone:
+            suppressed_reasons.append("weak_retrieval_evidence")
+        else:
+            reasons.append("weak_retrieval_evidence")
+            score += 0.25
 
     if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_explicit_goal(task):
-        reasons.append("execution_contract_missing_goal")
-        score += 0.20
+        if explicit_repo_clone:
+            suppressed_reasons.append("execution_contract_missing_goal")
+        else:
+            reasons.append("execution_contract_missing_goal")
+            score += 0.20
     if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_complete_inputs(task):
-        reasons.append("execution_contract_missing_inputs")
-        score += 0.20
+        if explicit_repo_clone:
+            suppressed_reasons.append("execution_contract_missing_inputs")
+        else:
+            reasons.append("execution_contract_missing_inputs")
+            score += 0.20
     if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_constraints(task):
-        reasons.append("execution_contract_missing_constraints")
-        score += 0.10
+        if explicit_repo_clone:
+            suppressed_reasons.append("execution_contract_missing_constraints")
+        else:
+            reasons.append("execution_contract_missing_constraints")
+            score += 0.10
     if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_format_requirement(task):
-        reasons.append("execution_contract_missing_output_format")
-        score += 0.10
+        if explicit_repo_clone:
+            suppressed_reasons.append("execution_contract_missing_output_format")
+        else:
+            reasons.append("execution_contract_missing_output_format")
+            score += 0.10
 
     adversarial_issues = _adversarial_self_check_issues(task, action)
     if adversarial_issues:
         reasons.append("adversarial_self_check")
         score += 0.20
 
-    if kind in _STRICT_HIGH_RISK_ACTIONS and reasons:
+    if kind in _STRICT_HIGH_RISK_ACTIONS and reasons and not explicit_repo_clone:
         reasons.append("unsafe_side_effects")
         score += 0.15
+
+    if explicit_repo_clone and strict_no_guess_mode and suppressed_reasons:
+        event_ts = time.time()
+        repo_label = (clone_url or (task or "")[:120] or "clone_repo")[:120]
+        deduped_suppressed = list(dict.fromkeys(suppressed_reasons))
+        _push_activity({
+            "ts": event_ts,
+            "action": "strict_clone_bootstrap_exception",
+            "label": repo_label,
+            "status": "allowed",
+            "session": session_id or None,
+            "reason_codes": deduped_suppressed,
+        })
+        try:
+            record_strict_clone_bypass_event(
+                ts=event_ts,
+                session_id=session_id,
+                repo_url=clone_url,
+                label=repo_label,
+                reason_codes=deduped_suppressed,
+                details={
+                    "status": "allowed",
+                    "strict_no_guess_mode": strict_no_guess_mode,
+                    "task_excerpt": str(task or "")[:240],
+                },
+            )
+        except Exception:
+            pass
 
     deduped_reasons = list(dict.fromkeys(reasons))
     return {
@@ -2089,7 +2545,9 @@ def _call_openai(cfg: Dict, messages: List[Dict]) -> Dict[str, Any]:
         # Drop placeholder/comment keys (contain non-ASCII or start with '#')
         api_key = _raw_key if (_raw_key and _raw_key.isascii() and not _raw_key.startswith("#")) else ""
     # Consume vision model override (set by _smart_order_for_vision before the call).
-    model = cfg.pop("_vision_override", None) or _config["model"] or cfg.get("_selected_model") or cfg["default_model"]
+    model = cfg.pop("_vision_override", None) or _effective_model_for_provider(str(cfg.get("id") or ""), cfg)
+    if not model:
+        model = _effective_model_for_provider(str(cfg.get("id") or ""), cfg)
     is_local = cfg.get("local") and cfg.get("keyless")
 
     def _do_request():
@@ -2244,7 +2702,8 @@ def _call_claude_api(messages):
 
 
 def _call_single(pid: str, messages: List[Dict]) -> Dict[str, Any]:
-    cfg = PROVIDERS[pid]
+    cfg = dict(PROVIDERS[pid])
+    cfg["id"] = pid
     if cfg["openai_compat"]: return _call_openai(cfg, messages)
     if pid == "grok":         return _call_grok(messages)
     if pid == "claude":       return _call_claude_api(messages)
@@ -2312,6 +2771,7 @@ def call_llm_with_fallback(
     messages: List[Dict],
     task: str = "",
     provider_order: Optional[List[str]] = None,
+    source: str = "runtime",
 ) -> tuple[Dict, str]:
     import requests as _r
     tracer = None
@@ -2365,6 +2825,14 @@ def call_llm_with_fallback(
     last_err = None
     for pid in order:
         if _provider_temporarily_unavailable(pid):
+            if _is_demoted(pid):
+                attempts.append({
+                    "provider_id": pid,
+                    "provider": PROVIDERS.get(pid, {}).get("label", pid),
+                    "status": "demoted_skip",
+                    "error": _provider_demotion_reasons.get(pid, "provider temporarily demoted"),
+                })
+                continue
             attempts.append({
                 "provider_id": pid,
                 "provider": PROVIDERS.get(pid, {}).get("label", pid),
@@ -2412,6 +2880,7 @@ def call_llm_with_fallback(
         except Exception as e:
             last_err = e
             elapsed = max(0.0, time.time() - started)
+            _record_provider_failure(pid, str(e), source=source)
             if llm_counter is not None:
                 llm_counter.labels(provider=pid, status="error").inc()
             if llm_latency is not None:
@@ -2965,13 +3434,34 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     for _ in range(MAX_LOOP):
         # Budget checks
         if max_time_s > 0 and (time.time() - _budget_start) > max_time_s:
-            yield {"type": "budget_exceeded", "reason": "max_time_s",
-                   "elapsed_s": round(time.time() - _budget_start, 1)}
-            break
+            _elapsed = round(time.time() - _budget_start, 1)
+            _budget_evt = {"type": "budget_exceeded", "reason": "max_time_s", "elapsed_s": _elapsed}
+            yield _budget_evt
+            cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+            _msg = _budget_terminal_message("max_time_s", elapsed_s=_elapsed)
+            messages.append({"role": "assistant", "content": _msg})
+            yield {
+                "type": "done",
+                "content": _msg,
+                "provider": cfg.get("label", "Built-in"),
+                "model": _config["model"] or cfg.get("default_model", "budget-guard"),
+                "history": messages,
+            }
+            return
         if max_tool_calls > 0 and _tool_call_count >= max_tool_calls:
-            yield {"type": "budget_exceeded", "reason": "max_tool_calls",
-                   "tool_calls": _tool_call_count}
-            break
+            _budget_evt = {"type": "budget_exceeded", "reason": "max_tool_calls", "tool_calls": _tool_call_count}
+            yield _budget_evt
+            cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+            _msg = _budget_terminal_message("max_tool_calls", tool_calls=_tool_call_count)
+            messages.append({"role": "assistant", "content": _msg})
+            yield {
+                "type": "done",
+                "content": _msg,
+                "provider": cfg.get("label", "Built-in"),
+                "model": _config["model"] or cfg.get("default_model", "budget-guard"),
+                "history": messages,
+            }
+            return
         if _stopped():
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "",{})
             yield {"type":"done","content":"*(Stopped)*","provider":cfg.get("label","?"),
@@ -2992,11 +3482,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 action, pid, _llm_meta = _next_action(messages, clean_task)
             except AllProvidersExhausted:
                 provider_attempts = get_last_provider_attempts()
-                fallback_text = (
-                    "I could not reach a model provider for this turn, so I could not generate a full answer. "
-                    "Please retry in a moment. If this keeps happening, verify at least one provider key is active "
-                    "or run a local Ollama model so I always have a fallback path."
-                )
+                fallback_text = _provider_unavailable_message(clean_task)
                 messages.append({"role": "assistant", "content": fallback_text})
                 cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
                 yield {
@@ -3050,6 +3536,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 recent_conflict=_recent_conflict,
                 confidence_threshold=action_confidence_threshold,
                 evidence_threshold=action_evidence_threshold,
+                strict_no_guess_mode=_strict_mode,
             )
             if doubt.get("score", 0.0) > 0.0:
                 clarify_evt = _build_clarification_payload(
@@ -3061,9 +3548,11 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 yield clarify_evt
                 messages.append({"role": "assistant", "content": json.dumps(clarify_evt)})
                 cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
+                _clarify_msg = _clarification_terminal_message()
+                messages.append({"role": "assistant", "content": _clarify_msg})
                 yield {
                     "type": "done",
-                    "content": "",
+                    "content": _clarify_msg,
                     "provider": cfg.get("label", "?"),
                     "model": _config["model"] or cfg.get("default_model", "?"),
                     "history": messages,
@@ -3086,6 +3575,10 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 continue
 
         if kind == "clarify":
+            model_questions = action.get("questions", [])
+            if not isinstance(model_questions, list):
+                model_questions = []
+
             clarify_evt = {
                 "type": "clarify",
                 "schema": "nexus.clarification.v1",
@@ -3105,7 +3598,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     "doubt_score": 1.0,
                     "blocked_action": "clarify",
                 },
-                "questions": action.get("questions", []),
+                "questions": model_questions,
                 "reason_codes": ["explicit_model_clarification"],
             }
             yield clarify_evt
@@ -3113,9 +3606,15 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             # stream call receives this history and continues with full context
             messages.append({"role":"assistant","content":json.dumps(clarify_evt)})
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "",{})
-            yield {"type":"done","content":"","provider":cfg.get("label","?"),
-                   "model":_config["model"] or cfg.get("default_model","?"),
-                   "history":messages}   # full history returned and stored in session
+            _clarify_msg = _clarification_terminal_message()
+            messages.append({"role": "assistant", "content": _clarify_msg})
+            yield {
+                "type": "done",
+                "content": _clarify_msg,
+                "provider": cfg.get("label", "?"),
+                "model": _config["model"] or cfg.get("default_model", "?"),
+                "history": messages,
+            }   # full history returned and stored in session
             return
 
         if kind == "plan":
@@ -3926,22 +4425,60 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 # ── non-streaming wrapper ─────────────────────────────────────────────────────
 def run_agent_task(task, history, files=None, sid="", usage_principal: str = ""):
     tool_log, fallback_notice, final = [], "", None
+    clarify_evt: Optional[Dict[str, Any]] = None
+    budget_evt: Optional[Dict[str, Any]] = None
     ensemble_meta: Optional[Dict[str, Any]] = None
     for evt in stream_agent_task(task, history, files, sid=sid, usage_principal=usage_principal):
         if evt["type"]=="tool":        tool_log.append(f"{evt['icon']} **`{evt['action']}`** `{evt['label']}` → {evt['result']}")
         elif evt["type"]=="think":     tool_log.append(f"💭 *{evt['thought']}*")
         elif evt["type"]=="fallback":  fallback_notice = f"*↩️ Auto-fallback: {evt['chain']}*\n\n"
         elif evt["type"]=="ensemble":  ensemble_meta = evt
+        elif evt["type"]=="clarify":   clarify_evt = evt
+        elif evt["type"]=="budget_exceeded": budget_evt = evt
         elif evt["type"] in ("done","error"): final = evt
-    if not final: return {"result":"No response.","history":history,"provider":"?","model":"?"}
+    if not final:
+        if budget_evt:
+            reason = str(budget_evt.get("reason") or "")
+            elapsed_s = float(budget_evt.get("elapsed_s") or 0.0)
+            tool_calls = int(budget_evt.get("tool_calls") or 0)
+            return {
+                "result": _budget_terminal_message(reason, elapsed_s=elapsed_s, tool_calls=tool_calls),
+                "history": history,
+                "provider": "Built-in",
+                "model": "budget-guard",
+            }
+        if clarify_evt:
+            return {
+                "result": _clarification_terminal_message(),
+                "history": history,
+                "provider": "Built-in",
+                "model": "clarify",
+            }
+        return {
+            "result": "I could not produce a terminal response for this turn. Please retry.",
+            "history": history,
+            "provider": "Built-in",
+            "model": "no-terminal-event",
+        }
     if final["type"]=="error": return {"result":f"❌ {final['message']}","history":history,"provider":"none","model":"none"}
-    shown = (fallback_notice + ("\n\n".join(tool_log)+"\n\n---\n\n" if tool_log else "") + final["content"])
+    final_content = final.get("content", "")
+    if not str(final_content or "").strip() and clarify_evt:
+        final_content = _clarification_terminal_message()
+    elif not str(final_content or "").strip() and budget_evt:
+        final_content = _budget_terminal_message(
+            str(budget_evt.get("reason") or ""),
+            elapsed_s=float(budget_evt.get("elapsed_s") or 0.0),
+            tool_calls=int(budget_evt.get("tool_calls") or 0),
+        )
+    shown = (fallback_notice + ("\n\n".join(tool_log)+"\n\n---\n\n" if tool_log else "") + final_content)
     out: Dict[str, Any] = {
         "result": shown,
         "history": final.get("history", history),
         "provider": final["provider"],
         "model": final["model"],
     }
+    if clarify_evt:
+        out["clarify_event"] = clarify_evt
     if final.get("fallback_reason"):
         out["fallback_reason"] = final.get("fallback_reason")
     if final.get("provider_attempt_chain"):
@@ -4082,9 +4619,9 @@ def warmup_agent(
                    "content": "System ready. Acknowledge with one word."}]
     try:
         if provider_order:
-            _, pid = call_llm_with_fallback(warmup_msg, task, provider_order=provider_order)
+            _, pid = call_llm_with_fallback(warmup_msg, task, provider_order=provider_order, source="warmup")
         else:
-            _, pid, _ = call_llm_smart(warmup_msg, task)
+            _, pid = call_llm_with_fallback(warmup_msg, task, source="warmup")
         _WARMUP_CACHE[cache_key] = {
             "messages": warmup_msg,
             "provider": pid,
@@ -4169,18 +4706,24 @@ def get_provider_health() -> Dict[str, Any]:
     for pid, cfg in PROVIDERS.items():
         has_key = _has_key(cfg)
         is_limited = _is_rate_limited(pid)
+        is_demoted = _is_demoted(pid)
         cooldown_secs = max(0, int(_cooldowns.get(pid, 0) - time.time()))
+        demotion_secs = _demotion_remaining_seconds(pid)
         breaker = _provider_circuit(pid)
         circuit_status = breaker.status()
         circuit_state = circuit_status.get("state", "closed")
-        available = has_key and not is_limited and circuit_state != "open"
+        available = has_key and not is_limited and not is_demoted and circuit_state != "open"
         benchmarks = _PROVIDER_BENCHMARKS.get(pid, {})
+        effective_model = _effective_model_for_provider(pid, cfg)
+        free_usable = _is_provider_free_usable(pid, cfg)
 
         status = "ready" if available else "unconfigured"
         if has_key and circuit_state == "open":
             status = "circuit_open"
         elif has_key and is_limited:
             status = "rate_limited"
+        elif has_key and is_demoted:
+            status = "demoted"
         elif has_key and circuit_state == "half_open":
             status = "recovering"
 
@@ -4194,6 +4737,10 @@ def get_provider_health() -> Dict[str, Any]:
             "local": cfg.get("local", False),
             "rate_limited": is_limited,
             "cooldown_remaining_seconds": cooldown_secs,
+            "demoted": is_demoted,
+            "demotion_remaining_seconds": demotion_secs,
+            "demotion_reason": _provider_demotion_reasons.get(pid, ""),
+            "free_usable": free_usable,
             "circuit_breaker": circuit_status,
             "capabilities": PROVIDER_CAPABILITIES.get(pid, {}),
             "benchmarks": {
@@ -4204,6 +4751,7 @@ def get_provider_health() -> Dict[str, Any]:
             },
             "openai_compat": cfg.get("openai_compat", False),
             "default_model": cfg.get("default_model", ""),
+            "effective_model": effective_model,
         })
     return {"providers": result, "timestamp": time.time()}
 
@@ -4241,16 +4789,95 @@ def get_providers_list():
     for pid, cfg in PROVIDERS.items():
         has_key = _has_key(cfg)
         cooling = _is_rate_limited(pid)
+        demoted = _is_demoted(pid)
         circuit_status = _provider_circuit(pid).status()
         circuit_state = circuit_status.get("state", "closed")
-        available = has_key and not cooling and circuit_state != "open"
+        available = has_key and not cooling and not demoted and circuit_state != "open"
+        effective_model = _effective_model_for_provider(pid, cfg)
         result.append({"id":pid,"label":cfg["label"],
-                       "model":_config["model"] or cfg["default_model"],
+                       "model":effective_model,
                        "available":available,"has_key":has_key,
                        "rate_limited":cooling,
                        "cooldown_remaining":max(0,int(_cooldowns.get(pid,0)-time.time())),
+                       "demoted":demoted,
+                       "demotion_remaining":_demotion_remaining_seconds(pid),
+                       "demotion_reason":_provider_demotion_reasons.get(pid, ""),
+                       "free_usable":_is_provider_free_usable(pid, cfg),
                        "circuit_state":circuit_state,
                        "keyless":cfg.get("keyless",False),
                        "openai_compat":cfg.get("openai_compat",False),
-                       "local":cfg.get("local",False)})
+                       "local":cfg.get("local",False),
+                       "opt_in":cfg.get("opt_in",False),
+                       "free_tier":cfg.get("free_tier")})
     return result
+
+
+def get_free_provider_diagnostics() -> Dict[str, Any]:
+    providers = []
+    retained_clone_bypass_events = [
+        event for event in activity_log
+        if str(event.get("action") or "") == "strict_clone_bootstrap_exception"
+    ]
+    retained_latest_ts = max((float(event.get("ts") or 0.0) for event in retained_clone_bypass_events), default=0.0)
+    persisted_clone_bypass_count = len(retained_clone_bypass_events)
+    latest_clone_bypass_ts = retained_latest_ts
+    try:
+        persisted_clone_bypass_count = count_strict_clone_bypass_events()
+        latest_events = list_strict_clone_bypass_events(limit=1)
+        latest_clone_bypass_ts = float(latest_events[0].get("ts") or 0.0) if latest_events else retained_latest_ts
+    except Exception:
+        pass
+    for pid, cfg in PROVIDERS.items():
+        has_key = _has_key(cfg)
+        rate_limited = _is_rate_limited(pid)
+        demoted = _is_demoted(pid)
+        circuit_state = _provider_circuit(pid).status().get("state", "closed")
+        model = _effective_model_for_provider(pid, cfg)
+        free_usable = _is_provider_free_usable(pid, cfg)
+        configured = has_key or bool(cfg.get("keyless", False))
+        currently_usable = configured and free_usable and not rate_limited and not demoted and circuit_state != "open"
+        reasons: List[str] = []
+        free_tier = cfg.get("free_tier") or {}
+        if not free_tier.get("available", False):
+            reasons.append("no_free_tier")
+        elif not configured:
+            reasons.append("not_configured")
+        elif configured and not free_usable:
+            reasons.append("model_not_in_free_allowlist")
+        if rate_limited:
+            reasons.append("rate_limited")
+        if demoted:
+            reasons.append("demoted")
+        if circuit_state == "open":
+            reasons.append("circuit_open")
+        providers.append({
+            "id": pid,
+            "label": cfg.get("label", pid),
+            "configured": configured,
+            "free_usable": free_usable,
+            "currently_usable": currently_usable,
+            "model": model,
+            "reasons": reasons,
+            "cooldown_remaining_seconds": max(0, int(_cooldowns.get(pid, 0) - time.time())),
+            "demotion_remaining_seconds": _demotion_remaining_seconds(pid),
+            "demotion_reason": _provider_demotion_reasons.get(pid, ""),
+        })
+
+    return {
+        "free_only_mode": FREE_ONLY_MODE,
+        "budget_tier": BUDGET_TIER,
+        "providers": providers,
+        "summary": {
+            "configured": sum(1 for p in providers if p["configured"]),
+            "free_usable": sum(1 for p in providers if p["free_usable"]),
+            "currently_usable": sum(1 for p in providers if p["currently_usable"]),
+            "strict_clone_bypass_count": persisted_clone_bypass_count,
+        },
+        "strict_clone_bypass": {
+            "count": persisted_clone_bypass_count,
+            "latest_ts": latest_clone_bypass_ts or None,
+            "window": "database_persistent_total",
+            "retained_window_count": len(retained_clone_bypass_events),
+        },
+        "timestamp": time.time(),
+    }
