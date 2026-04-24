@@ -181,7 +181,7 @@ def update_config(provider=None, model=None, temperature=None, persona=None,
 # ── env ───────────────────────────────────────────────────────────────────────
 GH_TOKEN    = os.getenv("GH_TOKEN", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "")
-MAX_LOOP    = 16
+MAX_LOOP    = 24
 COOLDOWN_SECONDS = int(os.getenv("RATE_LIMIT_COOLDOWN", "60"))
 
 # ── Swarm View activity log ───────────────────────────────────────────────────
@@ -1634,11 +1634,17 @@ Rules:
 GITHUB REPO WORKFLOW (critical — follow this exactly when given a GitHub URL):
 When the user mentions a GitHub URL with any development intent ("help", "develop", "continue",
 "improve", "fix", "build", "work on"), you MUST follow this sequence without asking:
-  1. clone_repo the URL immediately
-  2. list_files **/* to see the structure
-  3. read_file README.md (or the main entry point)
-  4. read_file 2-3 key source files to understand the current state
-  5. respond with: what the project is, current state, what you found, and concrete next steps
+  1. clone_repo the URL immediately.
+  2. The clone_repo result includes "Local path: /tmp/ca_session_XXXX/RepoName" — remember the
+     FOLDER NAME (e.g. "RepoName") which is the relative path prefix for all subsequent reads.
+  3. read_file <FolderName>/README.md  (use the folder name from step 2, NOT just "README.md")
+  4. read_file <FolderName>/<MainSourceFile> — 2-3 key files to understand the current state.
+     Never call list_files more than once. Never retry read_file with the same path.
+  5. respond with: what the project is, current state, what you found, and concrete next steps.
+PATH RULES:
+- The workdir is a session temp dir, NOT the repo root. Always prefix paths with the repo folder name.
+- If clone_repo says "Local path: /tmp/ca_session_abc/MyRepo", use: read_file MyRepo/README.md
+- If read_file returns "File not found", fix the prefix from the clone result — do NOT call list_files again.
 Do NOT stop after cloning. Do NOT ask "what would you like to do?" — read the code and
 immediately provide a useful analysis and development plan.
 ALWAYS finish with a respond action — never leave the user without an answer.
@@ -1767,7 +1773,17 @@ def tool_write_file(path: str, content: str, workdir: str) -> str:
 
 def tool_read_file(path: str, workdir: str) -> str:
     full = os.path.join(workdir, path)
-    if not os.path.exists(full): return f"File not found: {path}"
+    if not os.path.exists(full):
+        # Help the model recover without looping: list immediate subdirs that may contain the file.
+        try:
+            subdirs = [d for d in os.listdir(workdir) if os.path.isdir(os.path.join(workdir, d)) and not d.startswith(".")]
+            hint = f" Available subdirectories: {', '.join(subdirs[:8])}" if subdirs else ""
+        except Exception:
+            hint = ""
+        return (
+            f"File not found: {path}.{hint} "
+            "If you cloned a repo, prefix the path with the repo folder name shown in the clone_repo result."
+        )
     with open(full, "r", encoding="utf-8", errors="replace") as f: content = f.read()
     lines = content.splitlines()
     preview = "\n".join(lines[:300])
@@ -3560,20 +3576,36 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 }
                 return
 
-        if kind in ("run_command", "clone_repo"):
-            _sig = _action_sig(action)
-            _tool_attempts[_sig] = _tool_attempts.get(_sig, 0) + 1
-            if _tool_attempts[_sig] > 2:
+        # Guard every tool kind against loops — list_files/read_file are especially prone to
+        # repeating the same failing call without making progress.
+        _sig = _action_sig(action)
+        _tool_attempts[_sig] = _tool_attempts.get(_sig, 0) + 1
+        _max_repeats = 1 if kind in ("list_files",) else 2
+        if _tool_attempts[_sig] > _max_repeats:
+            if kind == "list_files":
+                blocked = (
+                    "❌ list_files called with the same pattern again — you already have this listing. "
+                    "Use the paths shown in the previous list_files result to construct the correct read_file path. "
+                    "Do NOT call list_files again."
+                )
+            elif kind == "read_file":
+                blocked = (
+                    f"❌ read_file '{action.get('path','')}' already attempted. "
+                    "The file was not found at that path. "
+                    "Look at the list_files output you already have, find the correct relative path, and try once with the right path. "
+                    "If you cloned a repo, the folder name is shown in the clone_repo result under 'Local path:' — use that folder name as a prefix."
+                )
+            else:
                 blocked = (
                     "❌ Repeated tool call blocked to avoid loop. "
-                    "Summarize the blocker and ask one precise follow-up question."
+                    "Summarize what you have found so far and respond to the user."
                 )
-                yield {"type":"tool", "icon":TOOL_ICONS.get(kind, "🔧"), "action":kind,
-                       "label":str(action)[:120], "result":blocked,
-                       "file_path":None, "file_content":None, "artifact":False}
-                messages.append({"role":"assistant","content":json.dumps(action)})
-                messages.append({"role":"user","content":f"Tool result:\n{blocked}\n\nContinue."})
-                continue
+            yield {"type":"tool", "icon":TOOL_ICONS.get(kind, "🔧"), "action":kind,
+                   "label":str(action)[:120], "result":blocked,
+                   "file_path":None, "file_content":None, "artifact":False}
+            messages.append({"role":"assistant","content":json.dumps(action)})
+            messages.append({"role":"user","content":f"Tool result:\n{blocked}\n\nContinue."})
+            continue
 
         if kind == "clarify":
             model_questions = action.get("questions", [])
