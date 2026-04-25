@@ -1613,6 +1613,10 @@ def _get_native_tools_system_prompt(max_chars: int = 4000) -> str:
         "Use the provided function tools to accomplish tasks.  "
         "When the task is complete or you have a final answer, call the "
         "'respond' tool (or reply as plain text if no further tool is needed).\n\n"
+        "Output format:\n"
+        "- Always write your final answer as markdown prose.\n"
+        "- NEVER return a raw JSON object or JSON array as your final answer.\n"
+        "- Use code blocks only for code/commands, not for general text.\n\n"
         "Rules:\n"
         "- Call clarify only for new project creation where architecture choices matter (2-4 questions max).\n"
         "- Plan BEFORE building 3+ files.\n"
@@ -1620,6 +1624,7 @@ def _get_native_tools_system_prompt(max_chars: int = 4000) -> str:
         "- Use run_command conservatively; never run rm -rf, sudo, or destructive ops.\n"
         "- Never ask for information you can obtain with tools.\n"
         "- For GitHub URLs with development intent, clone_repo immediately then proceed.\n"
+        "- Keep responses concise; 1-3 sentences per section unless depth is essential.\n"
     )
     custom = _get_custom_instructions()
     if custom:
@@ -3543,8 +3548,9 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                       f"then immediately respond with your full analysis. "
                       f"Do NOT read every file. Do NOT call write_file or run_command on this first turn.\n\n"
                       f"Original request: {clean_task}\n\n"
-                      f"Respond with: what the project is, its current state, your assessment, "
-                      f"and 3-5 prioritised next steps.")
+                      f"Respond in markdown prose (no raw JSON): briefly describe what the project is, "
+                      f"its current state, your assessment, and 3-5 bullet-point next steps. "
+                      f"Be concise — 2-3 sentences per section max.")
 
     history_list = list(history)
     raw_tokens = sum(item.get("tokens", 0) for item in CONTEXT_WINDOW.token_breakdown(history_list))
