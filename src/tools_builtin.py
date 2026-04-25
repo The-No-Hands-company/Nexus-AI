@@ -3160,6 +3160,144 @@ def list_tool_schemas() -> dict[str, dict]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Native tool-calling (OpenAI function-calling format)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_TOOL_DESCRIPTIONS: dict[str, str] = {
+    "calculate": "Evaluate a mathematical expression and return the result",
+    "weather": "Get current weather conditions for a location",
+    "currency": "Convert an amount between two currencies",
+    "convert": "Convert a value between units (length, weight, volume, data, temperature)",
+    "regex": "Test a regex pattern against text and return all matches",
+    "base64": "Base64-encode or -decode a string",
+    "json_format": "Pretty-print / validate a JSON string",
+    "get_time": "Return the current date and time, optionally in a given timezone",
+    "nexus_status": "Return live Nexus AI system status (DB, Redis, providers, RAM)",
+    "hash": "Hash a string with sha256, sha512, md5, or sha1",
+    "uuid": "Generate a UUID (v1, v3, v4, or v5)",
+    "qr_code": "Generate a QR code image URL for a text string",
+    "csv_to_json": "Convert CSV text to a JSON array",
+    "json_to_csv": "Convert a JSON array of objects to CSV text",
+    "xml_parse": "Parse XML and return a JSON dict, or evaluate an XPath expression",
+    "url_encode": "URL-encode or URL-decode a string",
+    "url_decode": "URL-decode a string",
+    "jwt_decode": "Inspect a JWT payload without verifying the signature",
+    "color_convert": "Convert a color between hex, rgb, and hsl formats",
+    "select_model": "Select the best LLM model for a given task description",
+    "write_file": "Write text content to a file in the working directory",
+    "read_file": "Read a text file from the working directory",
+    "list_files": "List files and directories at a path in the working directory",
+    "delete_file": "Delete a file from the working directory",
+    "move_file": "Move or rename a file within the working directory",
+    "copy_file": "Copy a file within the working directory",
+    "clone_repo": "Clone a Git repository URL into the working directory",
+    "run_command": "Run a sandboxed shell command in the working directory",
+    "commit_push": "Stage all changes, commit with a message, and push to the remote",
+    "create_repo": "Create a new GitHub repository using the gh CLI",
+    "search_in_files": "Search files recursively with a regex pattern, return matching lines",
+    "create_directory": "Create a directory (and parents) in the working directory",
+    "zip_files": "Create a ZIP archive from files or directories",
+    "unzip_files": "Extract a ZIP archive into a destination directory",
+    "git_status": "Show the current git working tree status (short format)",
+    "git_log": "Show recent git commit history",
+    "git_diff": "Show git diff against a reference (default HEAD)",
+    "git_checkout": "Checkout a git branch, optionally creating it",
+    "git_pull": "Pull latest changes from the remote git repository",
+    "create_pull_request": "Create a GitHub pull request using the gh CLI",
+    "list_issues": "List GitHub issues using the gh CLI",
+    "create_issue": "Create a GitHub issue using the gh CLI",
+    "read_page": "Fetch a web page and return its readable text content",
+    "api_call": "Make an HTTP request (GET, POST, etc.) to an external URL",
+    "youtube_transcript": "Extract subtitles/transcript from a YouTube video URL",
+    "youtube": "Get metadata and transcript preview for a YouTube video",
+    "generate_image": "Generate an image from a text prompt via an image generation API",
+    "rag_ingest": "Ingest text or a file into the RAG document store",
+    "rag_query": "Semantic search of the RAG document store for relevant information",
+    "rag_status": "Return RAG system statistics (ingested chunks, query count, etc.)",
+    "inspect_db": "Inspect a database schema — list tables, columns, types, row counts",
+    "query_db": "Run a read-only SELECT query against a SQLite or PostgreSQL database",
+    "pg_query": "Run a read-only SELECT query against a PostgreSQL database",
+    "db_migrate": "Apply a DDL migration SQL string (dry_run=True by default)",
+    "cron_schedule": "Create a recurring background task with a schedule (e.g. '5m', '1d')",
+    "cron_list": "List all scheduled background tasks with their status",
+    "cron_cancel": "Cancel a scheduled background task by its job ID",
+    "kg_store": "Store or update an entity with facts and relations in the knowledge graph",
+    "kg_query": "Search the knowledge graph for entities matching a query",
+    "kg_list": "List entities in the knowledge graph, optionally filtered by type",
+    "diff": "Show a unified diff between two text strings",
+    "read_csv": "Read a CSV file and return a formatted table",
+    "write_csv": "Write a list-of-lists to a CSV file",
+    "read_pdf": "Extract text from a PDF file",
+    "read_docx": "Extract text and structure from a Word (.docx) document",
+    "read_xlsx": "Extract data from an Excel (.xlsx) spreadsheet",
+    "read_pptx": "Extract text from a PowerPoint (.pptx) presentation",
+    "inspect_sqlite": "Inspect a SQLite database schema or run a read-only query",
+    "sqlite_query": "Run a read-only SQL query against a SQLite database",
+    "inspect_postgres": "Inspect a PostgreSQL database schema or run a read-only query",
+    "stt": "Transcribe speech audio to text",
+    "tts": "Convert text to speech audio and save to a file",
+    "audio_analyse": "Analyse an audio file (transcription, language, sentiment)",
+    "vision_understand": "Describe or analyse an image using a vision model",
+    "ocr": "Extract text from an image using OCR",
+    "screenshot": "Capture a screenshot of a web page as a PNG",
+    "web_search": "Search the web for current information using DuckDuckGo or Brave",
+    "web_scrape_structured": "Fetch a page and extract structured data using CSS selectors",
+    "rss_fetch": "Fetch and parse an RSS or Atom feed",
+    "sitemap_crawl": "Discover URLs from a sitemap.xml",
+    "check_url_status": "Check HTTP status of one or more URLs",
+    "generate_image_local": "Generate an image locally via Ollama/ComfyUI backend",
+    "generate_video": "Generate a short video clip from a text prompt",
+    "image_edit": "Edit an existing image using an inpainting prompt",
+}
+
+_JSON_TYPE_MAP: dict[str, str] = {
+    "str": "string",
+    "number": "number",
+    "int": "integer",
+    "list": "array",
+    "bool": "boolean",
+}
+
+
+def build_openai_tools(include: set[str] | None = None) -> list[dict]:
+    """Build an OpenAI-compatible tools array from the _TOOL_SCHEMAS registry.
+
+    Each tool becomes a ``{"type": "function", "function": {...}}`` entry
+    suitable for passing as ``tools=`` in chat/completions requests.
+
+    Args:
+        include: optional set of tool names to include.  ``None`` includes all.
+    """
+    tools: list[dict] = []
+    for name, schema in _TOOL_SCHEMAS.items():
+        if include is not None and name not in include:
+            continue
+        required_fields: list[str] = schema.get("required", [])
+        optional_fields: list[str] = schema.get("optional", [])
+        type_checks: dict[str, str] = schema.get("types", {})
+
+        props: dict[str, dict] = {}
+        for field in required_fields + optional_fields:
+            raw_type = type_checks.get(field, "str")
+            json_type = _JSON_TYPE_MAP.get(raw_type, "string")
+            props[field] = {"type": json_type}
+
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": name,
+                "description": _TOOL_DESCRIPTIONS.get(name, f"Execute the {name} tool"),
+                "parameters": {
+                    "type": "object",
+                    "properties": props,
+                    "required": required_fields,
+                },
+            },
+        })
+    return tools
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Per-tool per-session Rate Limiting
 # ─────────────────────────────────────────────────────────────────────────────
 

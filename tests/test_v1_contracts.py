@@ -3042,6 +3042,70 @@ class TestSprintE(unittest.TestCase):
         self.assertIn("out_tokens", tc_event)
         self.assertIn("total", tc_event)
 
+    def test_strict_no_guess_blocks_on_nonzero_doubt(self):
+        """Strict no-guess mode should stop execution and emit clarify when doubt is non-zero."""
+        from unittest.mock import patch
+        from src.agent import _config as agent_config, stream_agent_task
+
+        fake_action = {"action": "respond", "content": "hello", "confidence": 0.40}
+        old_strict = agent_config.get("strict_no_guess_mode", True)
+        old_conf = agent_config.get("strict_confidence_threshold", 0.95)
+        agent_config["strict_no_guess_mode"] = True
+        agent_config["strict_confidence_threshold"] = 0.95
+        try:
+            with patch("src.agent.call_llm_smart", return_value=(fake_action, "llm7", {})), \
+                 patch("src.agent.get_memory_context", return_value=""), \
+                 patch("src.agent.kg_to_context_string", return_value=""):
+                events = list(stream_agent_task("say hello", [], sid=""))
+        finally:
+            agent_config["strict_no_guess_mode"] = old_strict
+            agent_config["strict_confidence_threshold"] = old_conf
+
+        types = [e["type"] for e in events]
+        self.assertIn("clarify", types)
+        done_evt = next(e for e in events if e["type"] == "done")
+        self.assertIn("Clarification required", done_evt.get("content", ""))
+
+    def test_strict_doubt_allows_explicit_repo_clone_bootstrap(self):
+        """Strict gating should not block clone_repo when an explicit GitHub repo URL is provided."""
+        from unittest.mock import patch
+        from src.agent import _strict_doubt_assessment, activity_log
+        from src.db import clear_strict_clone_bypass_events, list_strict_clone_bypass_events
+
+        task = "help me with developing https://github.com/Zajfan/Cause-Of-Death further please"
+        action = {
+            "action": "clone_repo",
+            "url": "https://github.com/Zajfan/Cause-Of-Death",
+            "confidence": 0.25,
+        }
+        activity_log.clear()
+        clear_strict_clone_bypass_events()
+        try:
+            with patch("src.agent._adversarial_self_check_issues", return_value=[]):
+                doubt = _strict_doubt_assessment(
+                    task=task,
+                    action=action,
+                    llm_confidence=0.25,
+                    evidence_hits=0,
+                    recent_conflict="",
+                    confidence_threshold=0.95,
+                    evidence_threshold=1,
+                    strict_no_guess_mode=True,
+                    session_id="sid-test",
+                )
+        finally:
+            clone_events = [e for e in activity_log if e.get("action") == "strict_clone_bootstrap_exception"]
+            persisted_events = list_strict_clone_bypass_events(limit=10)
+
+        self.assertEqual(doubt.get("score", -1), 0.0)
+        self.assertEqual(doubt.get("reasons", []), [])
+        self.assertEqual(len(clone_events), 1)
+        self.assertEqual(clone_events[0].get("status"), "allowed")
+        self.assertIn("low_model_confidence", clone_events[0].get("reason_codes", []))
+        self.assertEqual(len(persisted_events), 1)
+        self.assertEqual(persisted_events[0].get("session_id"), "sid-test")
+        self.assertIn("low_model_confidence", persisted_events[0].get("reason_codes", []))
+
     def test_stream_emits_trace_event_after_think(self):
         """A think step followed by respond should emit a 'trace' SSE event."""
         from unittest.mock import patch
@@ -4155,11 +4219,50 @@ class TestSprintH(unittest.TestCase):
         """GET /swarm/activity?limit=5 respects the limit."""
         # Seed 10 events
         from src.agent import activity_log, _push_activity
+        activity_log.clear()
         for i in range(10):
             _push_activity({"ts": 0, "action": "test", "label": str(i), "status": "done", "session": "t"})
         response = client.get("/swarm/activity?limit=5")
         payload = response.json()
         self.assertLessEqual(len(payload["events"]), 5)
+
+    def test_swarm_activity_filters_by_action_and_timestamp(self):
+        """GET /swarm/activity supports action and since_ts filters."""
+        from src.agent import activity_log
+        from src.db import clear_strict_clone_bypass_events, record_strict_clone_bypass_event
+
+        activity_log.clear()
+        clear_strict_clone_bypass_events()
+        record_strict_clone_bypass_event(100.0, repo_url="https://github.com/example/repo-a", label="repo-a", reason_codes=["low_model_confidence"])
+        record_strict_clone_bypass_event(300.0, repo_url="https://github.com/example/repo-b", label="repo-b", reason_codes=["execution_contract_missing_goal"])
+
+        response = client.get("/swarm/activity?action=strict_clone_bootstrap_exception&since_ts=150")
+        payload = response.json()
+
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["unfiltered_total"], 2)
+        self.assertEqual(payload["events"][0]["label"], "repo-b")
+        self.assertEqual(payload["filters"]["action"], "strict_clone_bootstrap_exception")
+        self.assertEqual(payload["source"], "persistent")
+
+    def test_free_diagnostics_exposes_strict_clone_bypass_count(self):
+        """GET /providers/free-diagnostics reports strict clone bypass aggregate count."""
+        from src.agent import activity_log
+        from src.db import clear_strict_clone_bypass_events, record_strict_clone_bypass_event
+
+        activity_log.clear()
+        clear_strict_clone_bypass_events()
+        record_strict_clone_bypass_event(123.0, repo_url="https://github.com/example/repo-a", label="repo-a", reason_codes=["low_model_confidence"])
+        record_strict_clone_bypass_event(124.0, repo_url="https://github.com/example/repo-b", label="repo-b", reason_codes=["weak_retrieval_evidence"])
+
+        response = client.get("/providers/free-diagnostics")
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary"]["strict_clone_bypass_count"], 2)
+        self.assertEqual(payload["strict_clone_bypass"]["count"], 2)
+        self.assertEqual(payload["strict_clone_bypass"]["window"], "database_persistent_total")
+        self.assertEqual(payload["strict_clone_bypass"]["retained_window_count"], 0)
 
     def test_swarm_activity_log_populated_by_push(self):
         """_push_activity adds events to activity_log."""

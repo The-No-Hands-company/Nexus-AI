@@ -618,12 +618,13 @@ class PerPrincipalConcurrencyMiddleware(BaseHTTPMiddleware):
     Principal resolution order:
       1) Bearer token subject-ish fingerprint
       2) X-API-Key fingerprint
-      3) source IP
+      3) explicit browser/session identifier
+      4) source IP
     """
 
     def __init__(self, app: ASGIApp) -> None:
         super().__init__(app)
-        self._limit = int(os.getenv("MAX_CONCURRENT_PER_PRINCIPAL", "8"))
+        self._limit = int(os.getenv("MAX_CONCURRENT_PER_PRINCIPAL", "16"))
         self._active: dict[str, int] = {}
         self._lock = threading.Lock()
 
@@ -635,6 +636,15 @@ class PerPrincipalConcurrencyMiddleware(BaseHTTPMiddleware):
         api_key = request.headers.get("X-API-Key", "")
         if api_key:
             return f"api_key:{api_key[:12]}"
+        session_id = (
+            request.headers.get("X-Nexus-Session-Id", "")
+            or request.headers.get("X-Session-Id", "")
+            or request.query_params.get("session_id", "")
+            or request.query_params.get("sid", "")
+            or request.cookies.get("nexus_session_id", "")
+        ).strip()
+        if session_id:
+            return f"session:{session_id[:80]}"
         ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip()
         if not ip and request.client:
             ip = request.client.host

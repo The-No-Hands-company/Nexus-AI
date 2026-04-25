@@ -131,7 +131,7 @@ async function loadChat(cid){
   activeChatId=cid;
   const s=await fetch('/session',{method:'POST'}).then(r=>r.json());
   sid=s.session_id;
-  await fetch('/agent',{method:'POST',headers:{'Content-Type':'application/json'},
+  await fetch('/agent',{method:'POST',headers:{'Content-Type':'application/json','X-Nexus-Session-Id':sid||''},
     body:JSON.stringify({task:'__restore__',session_id:sid,_history:d.messages||[]})}).catch(()=>{});
   clearMessages();showChat();
   const history=d.messages||[];

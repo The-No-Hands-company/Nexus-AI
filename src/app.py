@@ -124,7 +124,12 @@ async def lifespan(app: FastAPI):
     init_users_table()
 
     try:
-        health = await wait_for_dependencies(timeout=10)
+        import asyncio
+        import inspect
+        if inspect.iscoroutinefunction(wait_for_dependencies):
+            health = await wait_for_dependencies(timeout=10)
+        else:
+            health = await asyncio.to_thread(wait_for_dependencies, 10)
         _logger.info("startup_deps_ready health=%s", health)
     except Exception as exc:
         _logger.warning("startup_deps_check_failed error=%s", exc)
