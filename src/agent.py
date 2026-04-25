@@ -2679,11 +2679,12 @@ def _call_openai(
             f"{' tools=' + str(len(tools)) if _use_tools else ''}",
             flush=True,
         )
+        _call_timeout = int(os.getenv("LLM_CALL_TIMEOUT_S", "30"))
         r = requests.post(
             cfg["base_url"].rstrip("/")+"/chat/completions",
             headers=headers,
             data=payload,
-            timeout=90)
+            timeout=_call_timeout)
         if r.status_code >= 400:
             body_txt = (r.text or "")[:300]
             raise RuntimeError(f"openai_compat_http_{r.status_code}: {body_txt}")

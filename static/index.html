@@ -722,9 +722,15 @@
     .bubble th,.bubble td{border:1px solid var(--border);padding:5px 8px;text-align:left}
     .bubble th{background:var(--surface2)}
 
+    .tool-details{margin:0 0 4px;border:1px solid color-mix(in srgb,var(--accent)18%,transparent);border-radius:9px;overflow:hidden;background:rgba(0,0,0,.18)}
+    .tool-details>summary{list-style:none;cursor:pointer;padding:5px 10px 5px 8px;font-size:.72rem;color:var(--muted);display:flex;align-items:center;gap:6px;user-select:none;outline:none}
+    .tool-details>summary::-webkit-details-marker{display:none}
+    .tool-details>summary::before{content:'▶';font-size:.55em;transition:transform .15s;display:inline-block;opacity:.6}
+    .tool-details[open]>summary::before{transform:rotate(90deg)}
+    .tool-details>summary:hover{color:var(--text)}
     .tool-step{display:flex;align-items:flex-start;gap:7px;font-size:.72rem;color:var(--muted);
-      background:rgba(0,0,0,.28);border-left:2px solid color-mix(in srgb,var(--accent)55%,transparent);
-      padding:5px 10px;border-radius:0 7px 7px 0;margin:2px 0;font-family:monospace;line-height:1.4;
+      border-top:1px solid rgba(255,255,255,.04);
+      padding:4px 10px;font-family:monospace;line-height:1.4;
       animation:fadeUp .14s ease}
     .tool-step .t-icon{flex-shrink:0;font-size:12px}
     .tool-step .t-label{color:var(--text);font-weight:600;margin-right:4px}
@@ -2639,7 +2645,13 @@ async function send(){
           scrollBottom();
 
         } else if(evt.type==='tool'){haptic('light');
-          if(!toolContainer){toolContainer=document.createElement('div');agentBub.appendChild(toolContainer)}
+          if(!toolContainer){
+            const det=document.createElement('details');
+            det.className='tool-details';det.open=true;
+            const sumEl=document.createElement('summary');
+            sumEl.textContent='Working…';det.appendChild(sumEl);
+            agentBub.appendChild(det);toolContainer=det;
+          }
           // Deduplicate: if the last tool step has the same action+label, increment its counter
           const lastStep = toolContainer.querySelector('.tool-step:last-child');
           const stepKey  = evt.action + '|' + evt.label;
@@ -2716,7 +2728,13 @@ async function send(){
           after.textContent=evt.after||'';
           diffBody.appendChild(before); diffBody.appendChild(after);
           diffCard.appendChild(diffHdr); diffCard.appendChild(diffBody);
-          if(!toolContainer){toolContainer=document.createElement('div');toolContainer.className='tool-container';agentBub.appendChild(toolContainer);}
+          if(!toolContainer){
+            const det=document.createElement('details');
+            det.className='tool-details';det.open=true;
+            const sumEl=document.createElement('summary');
+            sumEl.textContent='Working\u2026';det.appendChild(sumEl);
+            agentBub.appendChild(det);toolContainer=det;
+          }
           toolContainer.appendChild(diffCard);
           scrollBottom();
 
@@ -2751,20 +2769,20 @@ async function send(){
           scrollBottom();
 
         } else if(evt.type==='diagnostic'){
-          const reasonText = formatFallbackReason(evt.fallback_reason);
-          const chainText = String(evt.provider_attempt_chain || '').trim();
-          const diagEl = document.createElement('div');
-          diagEl.className = 'msg-meta';
-          diagEl.style.color = 'var(--amber)';
-          diagEl.textContent = `Diagnostics: ${reasonText || 'fallback'}${chainText ? ` · ${chainText}` : ''}`;
-          agentBub.appendChild(diagEl);
-          scrollBottom();
+          // Diagnostic info is already shown in the done-event footer — suppress inline display.
 
         } else if(evt.type==='done'){haptic('success');
           sawTerminalEvent = true;
           if (typeof swarmRecordProgressEvent === 'function') swarmRecordProgressEvent(evt);
           if(evt.input_tokens||evt.output_tokens) showTokenCount(evt.input_tokens,evt.output_tokens);
-          if(toolContainer){agentBub.appendChild(document.createElement('hr'))}
+          if(toolContainer){
+            // Collapse the working section and show a step count in the summary
+            const stepCount=toolContainer.querySelectorAll('.tool-step').length;
+            const sumEl=toolContainer.querySelector('summary');
+            if(sumEl) sumEl.textContent=`⚙️ ${stepCount} step${stepCount!==1?'s':''} used`;
+            toolContainer.open=false;
+            agentBub.appendChild(document.createElement('hr'));
+          }
           const finalText = evt.content||'';
           const combinedText = streamedMarkdown || finalText;
           const isClarifyTerminal = finalText.trim().startsWith('Clarification required before I can continue');
