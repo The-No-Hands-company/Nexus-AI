@@ -22,7 +22,7 @@ import os
 import time
 import hashlib
 import copy
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -292,10 +292,11 @@ class RAGSystem:
 
     def create_snapshot(self, label: Optional[str] = None) -> Dict[str, Any]:
         """Create a lightweight corpus snapshot for rollback."""
-        snapshot_id = label or f"snapshot_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        _now = datetime.now(timezone.utc)
+        snapshot_id = label or f"snapshot_{_now.strftime('%Y%m%d%H%M%S')}"
         docs = self.vector_store.get_all_documents()
         self._snapshots[snapshot_id] = {
-            "created_at": datetime.utcnow().isoformat() + "Z",
+            "created_at": _now.isoformat(),
             "corpus_version": self._corpus_version,
             "documents": docs,
         }
