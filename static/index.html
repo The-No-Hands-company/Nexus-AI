@@ -1343,6 +1343,74 @@ function formatFallbackReason(reason){
   return normalized.replace(/_/g, ' ');
 }
 
+function makeActivityTrace(hostWrap){
+  const details=document.createElement('details');
+  details.className='activity-details';
+  details.open=false;
+  const summary=document.createElement('summary');
+  summary.innerHTML='<span>🛰️</span><span class="activity-summary-label">Started agent run</span><span class="activity-summary-count">0 updates</span>';
+  const log=document.createElement('div');
+  log.className='activity-log';
+  details.appendChild(summary);
+  details.appendChild(log);
+  hostWrap.insertBefore(details, hostWrap.firstChild);
+
+  let count=0;
+  const labelEl=summary.querySelector('.activity-summary-label');
+  const countEl=summary.querySelector('.activity-summary-count');
+
+  const clip=(txt,max=180)=>{
+    const s=String(txt||'').replace(/\s+/g,' ').trim();
+    return s.length>max ? `${s.slice(0,max-1)}…` : s;
+  };
+
+  const stamp=()=>new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+  const push=(headline, detail='')=>{
+    if(!headline) return;
+    count += 1;
+    if(labelEl) labelEl.textContent = clip(headline, 84);
+    if(countEl) countEl.textContent = `${count} update${count===1?'':'s'}`;
+    const row=document.createElement('div');
+    row.className='activity-item';
+    const body=detail ? `${headline} — ${clip(detail, 220)}` : headline;
+    row.innerHTML=`<span class="activity-time">${stamp()}</span><span class="activity-text">${esc(body)}</span>`;
+    log.appendChild(row);
+    log.scrollTop=log.scrollHeight;
+  };
+
+  return {details, push};
+}
+
+function summarizeActivityEvent(evt){
+  if(!evt || !evt.type) return null;
+  const t=evt.type;
+  if(t==='status') return {headline: evt.message || 'Processing request'};
+  if(t==='complexity') return {headline: `Complexity routing: ${evt.level || 'unknown'}`};
+  if(t==='plan') return {headline:'Updated execution plan', detail:`${(evt.steps||[]).length} step(s)`};
+  if(t==='clarify') return {headline:'Needs clarification', detail:'Awaiting user input before continuing'};
+  if(t==='think') return {headline:'Reasoning step', detail:evt.thought || ''};
+  if(t==='subtask') return {headline:'Started subtask', detail:evt.subtask?.description || evt.description || evt.message || ''};
+  if(t==='subtask_done') return {headline:'Completed subtask', detail:evt.subtask?.description || evt.description || evt.message || evt.result || ''};
+  if(t==='autonomy_done') return {headline:'Autonomous run complete', detail:evt.description || evt.message || evt.result || ''};
+  if(t==='tool_start') return {headline:`Started ${evt.action || 'tool'} batch`, detail:evt.label || ''};
+  if(t==='tool') return {headline:`Tool: ${evt.action || 'unknown'}`, detail:evt.label || evt.result || ''};
+  if(t==='file_diff') return {headline:'Generated file diff', detail:evt.path || ''};
+  if(t==='image') return {headline:'Generated image artifact', detail:evt.prompt || ''};
+  if(t==='sandbox') return {headline:'Sandbox context set', detail:evt.repo || 'session workdir'};
+  if(t==='approval_required') return {headline:'Approval required', detail:evt.note || evt.approval_id || ''};
+  if(t==='fallback') return {headline:'Provider fallback activated', detail:evt.chain || ''};
+  if(t==='diagnostic') return {headline:'Diagnostics updated'};
+  if(t==='confidence') return {headline:`Confidence ${(Number(evt.value||0)*100).toFixed(0)}%`};
+  if(t==='trace') return {headline:'Execution trace received', detail:`${(evt.steps||[]).length} step(s)`};
+  if(t==='token') return {headline:'Token usage updated'};
+  if(t==='token_chunk') return {headline:'Streaming final response'};
+  if(t==='system') return {headline:evt.message || 'System update'};
+  if(t==='done') return {headline:'Response complete'};
+  if(t==='error') return {headline:'Response error', detail:evt.message || ''};
+  return null;
+}
+
 // ── STREAMING SEND ─────────────────────────────────────────────────────────────
 async function send(){
   const ta = document.getElementById('task');
@@ -1382,9 +1450,12 @@ async function send(){
   currentStreamId=crypto.randomUUID();
   abortController=new AbortController();
   const {wrap:agentWrap,bub:agentBub,row:agentRow}=addBubble('agent','');
+  const activityTrace = makeActivityTrace(agentWrap);
+  activityTrace.push('Queued user request', val);
   let toolContainer=null, gotFirst=false;
   let streamedMarkdown='';
   let hasTokenStream=false;
+  let loggedTokenStreamActivity=false;
   let streamElapsedSeconds=0;
   let sawAnySseEvent=false;
   let sawTerminalEvent=false;
@@ -1489,6 +1560,20 @@ async function send(){
         let evt;try{evt=JSON.parse(rawData)}catch{continue}
         sawAnySseEvent = true;
         if(!gotFirst){showTyping(false);gotFirst=true}
+
+        const act=summarizeActivityEvent(evt);
+        if(act){
+          if(evt.type==='token_chunk'){
+            if(!loggedTokenStreamActivity){
+              loggedTokenStreamActivity=true;
+              activityTrace.push(act.headline, act.detail||'');
+            }
+          } else if(evt.type==='token'){
+            // Token updates are noisy; keep only meaningful milestones in trace.
+          } else {
+            activityTrace.push(act.headline, act.detail||'');
+          }
+        }
 
         if(evt.type==='clarify'){
           sawClarifyEvent = true;
@@ -1792,6 +1877,7 @@ async function send(){
 
         } else if(evt.type==='done'){haptic('success');
           sawTerminalEvent = true;
+          activityTrace.details.open = false;
           if (typeof swarmRecordProgressEvent === 'function') swarmRecordProgressEvent(evt);
           if(evt.input_tokens||evt.output_tokens) showTokenCount(evt.input_tokens,evt.output_tokens);
           if(toolContainer){
@@ -1890,6 +1976,7 @@ async function send(){
 
         } else if(evt.type==='error'){
           sawTerminalEvent = true;
+          activityTrace.details.open = true;
           const msg = normalizeFrontendErrorMessage(evt.message || '');
           const isExhausted = msg.toLowerCase().includes('exhausted') ||
                               msg.toLowerCase().includes('rate limit') ||
