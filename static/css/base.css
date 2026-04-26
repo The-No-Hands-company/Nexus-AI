@@ -40,8 +40,16 @@ body.light {
   --border:#c7d2e0; --text:#1f2937; --muted:#64748b;
 }
 body.light, body.light-theme { color-scheme:light; }
-body.light .user .bubble { background:var(--accent); color:#fff; }
-body.light .agent .bubble { background:#fff; border-color:#e2e8f0; color:#1e293b; }
+body.light .user .bubble {
+  background:#eef4fb;
+  border-color:#c8d8ea;
+  color:#1e293b;
+}
+body.light .agent .bubble {
+  background:#fff;
+  border-color:#dbe7f4;
+  color:#1e293b;
+}
 body.light #sidebar { background:#fff; }
 body.light header, body.light footer { background:#fff; }
 body.light #drawer { background:#f8fafc; }

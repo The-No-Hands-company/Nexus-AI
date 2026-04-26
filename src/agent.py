@@ -2194,8 +2194,14 @@ _STRICT_HIGH_RISK_ACTIONS = {
     "create_repo", "api_call", "query_db", "db_migrate", "inspect_db",
 }
 _DESTRUCTIVE_ACTIONS = {
-    "write_file", "delete_file", "run_command", "clone_repo", "commit_push",
+    "delete_file", "run_command", "clone_repo", "commit_push",
     "create_repo", "api_call", "db_migrate",
+}
+_STRICT_EVIDENCE_REQUIRED_ACTIONS = {
+    "delete_file", "run_command", "commit_push", "create_repo", "api_call", "query_db", "db_migrate", "inspect_db",
+}
+_STRICT_EXECUTION_CONTRACT_ACTIONS = {
+    "delete_file", "run_command", "commit_push", "create_repo", "api_call", "query_db", "db_migrate", "inspect_db",
 }
 _STRICT_EVIDENCE_ACTIONS = {
     "web_search", "read_page", "api_call", "query_db", "inspect_db", "rag_query", "read_file",
@@ -2401,32 +2407,32 @@ def _strict_doubt_assessment(
             reasons.append("low_model_confidence")
             score += 0.20
 
-    if kind in _STRICT_HIGH_RISK_ACTIONS and evidence_hits < evidence_threshold:
+    if kind in _STRICT_EVIDENCE_REQUIRED_ACTIONS and evidence_hits < evidence_threshold:
         if explicit_repo_clone:
             suppressed_reasons.append("weak_retrieval_evidence")
         else:
             reasons.append("weak_retrieval_evidence")
             score += 0.25
 
-    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_explicit_goal(task):
+    if kind in _STRICT_EXECUTION_CONTRACT_ACTIONS and not _task_has_explicit_goal(task):
         if explicit_repo_clone:
             suppressed_reasons.append("execution_contract_missing_goal")
         else:
             reasons.append("execution_contract_missing_goal")
             score += 0.20
-    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_complete_inputs(task):
+    if kind in _STRICT_EXECUTION_CONTRACT_ACTIONS and not _task_has_complete_inputs(task):
         if explicit_repo_clone:
             suppressed_reasons.append("execution_contract_missing_inputs")
         else:
             reasons.append("execution_contract_missing_inputs")
             score += 0.20
-    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_constraints(task):
+    if kind in _STRICT_EXECUTION_CONTRACT_ACTIONS and not _task_has_constraints(task):
         if explicit_repo_clone:
             suppressed_reasons.append("execution_contract_missing_constraints")
         else:
             reasons.append("execution_contract_missing_constraints")
             score += 0.10
-    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_format_requirement(task):
+    if kind in _STRICT_EXECUTION_CONTRACT_ACTIONS and not _task_has_format_requirement(task):
         if explicit_repo_clone:
             suppressed_reasons.append("execution_contract_missing_output_format")
         else:
@@ -2438,7 +2444,7 @@ def _strict_doubt_assessment(
         reasons.append("adversarial_self_check")
         score += 0.20
 
-    if kind in _STRICT_HIGH_RISK_ACTIONS and reasons and not explicit_repo_clone:
+    if kind in _DESTRUCTIVE_ACTIONS and reasons and not explicit_repo_clone:
         reasons.append("unsafe_side_effects")
         score += 0.15
 
