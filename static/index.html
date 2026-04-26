@@ -1351,13 +1351,36 @@ function makeActivityTrace(hostWrap){
   summary.innerHTML='<span>🛰️</span><span class="activity-summary-label">Started agent run</span><span class="activity-summary-count">0 updates</span>';
   const log=document.createElement('div');
   log.className='activity-log';
+  const groupsWrap=document.createElement('div');
+  groupsWrap.className='activity-groups';
   details.appendChild(summary);
+  log.appendChild(groupsWrap);
   details.appendChild(log);
   hostWrap.insertBefore(details, hostWrap.firstChild);
 
   let count=0;
   const labelEl=summary.querySelector('.activity-summary-label');
   const countEl=summary.querySelector('.activity-summary-count');
+  const GROUPS=[
+    {key:'planning', title:'Planning'},
+    {key:'tooling', title:'Tooling'},
+    {key:'finalization', title:'Finalization'},
+  ];
+  const groupState={};
+  GROUPS.forEach(({key,title})=>{
+    const group=document.createElement('div');
+    group.className='activity-group';
+    group.dataset.group=key;
+    const head=document.createElement('div');
+    head.className='activity-group-head';
+    head.innerHTML=`<span>${title}</span><span class="activity-group-count">0</span>`;
+    const body=document.createElement('div');
+    body.className='activity-group-body';
+    group.appendChild(head);
+    group.appendChild(body);
+    groupsWrap.appendChild(group);
+    groupState[key]={count:0,body,countEl:head.querySelector('.activity-group-count')};
+  });
 
   const clip=(txt,max=180)=>{
     const s=String(txt||'').replace(/\s+/g,' ').trim();
@@ -1366,16 +1389,21 @@ function makeActivityTrace(hostWrap){
 
   const stamp=()=>new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
 
-  const push=(headline, detail='')=>{
+  const push=(headline, detail='', section='planning')=>{
     if(!headline) return;
     count += 1;
     if(labelEl) labelEl.textContent = clip(headline, 84);
     if(countEl) countEl.textContent = `${count} update${count===1?'':'s'}`;
+    const safeSection = groupState[section] ? section : 'planning';
+    groupState[safeSection].count += 1;
+    if(groupState[safeSection].countEl){
+      groupState[safeSection].countEl.textContent = String(groupState[safeSection].count);
+    }
     const row=document.createElement('div');
     row.className='activity-item';
     const body=detail ? `${headline} — ${clip(detail, 220)}` : headline;
     row.innerHTML=`<span class="activity-time">${stamp()}</span><span class="activity-text">${esc(body)}</span>`;
-    log.appendChild(row);
+    groupState[safeSection].body.appendChild(row);
     log.scrollTop=log.scrollHeight;
   };
 
@@ -1385,29 +1413,29 @@ function makeActivityTrace(hostWrap){
 function summarizeActivityEvent(evt){
   if(!evt || !evt.type) return null;
   const t=evt.type;
-  if(t==='status') return {headline: evt.message || 'Processing request'};
-  if(t==='complexity') return {headline: `Complexity routing: ${evt.level || 'unknown'}`};
-  if(t==='plan') return {headline:'Updated execution plan', detail:`${(evt.steps||[]).length} step(s)`};
-  if(t==='clarify') return {headline:'Needs clarification', detail:'Awaiting user input before continuing'};
-  if(t==='think') return {headline:'Reasoning step', detail:evt.thought || ''};
-  if(t==='subtask') return {headline:'Started subtask', detail:evt.subtask?.description || evt.description || evt.message || ''};
-  if(t==='subtask_done') return {headline:'Completed subtask', detail:evt.subtask?.description || evt.description || evt.message || evt.result || ''};
-  if(t==='autonomy_done') return {headline:'Autonomous run complete', detail:evt.description || evt.message || evt.result || ''};
-  if(t==='tool_start') return {headline:`Started ${evt.action || 'tool'} batch`, detail:evt.label || ''};
-  if(t==='tool') return {headline:`Tool: ${evt.action || 'unknown'}`, detail:evt.label || evt.result || ''};
-  if(t==='file_diff') return {headline:'Generated file diff', detail:evt.path || ''};
-  if(t==='image') return {headline:'Generated image artifact', detail:evt.prompt || ''};
-  if(t==='sandbox') return {headline:'Sandbox context set', detail:evt.repo || 'session workdir'};
-  if(t==='approval_required') return {headline:'Approval required', detail:evt.note || evt.approval_id || ''};
-  if(t==='fallback') return {headline:'Provider fallback activated', detail:evt.chain || ''};
-  if(t==='diagnostic') return {headline:'Diagnostics updated'};
-  if(t==='confidence') return {headline:`Confidence ${(Number(evt.value||0)*100).toFixed(0)}%`};
-  if(t==='trace') return {headline:'Execution trace received', detail:`${(evt.steps||[]).length} step(s)`};
-  if(t==='token') return {headline:'Token usage updated'};
-  if(t==='token_chunk') return {headline:'Streaming final response'};
-  if(t==='system') return {headline:evt.message || 'System update'};
-  if(t==='done') return {headline:'Response complete'};
-  if(t==='error') return {headline:'Response error', detail:evt.message || ''};
+  if(t==='status') return {headline: evt.message || 'Processing request', section:'planning'};
+  if(t==='complexity') return {headline: `Complexity routing: ${evt.level || 'unknown'}`, section:'planning'};
+  if(t==='plan') return {headline:'Updated execution plan', detail:`${(evt.steps||[]).length} step(s)`, section:'planning'};
+  if(t==='clarify') return {headline:'Needs clarification', detail:'Awaiting user input before continuing', section:'planning'};
+  if(t==='think') return {headline:'Reasoning step', detail:evt.thought || '', section:'planning'};
+  if(t==='subtask') return {headline:'Started subtask', detail:evt.subtask?.description || evt.description || evt.message || '', section:'planning'};
+  if(t==='subtask_done') return {headline:'Completed subtask', detail:evt.subtask?.description || evt.description || evt.message || evt.result || '', section:'planning'};
+  if(t==='autonomy_done') return {headline:'Autonomous run complete', detail:evt.description || evt.message || evt.result || '', section:'finalization'};
+  if(t==='tool_start') return {headline:`Started ${evt.action || 'tool'} batch`, detail:evt.label || '', section:'tooling'};
+  if(t==='tool') return {headline:`Tool: ${evt.action || 'unknown'}`, detail:evt.label || evt.result || '', section:'tooling'};
+  if(t==='file_diff') return {headline:'Generated file diff', detail:evt.path || '', section:'tooling'};
+  if(t==='image') return {headline:'Generated image artifact', detail:evt.prompt || '', section:'tooling'};
+  if(t==='sandbox') return {headline:'Sandbox context set', detail:evt.repo || 'session workdir', section:'planning'};
+  if(t==='approval_required') return {headline:'Approval required', detail:evt.note || evt.approval_id || '', section:'tooling'};
+  if(t==='fallback') return {headline:'Provider fallback activated', detail:evt.chain || '', section:'finalization'};
+  if(t==='diagnostic') return {headline:'Diagnostics updated', section:'finalization'};
+  if(t==='confidence') return {headline:`Confidence ${(Number(evt.value||0)*100).toFixed(0)}%`, section:'finalization'};
+  if(t==='trace') return {headline:'Execution trace received', detail:`${(evt.steps||[]).length} step(s)`, section:'finalization'};
+  if(t==='token') return {headline:'Token usage updated', section:'finalization'};
+  if(t==='token_chunk') return {headline:'Streaming final response', section:'finalization'};
+  if(t==='system') return {headline:evt.message || 'System update', section:'planning'};
+  if(t==='done') return {headline:'Response complete', section:'finalization'};
+  if(t==='error') return {headline:'Response error', detail:evt.message || '', section:'finalization'};
   return null;
 }
 
@@ -1451,7 +1479,7 @@ async function send(){
   abortController=new AbortController();
   const {wrap:agentWrap,bub:agentBub,row:agentRow}=addBubble('agent','');
   const activityTrace = makeActivityTrace(agentWrap);
-  activityTrace.push('Queued user request', val);
+  activityTrace.push('Queued user request', val, 'planning');
   let toolContainer=null, gotFirst=false;
   let streamedMarkdown='';
   let hasTokenStream=false;
@@ -1566,12 +1594,12 @@ async function send(){
           if(evt.type==='token_chunk'){
             if(!loggedTokenStreamActivity){
               loggedTokenStreamActivity=true;
-              activityTrace.push(act.headline, act.detail||'');
+              activityTrace.push(act.headline, act.detail||'', act.section||'planning');
             }
           } else if(evt.type==='token'){
             // Token updates are noisy; keep only meaningful milestones in trace.
           } else {
-            activityTrace.push(act.headline, act.detail||'');
+            activityTrace.push(act.headline, act.detail||'', act.section||'planning');
           }
         }
 
