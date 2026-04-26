@@ -106,6 +106,33 @@
   max-height:220px;
   overflow-y:auto;
 }
+.activity-groups {
+  display:flex;
+  flex-direction:column;
+}
+.activity-group {
+  border-top:1px solid rgba(255,255,255,.04);
+}
+.activity-group:first-child { border-top:none; }
+.activity-group-head {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  padding:5px 10px;
+  font-size:.67rem;
+  color:var(--muted);
+  text-transform:uppercase;
+  letter-spacing:.05em;
+  background:color-mix(in srgb,var(--surface2)75%,transparent);
+}
+.activity-group-count {
+  color:var(--teal);
+  font-weight:700;
+}
+.activity-group-body {
+  display:flex;
+  flex-direction:column;
+}
 .activity-item {
   display:flex;
   align-items:flex-start;
