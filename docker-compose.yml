@@ -1,0 +1,63 @@
+services:
+  # ── Ollama ───────────────────────────────────────────────────────────────────
+  # Local inference engine. Swap the image tag for your GPU vendor if needed.
+  # GPU passthrough requires NVIDIA Container Toolkit on the host.
+  ollama:
+    image: ollama/ollama:latest
+    container_name: nexus-ai-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    # Uncomment for GPU passthrough (NVIDIA):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/version"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── Nexus AI ─────────────────────────────────────────────────────────────────
+  nexus-ai:
+    image: ghcr.io/the-no-hands-company/nexus-ai:latest
+    container_name: nexus-ai
+    ports:
+      - "8000:8000"
+    environment:
+      # ── Deployment profile (dev | staging | prod | self-hosted | enterprise) ─
+      - NEXUS_PROFILE=${NEXUS_PROFILE:-dev}
+      # ── AI Provider config ────────────────────────────────────────────────
+      - PROVIDER=auto
+      - LLM_MODEL=glm-5.1:cloud
+      - OLLAMA_BASE_URL=http://ollama:11434/v1
+      # ── Optional API Keys (add your keys below) ────────────────────────────
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - CEREBRAS_API_KEY=${CEREBRAS_API_KEY:-}
+      - MISTRAL_API_KEY=${MISTRAL_API_KEY:-}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - COHERE_API_KEY=${COHERE_API_KEY:-}
+      - GITHUB_MODELS_TOKEN=${GITHUB_MODELS_TOKEN:-}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      - GROK_API_KEY=${GROK_API_KEY:-}
+      - CLAUDE_API_KEY=${CLAUDE_API_KEY:-}
+      # ── General config ─────────────────────────────────────────────────────
+      - GH_TOKEN=${GH_TOKEN:-}
+      - GITHUB_REPO=${GITHUB_REPO:-}
+      - PORT=8000
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  ollama-data:

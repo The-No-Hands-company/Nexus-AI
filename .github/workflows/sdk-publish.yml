@@ -1,0 +1,189 @@
+name: SDK Publish
+
+on:
+  push:
+    tags:
+      - "sdk/python/v*"
+      - "sdk/typescript/v*"
+      - "sdk/go/v*"
+  workflow_dispatch:
+    inputs:
+      sdk_target:
+        description: "SDK target to validate or publish"
+        required: true
+        type: choice
+        options:
+          - python
+          - typescript
+          - go
+      tag_name:
+        description: "Semver tag to validate, for example sdk/python/v0.2.0"
+        required: true
+      publish:
+        description: "Publish after validation"
+        required: false
+        default: "false"
+
+jobs:
+  python-sdk:
+    if: ${{ startsWith(github.ref_name, 'sdk/python/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.sdk_target == 'python') }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    defaults:
+      run:
+        working-directory: sdk/python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "SDK_TAG=${{ github.event.inputs.tag_name }}" >> "$GITHUB_ENV"
+          else
+            echo "SDK_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Verify tag and package metadata
+        run: |
+          python ../../scripts/verify_sdk_release.py --target python --tag "$SDK_TAG" --report ../../test-results/sdk-release-python.json
+
+      - name: Build package
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+          python -m build
+          python -m twine check dist/*
+
+      - name: Run SDK packaging tests
+        run: |
+          python -m pip install -r ../../requirements.txt
+          PYTHONPATH=../../ python -m pytest ../../tests/test_sdk_packaging.py -q
+
+      - name: Upload Python artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-python-dist
+          path: |
+            sdk/python/dist/*
+            test-results/sdk-release-python.json
+
+      - name: Publish to PyPI (trusted publishing)
+        if: ${{ startsWith(github.ref_name, 'sdk/python/v') || github.event.inputs.publish == 'true' }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdk/python/dist
+
+  typescript-sdk:
+    if: ${{ startsWith(github.ref_name, 'sdk/typescript/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.sdk_target == 'typescript') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: sdk/typescript
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "SDK_TAG=${{ github.event.inputs.tag_name }}" >> "$GITHUB_ENV"
+          else
+            echo "SDK_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Verify tag and package metadata
+        run: |
+          python ../../scripts/verify_sdk_release.py --target typescript --tag "$SDK_TAG" --report ../../test-results/sdk-release-typescript.json
+
+      - name: Install deps and build
+        run: |
+          npm install
+          npm run build
+          npm run typecheck
+          npm pack
+
+      - name: Upload TypeScript artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-typescript-dist
+          path: |
+            sdk/typescript/*.tgz
+            test-results/sdk-release-typescript.json
+
+      - name: Publish npm package
+        if: ${{ startsWith(github.ref_name, 'sdk/typescript/v') || github.event.inputs.publish == 'true' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+  go-sdk:
+    if: ${{ startsWith(github.ref_name, 'sdk/go/v') || (github.event_name == 'workflow_dispatch' && github.event.inputs.sdk_target == 'go') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: sdk/go
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Resolve release tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "SDK_TAG=${{ github.event.inputs.tag_name }}" >> "$GITHUB_ENV"
+          else
+            echo "SDK_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Verify tag and package metadata
+        run: |
+          python ../../scripts/verify_sdk_release.py --target go --tag "$SDK_TAG" --report ../../test-results/sdk-release-go.json
+
+      - name: Verify module builds
+        run: |
+          go mod tidy
+          go test ./...
+
+      - name: Upload Go release metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-go-release-metadata
+          path: test-results/sdk-release-go.json
+
+      - name: pkg.go.dev indexing note
+        run: |
+          echo "pkg.go.dev indexes Go module tags automatically."
+          echo "Validated module tag: $SDK_TAG"
+          echo "Once the tag is pushed, pkg.go.dev will ingest github.com/the-no-hands-company/nexus-ai/sdk/go."

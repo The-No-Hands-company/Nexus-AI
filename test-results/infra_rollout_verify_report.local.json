@@ -1,0 +1,35 @@
+{
+  "checks": [
+    {
+      "detail": "missing_keys=",
+      "name": "terraform:dev.tfvars",
+      "ok": true
+    },
+    {
+      "detail": "missing_keys=",
+      "name": "terraform:staging.tfvars",
+      "ok": true
+    },
+    {
+      "detail": "missing_keys=",
+      "name": "terraform:prod.tfvars",
+      "ok": true
+    },
+    {
+      "detail": "missing_keys=",
+      "name": "pulumi:Pulumi.dev.yaml",
+      "ok": true
+    },
+    {
+      "detail": "missing_keys=",
+      "name": "pulumi:Pulumi.staging.yaml",
+      "ok": true
+    },
+    {
+      "detail": "missing_keys=",
+      "name": "pulumi:Pulumi.prod.yaml",
+      "ok": true
+    }
+  ],
+  "ok": true
+}

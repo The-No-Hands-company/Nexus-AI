@@ -1,0 +1,93 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/the-no-hands-company/nexus-ai
+  pullPolicy: Always
+  tag: "latest"
+
+nameOverride: ""
+fullnameOverride: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8000
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  hosts:
+    - host: nexus.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls:
+    - secretName: nexus-ai-tls  # pragma: allowlist secret
+      hosts:
+        - nexus.example.com
+
+resources:
+  requests:
+    cpu: "250m"
+    memory: "512Mi"
+  limits:
+    cpu: "2"
+    memory: "2Gi"
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+  targetMemoryUtilizationPercentage: 80
+
+persistence:
+  enabled: true
+  storageClass: "standard"
+  size: 10Gi
+  mountPath: /data
+
+env:
+  PROVIDER: "auto"
+  MULTI_USER: "true"
+  WEB_WORKERS: "4"
+
+secrets:
+  jwtSecret: ""  # pragma: allowlist secret
+  databaseUrl: ""
+  openaiApiKey: ""
+  anthropicApiKey: ""
+  googleClientId: ""
+  googleClientSecret: ""
+  githubClientId: ""
+  githubClientSecret: ""
+  smtpHost: ""
+  smtpUser: ""
+  smtpPassword: ""
+
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxUnavailable: 0
+    maxSurge: 1
+
+terminationGracePeriodSeconds: 60
+
+probes:
+  liveness:
+    path: /health
+    initialDelaySeconds: 15
+    periodSeconds: 20
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readiness:
+    path: /health
+    initialDelaySeconds: 5
+    periodSeconds: 10
+    timeoutSeconds: 3
+    failureThreshold: 3

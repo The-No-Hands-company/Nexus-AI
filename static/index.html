@@ -1,0 +1,2398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Nexus AI</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="theme-color" content="#7c6af7">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Nexus AI">
+  <link rel="apple-touch-icon" href="/static/icon-192.png">
+  <link rel="manifest" href="/manifest.json">
+  <meta name="theme-color" content="#7c6af7">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Nexus AI">
+  <link rel="apple-touch-icon" href="/static/icon-192.svg">
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <link id="hljs-theme-link" rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <link rel="stylesheet" href="/static/css/base.css">
+  <link rel="stylesheet" href="/static/css/chat.css">
+  <link rel="stylesheet" href="/static/css/components.css">
+  <link rel="stylesheet" href="/static/css/sidebar.css">
+  <link rel="stylesheet" href="/static/css/panels.css">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
+  <!-- inline styles removed; all CSS lives in static/css/ -->
+</head>
+<body>
+
+<div id="drop-overlay"><div style="font-size:2.2rem">📎</div><p>Drop to attach</p></div>
+<div id="sidebar-overlay" onclick="closeSidebar()"></div>
+
+<!-- Settings modal -->
+<div id="settings-overlay" onclick="if(event.target===this)closeSettings()">
+  <div id="settings-modal">
+    <div class="modal-head">
+      <h2>⚙️ Settings</h2>
+      <button class="modal-close" onclick="closeSettings()">×</button>
+    </div>
+    <div class="field">
+      <label>Provider</label>
+      <select id="s-provider"></select>
+    </div>
+    <div class="field">
+      <label>Model <span style="color:var(--muted);font-weight:400;text-transform:none;font-size:.85em">(blank = default)</span></label>
+      <input type="text" id="s-model" placeholder="e.g. llama-3.3-70b-versatile">
+    </div>
+    <div class="field">
+      <label>Temperature</label>
+      <div class="temp-row">
+        <input type="range" id="s-temp" min="0" max="1" step="0.05"
+          oninput="document.getElementById('s-temp-val').textContent=this.value">
+        <span class="temp-val" id="s-temp-val">0.2</span>
+      </div>
+    </div>
+    <div class="field">
+      <label>Safety profile</label>
+      <select id="s-safety-profile"></select>
+      <div class="modal-hint" id="s-safety-hint">Choose how aggressively Nexus AI blocks destructive or high-stakes requests.</div>
+    </div>
+    <div class="field">
+      <label>Execution profile</label>
+      <select id="s-strict-profile"></select>
+      <div class="modal-hint" id="s-strict-hint">Strict is the default: safe-by-default with minimal interruption.</div>
+    </div>
+    <button class="btn-save" onclick="saveSettings()">Save</button>
+    <div class="settings-status" id="settings-status"></div>
+    <div style="border-top:1px solid var(--border);padding-top:14px;display:flex;flex-direction:column;gap:10px">
+      <div class="field">
+        <label>Theme</label>
+        <div style="display:flex;gap:8px">
+          <button class="btn-ghost" id="theme-light" onclick="setTheme('light')">☀️ Light</button>
+          <button class="btn-ghost" id="theme-dark"  onclick="setTheme('dark')" style="border-color:var(--accent);color:var(--text)">🌙 Dark</button>
+        </div>
+      </div>
+      <div class="field">
+        <label>Font size</label>
+        <div style="display:flex;gap:8px">
+          <button class="btn-ghost" onclick="setFontSize(13)">A</button>
+          <button class="btn-ghost" onclick="setFontSize(15)" style="font-size:15px">A</button>
+          <button class="btn-ghost" onclick="setFontSize(17)" style="font-size:17px">A</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<header>
+  <button class="btn-icon" onclick="toggleSidebar()" title="History (Cmd+/)">☰</button>
+    <div class="logo">Nexus AI</div>
+    <button class="btn-ghost" onclick="newChat()" style="margin-left: 10px; font-size: 0.75rem; color: var(--accent); font-weight: 600;">+ New Chat</button>
+  <div class="header-spacer"></div>
+  <div id="autosave-dot" title="Auto-saving…"></div>
+  <button class="pill pill-safety" id="safety-pill" title="Active safety profile — click Settings to change" onclick="openSettings()">
+    <span class="safety-icon">🛡</span><span id="safety-label">standard</span><span class="safety-scope" id="safety-scope">global</span>
+  </button>
+  <button class="pill pill-providers" id="provider-pill" onclick="toggleDrawer()">
+    <div class="dot"></div>
+    <span id="provider-label">Loading…</span>
+  </button>
+  <button class="btn-icon" id="theme-btn" onclick="toggleTheme()" title="Toggle theme">☀️</button>
+  <button class="btn-icon" onclick="openSettings()" title="Settings">⚙</button>
+  <!-- overflow menu -->
+  <div class="overflow-menu-wrap">
+    <button class="btn-icon" id="overflow-btn" onclick="toggleOverflow()" title="More">⋮</button>
+    <div id="overflow-menu" class="overflow-menu" style="display:none">
+      <button onclick="openCommandPalette();toggleOverflow()">⌘ Command palette <span style="font-size:.65rem;color:var(--muted);margin-left:4px">all features</span></button>
+      <button onclick="openMemoryModal();toggleOverflow()">🧠 Memory</button>
+      <button onclick="openCIModal();toggleOverflow()">📋 Custom instructions</button>
+      <button onclick="openProjectsModal();toggleOverflow()">🗂️ Projects</button>
+      <button onclick="openApprovalsPanel();toggleOverflow()">⚠️ Approvals<span id="approvals-badge"></span></button>
+      <button onclick="openUsageModal();toggleOverflow()">📊 Usage stats</button>
+      <button onclick="openHealthModal();toggleOverflow()">🏥 Provider health</button>
+      <button onclick="openPersonaEditor();toggleOverflow()">🎭 Persona editor</button>
+      <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
+      <button onclick="openSchedulerPanel();toggleOverflow()">⏱ Scheduler</button>
+      <button onclick="openSwarmPanel();toggleOverflow()">🧬 Swarm View</button>
+      <button onclick="openTaskHistoryPanel();toggleOverflow()">🗂 Task History</button>
+      <button onclick="openLiveTracePanel();toggleOverflow()">📡 Live Trace</button>
+      <button onclick="openFinetuneDashboardPanel();toggleOverflow()">🧪 Fine-tuning</button>
+      <button onclick="openRagCorpusPanel();toggleOverflow()">📚 RAG corpus</button>
+      <button onclick="openAdminDashboardPanel();toggleOverflow()">👥 Admin</button>
+      <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
+      <button onclick="enableTaskNotifications();toggleOverflow()">🔔 Notifications</button>
+      <button onclick="openSafetyAudit();toggleOverflow()">🛡 Safety audit</button>
+      <button onclick="showTokenBar();toggleOverflow()">🔑 GitHub token</button>
+      <button onclick="openShortcuts();toggleOverflow()">⌨️ Keyboard shortcuts</button>
+    </div>
+  </div>
+</header>
+
+<!-- PWA install banner (hidden until beforeinstallprompt fires) -->
+<div id="install-banner" style="display:none">
+  <div class="install-text">Add <span>Nexus AI</span> to your home screen for the best experience</div>
+  <button class="btn-install" id="install-btn">Install</button>
+  <button class="btn-install-dismiss" onclick="dismissInstall()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;padding:0 4px;line-height:1">×</button>
+</div>
+
+
+
+<!-- Custom persona editor modal -->
+<div class="modal-overlay" id="persona-editor-modal" onclick="if(event.target===this)closePersonaEditor()">
+  <div class="modal-box" style="max-width:460px">
+    <div class="modal-header">
+      <h2>🎭 Persona Editor</h2>
+      <button class="modal-x" onclick="closePersonaEditor()">×</button>
+    </div>
+    <div class="modal-body" id="persona-editor-body" style="display:flex;flex-direction:column;gap:14px">
+      <div id="existing-personas-list"></div>
+      <hr style="border-color:var(--border)">
+      <div style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Create new persona</div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field" style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:.7rem;color:var(--muted)">Name</label>
+          <input type="text" id="cpe-name" placeholder="My Persona"
+            style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 10px;color:var(--text);font-size:.82rem;outline:none">
+        </div>
+        <div class="field" style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:.7rem;color:var(--muted)">Icon (emoji)</label>
+          <input type="text" id="cpe-icon" placeholder="🧠" maxlength="2"
+            style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:7px 10px;color:var(--text);font-size:.82rem;outline:none">
+        </div>
+      </div>
+      <div class="field" style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:.7rem;color:var(--muted)">System prompt</label>
+        <textarea id="cpe-prompt" placeholder="You are an expert in…"
+          style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:8px 10px;color:var(--text);font-size:.82rem;outline:none;resize:vertical;min-height:80px;line-height:1.5"></textarea>
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+        <div class="field" style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:.7rem;color:var(--muted)">Temperature (0–1)</label>
+          <input type="range" id="cpe-temp" min="0" max="1" step="0.05" value="0.2"
+            oninput="document.getElementById('cpe-temp-val').textContent=this.value"
+            style="accent-color:var(--accent)">
+          <span id="cpe-temp-val" style="font-size:.7rem;color:var(--accent)">0.2</span>
+        </div>
+        <div class="field" style="display:flex;flex-direction:column;gap:5px">
+          <label style="font-size:.7rem;color:var(--muted)">Color</label>
+          <input type="color" id="cpe-color" value="#7c6af7"
+            style="width:100%;height:34px;border:1px solid var(--border);border-radius:7px;background:none;cursor:pointer">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closePersonaEditor()">Cancel</button>
+      <button class="btn-primary" onclick="saveCustomPersona()">Create Persona</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- Usage dashboard modal -->
+<div class="modal-overlay" id="usage-modal" onclick="if(event.target===this)closeUsageModal()">
+  <div class="modal-box" style="max-width:540px">
+    <div class="modal-header">
+      <h2>📊 Usage Dashboard</h2>
+      <button class="modal-x" onclick="closeUsageModal()">×</button>
+    </div>
+    <div class="modal-body" id="usage-modal-body">Loading…</div>
+    <div class="modal-footer">
+      <select id="usage-days" onchange="loadUsageStats()" style="background:var(--bg);border:1px solid var(--border);border-radius:7px;padding:5px 10px;color:var(--text);font-size:.8rem;outline:none">
+        <option value="7">Last 7 days</option>
+        <option value="14">Last 14 days</option>
+        <option value="30">Last 30 days</option>
+      </select>
+      <button class="btn-primary" onclick="closeUsageModal()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Provider health modal -->
+<div class="modal-overlay" id="health-modal" onclick="if(event.target===this)closeHealthModal()">
+  <div class="modal-box" style="max-width:400px">
+    <div class="modal-header">
+      <h2>🏥 Provider Health</h2>
+      <button class="modal-x" onclick="closeHealthModal()">×</button>
+    </div>
+    <div class="modal-body" id="health-modal-body">Loading…</div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="loadHealthModal()">↻ Refresh</button>
+      <button class="btn-primary" onclick="closeHealthModal()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Custom instructions modal -->
+<div class="modal-overlay" id="ci-modal" onclick="if(event.target===this)closeCIModal()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>📋 Custom Instructions</h2>
+      <button class="modal-x" onclick="closeCIModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <textarea id="ci-text" placeholder="Tell the AI about yourself and how you want it to respond.&#10;&#10;Examples:&#10;- I'm a senior developer, skip basic explanations&#10;- Always respond in Swedish&#10;- Keep answers concise unless I ask for detail&#10;- My projects use Python 3.12 and FastAPI"></textarea>
+      <div class="modal-hint">These instructions are added to every conversation automatically.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeCIModal()">Cancel</button>
+      <button class="btn-primary" onclick="saveCIModal()">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Memory panel modal -->
+<div class="modal-overlay" id="memory-modal" onclick="if(event.target===this)closeMemoryModal()">
+  <div class="modal-box">
+    <div class="modal-header">
+      <h2>🧠 Memory</h2>
+      <button class="modal-x" onclick="closeMemoryModal()">×</button>
+    </div>
+    <div class="modal-body" id="memory-modal-body">
+      <div style="color:var(--muted);font-size:.8rem">Loading…</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="clearAllMemory()">Clear all</button>
+      <button class="btn-primary" onclick="closeMemoryModal()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Projects modal -->
+<div class="modal-overlay" id="projects-modal" onclick="if(event.target===this)closeProjectsModal()">
+  <div class="modal-box" style="max-width:480px">
+    <div class="modal-header">
+      <h2>🗂️ Projects</h2>
+      <button class="modal-x" onclick="closeProjectsModal()">×</button>
+    </div>
+    <div class="modal-body" id="projects-modal-body">Loading…</div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="newProject()">+ New project</button>
+      <button class="btn-primary" onclick="closeProjectsModal()">Done</button>
+    </div>
+  </div>
+</div>
+
+<!-- Project edit modal -->
+<div class="modal-overlay" id="project-edit-modal" onclick="if(event.target===this)closeProjectEdit()">
+  <div class="modal-box" style="max-width:440px">
+    <div class="modal-header">
+      <h2 id="pe-title">Edit Project</h2>
+      <button class="modal-x" onclick="closeProjectEdit()">×</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:12px">
+      <input type="hidden" id="pe-id">
+      <div class="field" style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Name</label>
+        <input type="text" id="pe-name" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:.875rem;outline:none" placeholder="My Project">
+      </div>
+      <div class="field" style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Custom Instructions</label>
+        <textarea id="pe-instructions" style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px 12px;color:var(--text);font-size:.85rem;resize:vertical;outline:none;min-height:90px;line-height:1.6" placeholder="What should the AI know about this project?"></textarea>
+      </div>
+      <div class="field" style="display:flex;flex-direction:column;gap:5px">
+        <label style="font-size:.72rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em">Color</label>
+        <div style="display:flex;gap:8px;flex-wrap:wrap" id="pe-colors">
+          <div class="color-swatch" data-color="#7c6af7" style="width:24px;height:24px;border-radius:50%;background:#7c6af7;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#22c55e" style="width:24px;height:24px;border-radius:50%;background:#22c55e;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#5eead4" style="width:24px;height:24px;border-radius:50%;background:#5eead4;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#f59e0b" style="width:24px;height:24px;border-radius:50%;background:#f59e0b;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#f87171" style="width:24px;height:24px;border-radius:50%;background:#f87171;cursor:pointer;border:2px solid transparent"></div>
+          <div class="color-swatch" data-color="#60a5fa" style="width:24px;height:24px;border-radius:50%;background:#60a5fa;cursor:pointer;border:2px solid transparent"></div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeProjectEdit()">Cancel</button>
+      <button class="btn-primary" onclick="saveProjectEdit()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="audit-modal" onclick="if(event.target===this)closeAuditModal()">
+  <div class="modal-box" style="max-width:640px">
+    <div class="modal-header">
+      <h2>🛡 Safety Audit Log</h2>
+      <button class="modal-x" onclick="closeAuditModal()">×</button>
+    </div>
+    <div class="modal-body">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <span style="font-size:.72rem;color:var(--muted)">Filter:</span>
+        <select id="audit-filter" onchange="loadAuditLog()" style="font-size:.72rem;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 6px">
+          <option value="">All events</option>
+          <option value="block">Blocks only</option>
+          <option value="profile_change">Profile changes</option>
+          <option value="pii_scrub">PII scrubs</option>
+          <option value="session">Session-only events</option>
+        </select>
+        <select id="audit-severity" onchange="loadAuditLog()" style="font-size:.72rem;background:var(--surface2);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:2px 6px">
+          <option value="">All severities</option>
+          <option value="low">Low+</option>
+          <option value="medium">Medium+</option>
+          <option value="high">High+</option>
+          <option value="critical">Critical only</option>
+        </select>
+        <button onclick="loadAuditLog()" style="font-size:.72rem;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;padding:2px 8px;cursor:pointer">↻ Refresh</button>
+        <span id="audit-session-count" style="font-size:.65rem;color:var(--teal);padding:2px 6px;border:1px solid color-mix(in srgb,var(--teal)25%,transparent);border-radius:999px;background:color-mix(in srgb,var(--teal)10%,transparent)"></span>
+        <span id="audit-count" style="font-size:.65rem;color:var(--muted);margin-left:auto"></span>
+      </div>
+      <div class="audit-list" id="audit-list"><span style="color:var(--muted);font-size:.76rem">Loading…</span></div>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="safety-scanner-modal" onclick="if(event.target===this)closeSafetyScanner()">
+  <div class="modal-box" style="max-width:680px">
+    <div class="modal-header">
+      <h2>🧪 Prompt-Injection Safety Scanner</h2>
+      <button class="modal-x" onclick="closeSafetyScanner()">×</button>
+    </div>
+    <div class="modal-body" style="display:flex;flex-direction:column;gap:10px">
+      <textarea id="scanner-input" placeholder="Paste a prompt to triage for injection attempts..."
+        style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;color:var(--text);min-height:110px;resize:vertical;outline:none;line-height:1.5"></textarea>
+      <label style="display:flex;align-items:center;gap:6px;font-size:.72rem;color:var(--muted)">
+        <input type="checkbox" id="scanner-explain" checked>
+        Explain mode (matched rule + safer rewrite)
+      </label>
+      <div class="safety-scan-result" id="scanner-result" style="font-size:.78rem;color:var(--muted)">Run a scan to see results.</div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn-ghost" onclick="closeSafetyScanner()">Close</button>
+      <button class="btn-primary" onclick="runSafetyScanner()">Scan</button>
+    </div>
+  </div>
+</div>
+
+<div id="app">
+<!-- Keyboard shortcuts overlay -->
+<div id="shortcuts-overlay" onclick="if(event.target===this)closeShortcuts()">
+  <div class="shortcuts-box">
+    <div style="font-size:.95rem;font-weight:700;margin-bottom:14px">⌨️ Keyboard Shortcuts</div>
+    <div class="shortcut-row"><span>Command palette</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">K</kbd></span></div>
+    <div class="shortcut-row"><span>New chat</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">Shift</kbd> <kbd class="kbd">K</kbd></span></div>
+    <div class="shortcut-row"><span>Toggle sidebar</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">/</kbd></span></div>
+    <div class="shortcut-row"><span>Stop generation</span><span><kbd class="kbd">Esc</kbd></span></div>
+    <div class="shortcut-row"><span>Focus input</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">L</kbd></span></div>
+    <div class="shortcut-row"><span>Save chat</span><span><kbd class="kbd">Cmd</kbd> <kbd class="kbd">S</kbd></span></div>
+    <div class="shortcut-row"><span>This help</span><span><kbd class="kbd">?</kbd></span></div>
+    <div style="margin-top:14px;text-align:right">
+      <button class="btn-primary" onclick="closeShortcuts()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Command palette -->
+<div id="command-palette" onclick="if(event.target===this)closeCommandPalette()">
+  <div class="cmd-box">
+    <input id="cmd-input" class="cmd-input" placeholder="Type a command, tool, persona, or chat title..." autocomplete="off" />
+    <div id="cmd-results" class="cmd-results"></div>
+  </div>
+</div>
+
+  <div id="sidebar" class="hidden">
+    <div class="sidebar-head">
+      <span>History</span>
+      <button class="btn-new-chat" onclick="newChat()">+ New</button>
+    </div>
+    <div id="search-wrap">
+      <input type="text" id="search-input" placeholder="🔍 Search chats…"
+        oninput="searchChats(this.value)">
+      <div class="search-results" id="search-results"></div>
+    </div>
+    <div class="search-bar">
+      <input class="search-input" id="search-input" placeholder="Search chats…"
+        oninput="onSearch(this.value)" autocomplete="off">
+    </div>
+    <div id="search-results" style="display:none;padding:6px 8px;overflow-y:auto;max-height:200px"></div>
+    <div id="chat-list"><div class="no-chats">No saved chats yet.<br>Hit 💾 to save one.</div></div>
+    <div class="memory-bar">
+      <div class="memory-row">
+        <span>🧠 Memory: <span class="memory-count" id="mem-count">0</span> entries</span>
+        <button class="btn-clear-mem" onclick="clearMemory()">Clear</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="main">
+    <!-- Persona strip (hidden until user activates a persona) -->
+    <div class="persona-strip" id="persona-strip" style="display:none">
+      <!-- filled by JS; shown when personas are active -->
+    </div>
+
+    <div id="drawer">
+      <div class="drawer-inner">
+        <div class="drawer-head">
+          <span>Fallback Chain</span><span class="auto-tag">Auto-fallback</span>
+        </div>
+        <div class="p-grid" id="p-grid">Loading…</div>
+        <div class="drawer-note">
+          On rate-limit the agent moves to the next provider automatically.
+          Set <code>PROVIDER=auto</code> to use all. Cooldown: <code>RATE_LIMIT_COOLDOWN</code>s.
+        </div>
+      </div>
+    </div>
+
+    <div id="persona-switcher" class="persona-switcher"></div>
+
+    <div id="chat">
+      <div id="welcome">
+        <div class="welcome-icon" style="font-size:2.4rem;margin-bottom:4px">⬡</div>
+        <h2 style="font-size:1.7rem;font-weight:900;letter-spacing:-.05em;margin-bottom:6px">Your AI. <span>Your rules.</span></h2>
+        <p style="font-size:.88rem;color:var(--muted);max-width:380px;line-height:1.7;margin-bottom:6px">
+          Self-hosted · open-source · <strong style="color:var(--text)">free forever</strong><br>
+          Your data never leaves your server. No subscriptions. No lock-in.
+        </p>
+        <p style="font-size:.72rem;color:var(--muted);max-width:380px;opacity:.65;margin-bottom:20px">
+          Part of the <a href="https://github.com/The-No-Hands-company" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none">No Hands Company</a> Nexus Systems ecosystem
+        </p>
+        <div class="welcome-checklist">
+          <div class="welcome-step">
+            <div class="welcome-step-title">1. Start Fast</div>
+            <div class="welcome-step-desc">Pick a starter prompt below or describe your goal in plain language.</div>
+          </div>
+          <div class="welcome-step">
+            <div class="welcome-step-title">2. Stay In Control</div>
+            <div class="welcome-step-desc">Use stop, safety profile, and persona controls exactly like mainstream AI chat tools.</div>
+          </div>
+          <div class="welcome-step">
+            <div class="welcome-step-title">3. Verify Trust</div>
+            <div class="welcome-step-desc">Check status and uptime commitments before mission-critical usage.</div>
+          </div>
+        </div>
+        <div class="welcome-trust">
+          <a href="/status" target="_blank" rel="noopener">Live status</a>
+          <span>Uptime target: 99.9%</span>
+          <span>Draft SLA credits available for publication workflow</span>
+        </div>
+        <div class="chips">
+          <div class="chip" onclick="fillTask('Search the web for the latest AI news today')">🔍 Web search</div>
+          <div class="chip" onclick="fillTask('Write a Python script that sorts a list of files by date modified')">💻 Write code</div>
+          <div class="chip" onclick="fillTask('Summarize this conversation so far')">📝 Summarize</div>
+          <div class="chip" onclick="fillTask('What can you do? Give me a quick tour of your capabilities')">✨ What can you do?</div>
+        </div>
+      </div>
+      <div id="messages">
+        <div id="typing" style="display:none">
+          <div class="typing-bubble">
+            <div class="tdot"></div><div class="tdot"></div><div class="tdot"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="rate-toast"></div>
+    <div id="file-chips"></div>
+    <div id="token-bar" style="display:none" class="token-bar">
+      🔑 <span style="color:var(--amber);font-weight:600">Private repo?</span>
+      <input type="password" id="token-input" placeholder="Paste GitHub token (ghp_...)">
+      <button onclick="submitToken()">Store</button>
+      <button onclick="document.getElementById('token-bar').style.display='none'"
+        style="background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
+    </div>
+
+    <footer>
+      <div class="input-row">
+        <button class="btn-round" id="attach-btn" onclick="document.getElementById('file-input').click()" title="Attach file">📎</button>
+        <input type="file" id="file-input" multiple onchange="handleFileInput(event)">
+        <button class="btn-round" id="voice-btn" onclick="toggleVoice()" title="Voice input">🎤</button>
+        <textarea id="task" placeholder="Ask anything or give a task…" rows="1"></textarea>
+        <button class="btn-round" id="stop-btn" onclick="stopStream()" title="Stop">⏹</button>
+        <button class="btn-round" id="send-btn" onclick="send()">
+          <svg viewBox="0 0 24 24"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
+        </button>
+      </div>
+      <div class="input-hint">Enter · Shift+Enter newline · 🎤 voice · 📎 attach · <button style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:.62rem;padding:0" onclick="openShortcuts()">⌨️ shortcuts</button></div>
+      <div class="session-safety-row">
+        🛡 Session safety:
+        <select id="session-safety-sel" title="Override safety profile for this session only">
+          <option value="">— global default —</option>
+        </select>
+      </div>
+      <div class="token-bar-msg" id="token-bar-msg">
+        <span class="tok-in" id="tok-in"></span>
+        <span class="tok-out" id="tok-out"></span>
+      </div>
+    </footer>
+  </div>
+  <!-- draggable divider -->
+  <div id="dragger"></div>
+
+  <!-- artifact side panel -->
+  <div id="artifact-panel">
+    <div class="artifact-panel-head">
+      <div class="artifact-tabs" id="artifact-tabs"></div>
+      <button class="panel-btn" onclick="toggleArtifactPanel()" title="Close">✕</button>
+      <button class="panel-btn" onclick="openArtifactExternal()" title="Open in new tab">↗</button>
+    </div>
+    <div class="artifact-panel-body" id="artifact-panel-body"></div>
+  </div>
+
+  <!-- Swarm View panel -->
+  <div id="swarm-panel" style="position:fixed;bottom:80px;right:18px;width:420px;max-height:520px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:40;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+    <!-- Header -->
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+      <div style="display:flex;align-items:center;gap:10px;">
+        <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🧬 Swarm</span>
+        <!-- Tab bar -->
+        <div style="display:flex;gap:2px;background:var(--surface2);border-radius:7px;padding:2px;">
+          <button id="swarm-tab-activity" onclick="swarmTab('activity')" style="position:relative;" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:var(--accent);color:#fff;font-weight:600;">Activity<span id="swarm-new-badge" class="swarm-new-badge"></span></button>
+          <button id="swarm-tab-graph" onclick="swarmTab('graph')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:transparent;color:var(--muted);">Graph</button>
+          <button id="swarm-tab-assign" onclick="swarmTab('assign')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:transparent;color:var(--muted);">Assign</button>
+          <button id="swarm-tab-progress" onclick="swarmTab('progress')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:transparent;color:var(--muted);">Progress</button>
+          <button id="swarm-tab-diff" onclick="swarmTab('diff')" style="font-size:.68rem;padding:3px 9px;border:none;border-radius:5px;cursor:pointer;background:transparent;color:var(--muted);">Diff</button>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:6px;">
+        <span id="swarm-clone-bypass-badge" style="display:inline-flex;align-items:center;font-size:.6rem;background:#6c52d9;color:#fff;border-radius:999px;padding:2px 6px;font-weight:700;">BYPASS 0</span><span id="swarm-bypass-latest-ts" style="font-size:.55rem;color:var(--muted);white-space:nowrap;"></span>
+        <span id="swarm-pause-badge" style="display:none;font-size:.6rem;background:#e55;color:#fff;border-radius:4px;padding:1px 5px;font-weight:700;">PAUSED</span>
+        <button id="swarm-pause-btn" onclick="swarmTogglePause()" title="Pause / Resume swarm" style="background:none;border:1px solid var(--border);border-radius:5px;padding:2px 7px;font-size:.68rem;color:var(--muted);cursor:pointer;">⏸</button>
+        <button class="panel-btn" onclick="closeSwarmPanel()" title="Close">✕</button>
+      </div>
+    </div>
+
+    <!-- Tab: Activity -->
+    <div id="swarm-pane-activity" style="display:flex;flex-direction:column;flex:1;min-height:0;">
+      <div style="padding:8px 10px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center;flex-wrap:wrap;flex-shrink:0;">
+        <select id="swarm-activity-action" onchange="swarmApplyActivityFilters()" style="flex:1;min-width:150px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.74rem;">
+          <option value="">All actions</option>
+          <option value="strict_clone_bootstrap_exception">Strict clone bypasses</option>
+        </select>
+        <select id="swarm-activity-window" onchange="swarmApplyActivityFilters()" style="min-width:128px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.74rem;">
+          <option value="0">All retained</option>
+          <option value="300">Last 5m</option>
+          <option value="900" selected>Last 15m</option>
+          <option value="3600">Last 1h</option>
+          <option value="86400">Last 24h</option>
+        </select>
+      </div>
+      <div id="swarm-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:4px;min-height:60px;"></div>
+      <div style="padding:6px 14px;border-top:1px solid var(--border);font-size:.65rem;color:var(--muted);display:flex;justify-content:space-between;flex-shrink:0;">
+        <span id="swarm-count">0 events</span>
+        <button onclick="clearSwarmFeed()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:.65rem;">Clear</button>
+      </div>
+    </div>
+
+    <!-- Tab: Graph -->
+    <div id="swarm-pane-graph" style="display:none;flex-direction:column;flex:1;min-height:0;">
+      <div style="padding:6px 12px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0;flex-wrap:wrap;">
+        <span style="font-size:.65rem;color:var(--muted);">
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#4a9;margin-right:3px;"></span>idle
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#d96;margin:0 3px 0 8px;"></span>busy
+          <span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#e55;margin:0 3px 0 8px;"></span>errored
+        </span>
+        <button onclick="swarmGraphRefresh()" style="margin-left:auto;font-size:.65rem;background:none;border:1px solid var(--border);border-radius:5px;padding:2px 8px;color:var(--muted);cursor:pointer;">↻ Refresh</button>
+      </div>
+      <div style="flex:1;min-height:0;position:relative;">
+        <canvas id="swarm-graph-canvas" style="width:100%;height:100%;display:block;"></canvas>
+        <div id="swarm-graph-tooltip" style="display:none;position:absolute;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:5px 9px;font-size:.7rem;color:var(--text);pointer-events:none;white-space:nowrap;"></div>
+      </div>
+      <div style="padding:4px 12px;border-top:1px solid var(--border);font-size:.63rem;color:var(--muted);flex-shrink:0;">
+        <span id="swarm-graph-summary">Loading…</span>
+      </div>
+    </div>
+
+    <!-- Tab: Assign Task -->
+    <div id="swarm-pane-assign" style="display:none;flex-direction:column;flex:1;min-height:0;overflow-y:auto;">
+      <div style="padding:12px 14px;display:flex;flex-direction:column;gap:9px;">
+        <div>
+          <label style="font-size:.7rem;color:var(--muted);display:block;margin-bottom:3px;">Agent</label>
+          <select id="swarm-assign-agent" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;">
+            <option value="">— select agent —</option>
+          </select>
+        </div>
+        <div>
+          <label style="font-size:.7rem;color:var(--muted);display:block;margin-bottom:3px;">Topic <span style="font-style:italic;">(optional)</span></label>
+          <input id="swarm-assign-topic" placeholder="e.g. code-review" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;box-sizing:border-box;" />
+        </div>
+        <div>
+          <label style="font-size:.7rem;color:var(--muted);display:block;margin-bottom:3px;">Task description</label>
+          <textarea id="swarm-assign-task" rows="4" placeholder="Describe the task for this agent…" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;resize:vertical;font-family:inherit;box-sizing:border-box;"></textarea>
+        </div>
+        <button onclick="swarmAssignTask()" class="btn-primary" style="width:100%;">Assign Task →</button>
+        <div id="swarm-assign-result" style="display:none;font-size:.72rem;padding:6px 10px;border-radius:7px;background:var(--surface2);color:var(--text);"></div>
+      </div>
+    </div>
+
+    <div id="swarm-pane-progress" style="display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden;">
+      <div style="padding:8px 10px;border-bottom:1px solid var(--border);display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+        <select id="swarm-progress-trace" style="flex:1;min-width:180px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;"></select>
+        <button onclick="swarmRefreshProgress()" style="font-size:.72rem;padding:5px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">↻ Refresh</button>
+      </div>
+      <div id="swarm-progress-summary" style="padding:8px 10px;border-bottom:1px solid var(--border);font-size:.72rem;color:var(--muted);"></div>
+      <div id="swarm-progress-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:5px;min-height:70px;"></div>
+    </div>
+
+    <div id="swarm-pane-diff" style="display:none;flex-direction:column;flex:1;min-height:0;overflow:hidden;">
+      <div style="padding:8px 10px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:6px;">
+        <select id="swarm-diff-left" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;"></select>
+        <select id="swarm-diff-right" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;"></select>
+        <div style="display:flex;gap:6px;">
+          <button onclick="swarmRunDiffCompare()" style="flex:1;font-size:.72rem;padding:5px 9px;border:none;border-radius:6px;background:var(--accent);color:#fff;cursor:pointer;">Compare traces</button>
+          <button onclick="swarmRefreshDiffOptions()" style="font-size:.72rem;padding:5px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">↻</button>
+        </div>
+      </div>
+      <pre id="swarm-diff-output" style="flex:1;overflow:auto;margin:0;padding:8px 10px;background:var(--surface2);font-size:.72rem;line-height:1.45;white-space:pre-wrap;"></pre>
+    </div>
+  </div>
+
+  <!-- Scheduler panel -->
+  <div id="scheduler-panel" style="position:fixed;bottom:80px;right:370px;width:420px;max-height:430px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:40;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+      <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">⏱ Background Scheduler</span>
+      <button class="panel-btn" onclick="closeSchedulerPanel()" title="Close">✕</button>
+    </div>
+    <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr 88px;gap:8px;">
+      <input id="sch-task" placeholder="Task (e.g. sync docs to repo)" style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+      <input id="sch-schedule" placeholder="5m" value="5m" style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+      <input id="sch-name" placeholder="Job name" style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);grid-column:1/2;" />
+      <button onclick="createSchedulerJob()" class="btn-primary" style="height:36px;">Add</button>
+    </div>
+    <div id="scheduler-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:80px;"></div>
+  </div>
+</div>
+
+<!-- ── Knowledge Graph Panel ──────────────────────────────────────────────── -->
+<div id="kg-panel" style="position:fixed;bottom:80px;right:800px;width:460px;max-height:520px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:40;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🧠 Knowledge Graph</span>
+    <button class="panel-btn" onclick="closeKGPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;">
+    <input id="kg-search-input" placeholder="Search entities…" style="flex:1;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" onkeydown="if(event.key==='Enter')kgSearch()" />
+    <button class="btn-primary" style="height:36px;padding:0 14px;" onclick="kgSearch()">Search</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+    <input id="kg-add-name" placeholder="Entity name*" style="padding:7px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+    <input id="kg-add-type" placeholder="Type (person, project…)" value="concept" style="padding:7px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+    <textarea id="kg-add-facts" placeholder='Facts JSON: {"key":"value"}' rows="2" style="grid-column:1/3;padding:7px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);resize:vertical;font-family:inherit;font-size:.82rem;"></textarea>
+    <button class="btn-primary" style="height:34px;grid-column:1/3;" onclick="kgStore()">Save Entity</button>
+  </div>
+  <div id="kg-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:80px;font-size:.83rem;"></div>
+</div>
+
+<!-- ── Trace Viewer Panel ─────────────────────────────────────────────────── -->
+<div id="trace-panel" style="position:fixed;bottom:80px;right:370px;width:450px;max-height:500px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:41;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">⏮ Trace Viewer</span>
+    <button class="panel-btn" onclick="closeTracePanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:8px 12px;border-bottom:1px solid var(--border);">
+    <button class="btn-primary" style="height:32px;font-size:.8rem;padding:0 12px;" onclick="refreshTraces()">↻ Refresh</button>
+  </div>
+  <div id="trace-feed" style="flex:1;overflow-y:auto;padding:8px 10px;display:flex;flex-direction:column;gap:6px;min-height:80px;font-size:.82rem;"></div>
+</div>
+
+<!-- ── Ensemble Panel ────────────────────────────────────────────────────── -->
+<div id="ensemble-panel" style="position:fixed;bottom:80px;right:20px;width:340px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:42;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🔴 Ensemble Mode</span>
+    <button class="panel-btn" onclick="closeEnsemblePanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:14px 16px;display:flex;flex-direction:column;gap:14px;">
+    <label style="display:flex;align-items:center;justify-content:space-between;gap:12px;cursor:pointer;">
+      <span style="font-size:.88rem;">Enable high-risk ensemble</span>
+      <input type="checkbox" id="ens-toggle" onchange="saveEnsembleSettings()" style="width:18px;height:18px;cursor:pointer;" />
+    </label>
+    <div>
+      <div style="font-size:.82rem;color:var(--muted);margin-bottom:4px;">Risk threshold: <span id="ens-thr-val">0.40</span></div>
+      <input type="range" id="ens-threshold" min="0" max="1" step="0.05" value="0.4"
+             oninput="document.getElementById('ens-thr-val').textContent=parseFloat(this.value).toFixed(2)"
+             onchange="saveEnsembleSettings()"
+             style="width:100%;accent-color:var(--accent);" />
+    </div>
+    <div id="ens-status" style="font-size:.78rem;color:var(--muted);"></div>
+  </div>
+</div>
+
+<!-- ── Architecture Panel (Phase A) ─────────────────────────────────────── -->
+<div id="architecture-panel" style="position:fixed;bottom:80px;right:20px;width:430px;max-height:560px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:43;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🏛 Architecture (Phase A)</span>
+    <button class="panel-btn" onclick="closeArchitecturePanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr;gap:8px;">
+    <input id="arch-name" placeholder="Blueprint name" value="default"
+      style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+    <input id="arch-notes" placeholder="Notes (optional)"
+      style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);" />
+    <div style="display:flex;gap:8px;">
+      <button class="btn-primary" style="height:34px;" onclick="createArchitectureSnapshot()">Create runtime snapshot</button>
+      <button class="btn-ghost" style="height:34px;" onclick="refreshArchitectureList()">↻ Refresh</button>
+    </div>
+    <div id="arch-status" style="font-size:.72rem;color:var(--muted);"></div>
+  </div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;min-height:220px;max-height:320px;">
+    <div style="border-right:1px solid var(--border);overflow-y:auto;">
+      <div style="padding:8px 10px;font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;">Versions</div>
+      <div id="arch-version-list" style="display:flex;flex-direction:column;gap:4px;padding:0 8px 8px;"></div>
+    </div>
+    <div style="overflow-y:auto;">
+      <div style="padding:8px 10px;font-size:.68rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;">Summary</div>
+      <div id="arch-summary" style="padding:0 10px 10px;font-size:.8rem;color:var(--muted);">Select a version.</div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Diff Viewer Panel ──────────────────────────────────────────────────── -->
+<div id="diff-viewer-panel" style="position:fixed;bottom:80px;right:20px;width:560px;max-height:620px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:44;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">📊 Diff Viewer</span>
+    <button class="panel-btn" onclick="closeDiffViewer()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+    <div style="display:flex;gap:8px;align-items:center;">
+      <input id="diff-filename" placeholder="filename (e.g. app.py)" value="file"
+        style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+      <input id="diff-trace-id" placeholder="trace_id (optional)"
+        style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;">
+      <textarea id="diff-original" placeholder="Original (before)" rows="5"
+        style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.78rem;font-family:monospace;resize:vertical;"></textarea>
+      <textarea id="diff-modified" placeholder="Modified (after)" rows="5"
+        style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.78rem;font-family:monospace;resize:vertical;"></textarea>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runDiffViewer()">Compute diff</button>
+      <button class="btn-ghost" style="height:32px;font-size:.8rem;" onclick="loadDiffHistory()">📋 History</button>
+      <span id="diff-stats" style="font-size:.76rem;color:var(--muted);margin-left:4px;"></span>
+    </div>
+  </div>
+  <div id="diff-output" style="flex:1;overflow-y:auto;padding:10px 12px;font-family:monospace;font-size:.78rem;white-space:pre-wrap;line-height:1.5;"></div>
+</div>
+
+<!-- ── Self-Improvement Panel ─────────────────────────────────────────────── -->
+<div id="self-review-panel" style="position:fixed;bottom:80px;right:20px;width:480px;max-height:580px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:45;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🔄 Self-Improvement Loop</span>
+    <button class="panel-btn" onclick="closeSelfReviewPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;">
+    <label style="font-size:.8rem;color:var(--muted);">Traces to analyze:</label>
+    <input id="sr-limit" type="number" min="1" max="100" value="20"
+      style="width:70px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+    <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runSelfReview()">Analyze &amp; suggest</button>
+    <button class="btn-ghost" style="height:32px;font-size:.8rem;" onclick="loadSelfReviewHistory()">📋 History</button>
+  </div>
+  <div id="sr-loading" style="display:none;padding:20px;text-align:center;color:var(--muted);font-size:.82rem;">Analyzing traces…</div>
+  <div id="sr-output" style="flex:1;overflow-y:auto;padding:12px 14px;"></div>
+</div>
+
+<!-- ── Documents Panel ────────────────────────────────────────────────────── -->
+<div id="documents-panel" style="position:fixed;bottom:80px;right:20px;width:500px;max-height:600px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:46;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">📄 Document Understanding</span>
+    <button class="panel-btn" onclick="closeDocumentsPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+    <div style="display:flex;gap:8px;">
+      <input id="doc-path" placeholder="File path (e.g. /tmp/report.pdf)"
+        style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+      <select id="doc-type"
+        style="width:90px;padding:7px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;">
+        <option value="">auto</option>
+        <option value="pdf">PDF</option>
+        <option value="docx">DOCX</option>
+        <option value="xlsx">XLSX</option>
+        <option value="pptx">PPTX</option>
+        <option value="txt">TXT</option>
+      </select>
+    </div>
+    <textarea id="doc-question" placeholder="Question (leave blank to summarise)" rows="2"
+      style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;resize:vertical;"></textarea>
+    <div style="display:flex;gap:8px;">
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runDocumentUnderstand()">Ask</button>
+      <button class="btn-ghost" style="height:32px;font-size:.8rem;" onclick="runDocumentIngest()">Ingest into RAG</button>
+    </div>
+    <div id="doc-status" style="font-size:.72rem;color:var(--muted);"></div>
+  </div>
+  <div id="doc-output" style="flex:1;overflow-y:auto;padding:12px 14px;font-size:.82rem;"></div>
+</div>
+
+<!-- ── Debate panel ─────────────────────────────────────────────────────────── -->
+<div id="debate-panel" style="position:fixed;bottom:80px;right:20px;width:540px;max-height:660px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:47;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">⚔️ Multi-Agent Debate</span>
+    <button class="panel-btn" onclick="closeDebatePanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+    <textarea id="debate-claim" placeholder="Enter claim to debate (e.g. TypeScript is strictly better than JavaScript)" rows="2"
+      style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;resize:vertical;"></textarea>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <label style="font-size:.78rem;color:var(--muted);">Rounds:</label>
+      <input id="debate-rounds" type="number" min="1" max="5" value="2"
+        style="width:56px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runDebate()">Run Debate</button>
+    </div>
+    <div id="debate-status" style="font-size:.72rem;color:var(--muted);"></div>
+  </div>
+  <div id="debate-output" style="flex:1;overflow-y:auto;padding:12px 14px;font-size:.82rem;"></div>
+</div>
+
+<!-- ── Hypothesis panel ──────────────────────────────────────────────────────── -->
+<div id="hypothesis-panel" style="position:fixed;bottom:80px;right:20px;width:540px;max-height:660px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:48;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🔬 Hypothesis Testing</span>
+    <button class="panel-btn" onclick="closeHypothesisPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;flex-direction:column;gap:8px;">
+    <textarea id="hypothesis-obs" placeholder="Describe the observation (e.g. Response latency spiked 3× after deploys on Tuesdays)" rows="3"
+      style="padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;resize:vertical;"></textarea>
+    <div style="display:flex;gap:8px;align-items:center;">
+      <label style="font-size:.78rem;color:var(--muted);">Max hypotheses:</label>
+      <input id="hypothesis-max" type="number" min="1" max="8" value="4"
+        style="width:56px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="runHypothesis()">Test Hypotheses</button>
+    </div>
+    <div id="hypothesis-status" style="font-size:.72rem;color:var(--muted);"></div>
+  </div>
+  <div id="hypothesis-output" style="flex:1;overflow-y:auto;padding:12px 14px;font-size:.82rem;"></div>
+</div>
+
+<!-- ── Adaptive routing panel ────────────────────────────────────────────────── -->
+<div id="adaptive-routing-panel" style="position:fixed;bottom:80px;right:20px;width:420px;max-height:500px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:49;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🎯 Adaptive Confidence Routing</span>
+    <button class="panel-btn" onclick="closeAdaptiveRoutingPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:12px 14px;display:flex;flex-direction:column;gap:12px;">
+    <p style="font-size:.78rem;color:var(--muted);">
+      When the AI's confidence falls below the threshold, it automatically escalates to a stronger model tier.
+    </p>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <label style="font-size:.82rem;min-width:140px;">Enabled:</label>
+      <input id="ar-enabled" type="checkbox" checked style="width:16px;height:16px;cursor:pointer;" />
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <label style="font-size:.82rem;min-width:140px;">Confidence threshold:</label>
+      <input id="ar-threshold" type="number" min="0" max="1" step="0.05" value="0.6"
+        style="width:72px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+    </div>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <label style="font-size:.82rem;min-width:140px;">Escalation tries:</label>
+      <input id="ar-tries" type="number" min="0" max="5" value="2"
+        style="width:56px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;background:var(--surface2);color:var(--text);font-size:.82rem;" />
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button class="btn-primary" style="height:32px;font-size:.8rem;" onclick="saveAdaptiveRouting()">Save</button>
+      <button class="btn-ghost" style="height:32px;font-size:.8rem;" onclick="loadAdaptiveRouting()">Reload</button>
+    </div>
+    <div id="ar-status" style="font-size:.75rem;color:var(--muted);"></div>
+  </div>
+</div>
+
+<!-- ── HITL Approvals Panel ─────────────────────────────────────────────── -->
+<div id="approvals-panel" style="position:fixed;bottom:80px;right:20px;width:460px;max-height:580px;background:var(--surface);border:1px solid color-mix(in srgb,var(--amber) 35%,var(--border));border-radius:12px;display:none;flex-direction:column;z-index:50;box-shadow:0 8px 32px rgba(0,0,0,.45);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--amber);">⚠️ HITL Approvals</span>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <span id="approvals-panel-count" style="font-size:.7rem;color:var(--muted);"></span>
+      <button class="panel-btn" onclick="closeApprovalsPanel()" title="Close">✕</button>
+    </div>
+  </div>
+  <!-- HITL mode selector -->
+  <div style="padding:10px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;">
+    <span style="font-size:.78rem;color:var(--muted);flex-shrink:0;">HITL mode:</span>
+    <select id="hitl-mode-select" onchange="saveHitlMode(this.value)"
+      style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.8rem;">
+      <option value="off">Off — no interception</option>
+      <option value="warn">Warn — log high-risk tools</option>
+      <option value="block">Block — require approval</option>
+    </select>
+    <button class="btn-ghost" style="height:32px;font-size:.78rem;padding:0 12px;" onclick="loadApprovals()">↻ Refresh</button>
+  </div>
+  <div id="approvals-feed" style="flex:1;overflow-y:auto;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:80px;"></div>
+  <div style="padding:8px 14px;border-top:1px solid var(--border);font-size:.65rem;color:var(--muted);">
+    Pending approvals are held until you decide. Rejected actions are not executed.
+  </div>
+</div>
+
+<!-- ── Benchmark Leaderboard Panel ───────────────────────────────────────── -->
+<div id="benchmark-leaderboard-panel" style="position:fixed;bottom:80px;right:20px;width:760px;max-width:calc(100vw - 40px);max-height:620px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:51;box-shadow:0 8px 32px rgba(0,0,0,.45);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🏆 Benchmark Leaderboard</span>
+    <button class="panel-btn" onclick="closeBenchmarkLeaderboardPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+    <label style="font-size:.72rem;color:var(--muted);">Sort</label>
+    <select id="bl-sort" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+      <option value="task_type">Task type</option>
+      <option value="quality_score">Quality</option>
+      <option value="approval_rate">Approval rate</option>
+      <option value="avg_latency_ms">Avg latency</option>
+      <option value="safety_pass_rate">Safety pass rate</option>
+      <option value="cost_per_1k_tokens">Cost / 1K tokens</option>
+    </select>
+    <label style="font-size:.72rem;color:var(--muted);">Provider</label>
+    <input id="bl-provider" placeholder="all" style="width:120px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+    <label style="font-size:.72rem;color:var(--muted);">Limit</label>
+    <input id="bl-limit" type="number" min="1" max="200" value="20" style="width:70px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+    <button class="btn-primary" style="height:32px;font-size:.78rem;padding:0 12px;" onclick="loadBenchmarkLeaderboard()">Refresh</button>
+    <span id="bl-status" style="font-size:.72rem;color:var(--muted);margin-left:auto;"></span>
+  </div>
+  <div style="flex:1;overflow:auto;padding:10px 12px;">
+    <table style="width:100%;border-collapse:collapse;font-size:.75rem;">
+      <thead>
+        <tr style="position:sticky;top:0;background:var(--surface2);z-index:1;">
+          <th style="text-align:left;padding:8px;border:1px solid var(--border);">#</th>
+          <th style="text-align:left;padding:8px;border:1px solid var(--border);">Model</th>
+          <th style="text-align:left;padding:8px;border:1px solid var(--border);">Provider</th>
+          <th style="text-align:left;padding:8px;border:1px solid var(--border);">Task</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Quality</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Approval</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Avg ms</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">P95 ms</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Safety</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">$/1K</th>
+          <th style="text-align:right;padding:8px;border:1px solid var(--border);">Requests</th>
+        </tr>
+      </thead>
+      <tbody id="bl-body">
+        <tr><td colspan="11" style="padding:10px;border:1px solid var(--border);color:var(--muted);">Open leaderboard to load data.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── Benchmark Dashboard Panel ──────────────────────────────────────────── -->
+<div id="benchmark-dashboard-panel" style="position:fixed;bottom:80px;right:20px;width:900px;max-width:calc(100vw - 40px);max-height:650px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:52;box-shadow:0 8px 32px rgba(0,0,0,.45);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">📈 Model Benchmark Dashboard</span>
+    <button class="panel-btn" onclick="closeBenchmarkDashboardPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;">
+    <button class="btn-primary" style="height:32px;font-size:.78rem;padding:0 12px;" onclick="loadBenchmarkDashboard()">Refresh</button>
+    <span id="bd-status" style="font-size:.72rem;color:var(--muted);"></span>
+  </div>
+  <div style="flex:1;overflow:auto;padding:10px 12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+    <div>
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:6px;">Latest benchmark probes</div>
+      <table style="width:100%;border-collapse:collapse;font-size:.74rem;">
+        <thead><tr><th>Provider</th><th>Model</th><th>Probe</th><th>OK</th><th>ms</th></tr></thead>
+        <tbody id="bd-latest"><tr><td colspan="5" style="color:var(--muted)">No data yet.</td></tr></tbody>
+      </table>
+    </div>
+    <div>
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:6px;">Historical benchmark records</div>
+      <table style="width:100%;border-collapse:collapse;font-size:.74rem;">
+        <thead><tr><th>Provider</th><th>Model</th><th>Task</th><th>Quality</th><th>ms</th></tr></thead>
+        <tbody id="bd-history"><tr><td colspan="5" style="color:var(--muted)">No data yet.</td></tr></tbody>
+      </table>
+    </div>
+    <div style="grid-column:1 / span 2;">
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:6px;">Cost-quality tradeoff view</div>
+      <table style="width:100%;border-collapse:collapse;font-size:.74rem;">
+        <thead><tr><th>Provider</th><th>Model</th><th>Quality</th><th>Cost / 1k tok</th><th>Latency ms</th><th>Value</th></tr></thead>
+        <tbody id="bd-tradeoff"><tr><td colspan="6" style="color:var(--muted)">No data yet.</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- ── Fine-tuning Dashboard Panel ────────────────────────────────────────── -->
+<div id="finetune-dashboard-panel" style="position:fixed;bottom:80px;right:20px;width:900px;max-width:calc(100vw - 40px);max-height:620px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:52;box-shadow:0 8px 32px rgba(0,0,0,.45);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🧪 Fine-tuning Job Dashboard</span>
+    <button class="panel-btn" onclick="closeFinetuneDashboardPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;">
+    <label style="font-size:.72rem;color:var(--muted);">Status</label>
+    <select id="ft-filter" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+      <option value="">All</option>
+      <option value="queued">Queued</option>
+      <option value="running">Running</option>
+      <option value="succeeded">Succeeded</option>
+      <option value="failed">Failed</option>
+      <option value="cancelled">Cancelled</option>
+    </select>
+    <button class="btn-primary" style="height:32px;font-size:.78rem;padding:0 12px;" onclick="loadFinetuneDashboard()">Refresh</button>
+    <span id="ft-status" style="font-size:.72rem;color:var(--muted);"></span>
+  </div>
+  <div style="flex:1;overflow:auto;padding:10px 12px;">
+    <table style="width:100%;border-collapse:collapse;font-size:.74rem;">
+      <thead><tr><th>ID</th><th>Status</th><th>Model</th><th>Training File</th><th>Created</th><th>Finished</th></tr></thead>
+      <tbody id="ft-rows"><tr><td colspan="6" style="color:var(--muted)">No jobs yet.</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── RAG Corpus Browser Panel ───────────────────────────────────────────── -->
+<div id="rag-corpus-panel" style="position:fixed;bottom:80px;right:20px;width:980px;max-width:calc(100vw - 40px);max-height:620px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:52;box-shadow:0 8px 32px rgba(0,0,0,.45);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">📚 RAG Corpus Browser</span>
+    <button class="panel-btn" onclick="closeRagCorpusPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:10px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;">
+    <input id="rc-query" placeholder="Search corpus text/source/title" style="flex:1;padding:7px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+    <button class="btn-primary" style="height:32px;font-size:.78rem;padding:0 12px;" onclick="loadRagCorpus()">Search</button>
+    <span id="rc-status" style="font-size:.72rem;color:var(--muted);"></span>
+  </div>
+  <div style="flex:1;overflow:auto;padding:10px 12px;">
+    <table style="width:100%;border-collapse:collapse;font-size:.74rem;">
+      <thead><tr><th>ID</th><th>Source</th><th>Preview</th><th>Org</th><th>Action</th></tr></thead>
+      <tbody id="rc-rows"><tr><td colspan="5" style="color:var(--muted)">No corpus docs yet.</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<!-- ── Multi-user Admin Dashboard Panel ───────────────────────────────────── -->
+<div id="admin-dashboard-panel" style="position:fixed;bottom:80px;right:20px;width:980px;max-width:calc(100vw - 40px);max-height:640px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:52;box-shadow:0 8px 32px rgba(0,0,0,.45);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">👥 Multi-user Admin Dashboard</span>
+    <button class="panel-btn" onclick="closeAdminDashboardPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;">
+    <label style="font-size:.72rem;color:var(--muted);">Usage window</label>
+    <input id="ad-days" type="number" min="1" max="365" value="7" style="width:84px;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+    <button class="btn-primary" style="height:32px;font-size:.78rem;padding:0 12px;" onclick="loadAdminDashboard()">Refresh</button>
+    <span id="ad-status" style="font-size:.72rem;color:var(--muted);"></span>
+  </div>
+  <div style="flex:1;overflow:auto;padding:10px 12px;display:grid;grid-template-columns:1fr 1fr;gap:10px;">
+    <div>
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:6px;">Users</div>
+      <table style="width:100%;border-collapse:collapse;font-size:.74rem;"><thead><tr><th>Username</th><th>Role</th><th>Email</th></tr></thead><tbody id="ad-users"><tr><td colspan="3" style="color:var(--muted)">-</td></tr></tbody></table>
+    </div>
+    <div>
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:6px;">Quota limits</div>
+      <table style="width:100%;border-collapse:collapse;font-size:.74rem;"><thead><tr><th>User</th><th>Daily</th><th>Weekly</th><th>Monthly</th></tr></thead><tbody id="ad-quota"><tr><td colspan="4" style="color:var(--muted)">-</td></tr></tbody></table>
+    </div>
+    <div style="grid-column:1 / span 2;">
+      <div style="font-size:.72rem;color:var(--muted);margin-bottom:6px;">Usage/cost by user</div>
+      <table style="width:100%;border-collapse:collapse;font-size:.74rem;"><thead><tr><th>User</th><th>Calls</th><th>Tokens</th><th>Cost USD</th></tr></thead><tbody id="ad-usage"><tr><td colspan="4" style="color:var(--muted)">-</td></tr></tbody></table>
+    </div>
+  </div>
+</div>
+
+<!-- ── Code Runner Panel ──────────────────────────────────────────────────── -->
+<div id="code-runner-panel" style="position:fixed;bottom:80px;right:20px;width:900px;max-width:calc(100vw - 40px);max-height:680px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:53;box-shadow:0 8px 32px rgba(0,0,0,.45);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">▶️ Sandboxed Code Runner</span>
+    <button class="panel-btn" onclick="closeCodeRunnerPanel()" title="Close">✕</button>
+  </div>
+  <div style="padding:8px 12px;border-bottom:1px solid var(--border);display:flex;gap:8px;align-items:center;">
+    <label style="font-size:.72rem;color:var(--muted);">Language</label>
+    <select id="cr-lang" style="padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.78rem;">
+      <option value="javascript">JavaScript</option>
+      <option value="python">Python (Pyodide)</option>
+    </select>
+    <button class="btn-primary" style="height:32px;font-size:.78rem;padding:0 12px;" onclick="runSandboxCode()">Run</button>
+    <span id="cr-status" style="font-size:.72rem;color:var(--muted);"></span>
+  </div>
+  <div style="flex:1;display:grid;grid-template-columns:1fr 1fr;min-height:0;">
+    <textarea id="cr-code" style="margin:0;border:none;border-right:1px solid var(--border);background:var(--bg);color:var(--text);padding:12px;font-family:ui-monospace,monospace;resize:none;outline:none;" spellcheck="false">console.log('Hello from Nexus code sandbox');</textarea>
+    <iframe id="cr-frame" sandbox="allow-scripts" style="width:100%;height:100%;border:none;background:#0b1220;"></iframe>
+  </div>
+</div>
+
+<script>
+marked.setOptions({breaks:true,gfm:true});
+
+if (window.mermaid) {
+  mermaid.initialize({ startOnLoad: false, securityLevel: "loose", theme: "neutral" });
+}
+
+// Device/install/haptic utilities moved to static/js/utilities/device-utils.js
+
+let sid=null, busy=false, drawerOpen=false, sidebarOpen=false;
+let attachedFiles=[], activeChatId=null;
+let currentStreamId=null, abortController=null;
+let voiceRecognition=null, isListening=false;
+let artifactCount=0;
+
+// ── TOKEN HANDLING ─────────────────────────────────────────────────────────
+// UI helper utilities moved to static/js/utilities/ui-helpers.js
+
+// ── ARTIFACT RENDERER ──────────────────────────────────────────────────────
+// Artifact and system-message utilities moved to static/js/utilities/artifacts.js
+
+// ── INIT ──────────────────────────────────────────────────────────────────────
+// ── PERSONAS ──────────────────────────────────────────────────────────────────
+window._providerCache = [];
+// Persona runtime utilities moved to static/js/utilities/personas-runtime.js
+
+async function init(){
+  const [,pd,sd,cfg,safety] = await Promise.all([
+    fetch('/health').then(r=>r.json()).catch(()=>({})),
+    fetch('/providers').then(r=>r.json()).catch(()=>({providers:[]})),
+    fetch('/session',{method:'POST'}).then(r=>r.json()),
+    fetch('/settings').then(r=>r.json()).catch(()=>({})),
+    fetch('/safety/profiles').then(r=>r.json()).catch(()=>({active:'standard',profiles:{}})),
+  ]);
+  sid = sd.session_id;
+  if(sd.has_memory) showMemoryBadge();
+  window._providerCache = pd.providers||[];
+  updateProviderUI(pd.providers||[]);
+  updateSafetyBadge(safety.active||cfg.safety_profile||'standard','global');
+  populateSettings(cfg, pd.providers||[], {
+    safety_profile:safety.active||cfg.safety_profile||'standard',
+    available_profiles:Object.keys(safety.profiles||{}),
+    profiles:safety.profiles||{},
+    policy:(safety.profiles||{})[safety.active||cfg.safety_profile||'standard']||{},
+  });
+  setInterval(refreshProviders, 15000);
+  const profileNames = Object.keys(safety.profiles||{});
+  if(!profileNames.length) profileNames.push('standard','strict','sandbox','research');
+  await Promise.all([loadChatList(), loadMemoryCount(), loadPersonas(), loadPrefs(),
+                     initSessionSafetySelector(profileNames)]);
+  setupDrop();
+  setupVoice();
+let voiceRecognition=null, isListening=false;
+let artifactCount=0;
+
+// ── WEB SPEECH API ────────────────────────────────────────────────────────────
+function setListening(val){
+  isListening=val;
+  const btn=document.getElementById('voice-btn');
+  if(!btn)return;
+  btn.classList.toggle('listening',val);
+  btn.title=val?'Stop recording':'Voice input';
+}
+function toggleVoice(){
+  if(!('webkitSpeechRecognition' in window||'SpeechRecognition' in window)){
+    alert('Your browser does not support speech recognition. Try Chrome or Edge.');
+    return;
+  }
+  if(isListening){voiceRecognition?.stop();setListening(false);return;}
+  const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+  voiceRecognition=new SR();
+  voiceRecognition.continuous=false;
+  voiceRecognition.interimResults=true;
+  voiceRecognition.lang=navigator.language||'en-US';
+  const taskEl=document.getElementById('task');
+  let interimStart=taskEl?taskEl.value:'';
+  voiceRecognition.onstart=()=>setListening(true);
+  voiceRecognition.onend=()=>setListening(false);
+  voiceRecognition.onerror=(e)=>{setListening(false);if(e.error!=='no-speech')console.warn('Speech error:',e.error);};
+  voiceRecognition.onresult=(e)=>{
+    if(!taskEl)return;
+    let interim='',final='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      if(e.results[i].isFinal)final+=e.results[i][0].transcript;
+      else interim+=e.results[i][0].transcript;
+    }
+    taskEl.value=interimStart+(final||interim);
+    taskEl.dispatchEvent(new Event('input'));
+    if(final)interimStart+=final;
+  };
+  voiceRecognition.start();
+}
+}
+
+// ── SIDEBAR ────────────────────────────────────────────────────────────────────
+// Sidebar utilities moved to static/js/utilities/sidebar.js
+
+// ── MEMORY ─────────────────────────────────────────────────────────────────────
+// Memory count utilities moved to static/js/utilities/memory-projects.js
+
+// ── SETTINGS ───────────────────────────────────────────────────────────────────
+// Settings utilities moved to static/js/utilities/settings.js
+
+// ── VOICE INPUT ────────────────────────────────────────────────────────────────
+// Input handling utilities moved to static/js/utilities/input-handling.js
+
+// ── MESSAGES ───────────────────────────────────────────────────────────────────
+function showChat(){document.getElementById('welcome').style.display='none'}
+function clearMessages(){
+  const msgs=document.getElementById('messages'),typing=document.getElementById('typing');
+  [...msgs.children].forEach(c=>{if(c!==typing)c.remove()});
+}
+function scrollBottom(){const m=document.getElementById('messages');m.scrollTop=m.scrollHeight}
+function addBubble(role,content='',meta='',rawText=''){
+  const msgs=document.getElementById('messages'),typing=document.getElementById('typing');
+  const row=document.createElement('div');row.className=`msg-row ${role}`;
+  if(rawText) row.dataset.markdown = rawText;
+  const wrap=document.createElement('div');wrap.className='msg-wrap';
+  const bub=document.createElement('div');bub.className='bubble';bub.innerHTML=content;
+  wrap.appendChild(bub);
+  if(meta){const m=document.createElement('div');m.className='msg-meta';m.textContent=meta;wrap.appendChild(m)}
+  // Add edit/retry/tts actions
+  addMessageActions(wrap, role, rawText||bub.innerText, row);
+  // Add reaction buttons on agent messages
+  if (role === 'agent') {
+    const msgIdx = document.querySelectorAll('.msg-row.agent').length;
+    addReactionButtons(wrap, msgIdx);
+    enhanceRenderedContent(bub);
+  }
+  row.appendChild(wrap);msgs.insertBefore(row,typing);scrollBottom();
+  return{wrap,bub,row};
+}
+function showTyping(v){document.getElementById('typing').style.display=v?'block':'none';if(v)scrollBottom()}
+
+function renderMd(md){
+  const tmp=document.createElement('div');tmp.innerHTML=marked.parse(md);
+  tmp.querySelectorAll('pre code').forEach(b=>{
+    if (b.classList.contains('language-mermaid')) return;
+    try{hljs.highlightElement(b)}catch(e){}
+  });
+  tmp.querySelectorAll('pre > code.language-mermaid').forEach(code=>{
+    const pre = code.closest('pre');
+    const host = document.createElement('div');
+    host.className = 'mermaid';
+    host.textContent = code.textContent || '';
+    pre.replaceWith(host);
+  });
+  tmp.querySelectorAll('pre > code.language-chart').forEach(code=>{
+    const pre = code.closest('pre');
+    const host = document.createElement('div');
+    host.className = 'chart-wrap';
+    host.setAttribute('data-chart-spec', code.textContent || '{}');
+    pre.replaceWith(host);
+  });
+  return tmp.innerHTML;
+}
+
+function enhanceRenderedContent(el){
+  if(!el) return;
+  if (window.renderMathInElement) {
+    try {
+      renderMathInElement(el, {
+        delimiters: [
+          { left: '$$', right: '$$', display: true },
+          { left: '$', right: '$', display: false },
+          { left: '\\(', right: '\\)', display: false },
+          { left: '\\[', right: '\\]', display: true }
+        ],
+        throwOnError: false,
+      });
+    } catch (_) {}
+  }
+  if (window.mermaid) {
+    const nodes = el.querySelectorAll('.mermaid:not([data-mermaid-ready="1"])');
+    if (nodes.length) {
+      nodes.forEach((n) => { n.setAttribute('data-mermaid-ready', '1'); });
+      mermaid.run({ nodes }).catch(() => {});
+    }
+  }
+  if (window.Chart) {
+    const nodes = el.querySelectorAll('.chart-wrap:not([data-chart-ready="1"])');
+    nodes.forEach((node) => {
+      node.setAttribute('data-chart-ready', '1');
+      const specRaw = node.getAttribute('data-chart-spec') || '{}';
+      let spec = {};
+      try { spec = JSON.parse(specRaw); } catch (_) { spec = {}; }
+      const canvas = document.createElement('canvas');
+      node.appendChild(canvas);
+      const cfg = spec && typeof spec === 'object' ? spec : {};
+      const type = cfg.type || 'bar';
+      const data = cfg.data || {
+        labels: ['A', 'B', 'C'],
+        datasets: [{ label: 'Values', data: [1, 2, 3], backgroundColor: ['#22c55e', '#7c6af7', '#f59e0b'] }],
+      };
+      const options = cfg.options || { responsive: true, maintainAspectRatio: false };
+      try {
+        new Chart(canvas.getContext('2d'), { type, data, options });
+      } catch (err) {
+        node.textContent = 'Chart render failed: ' + String(err);
+      }
+    });
+  }
+}
+function makeCodeViewer(path,content){
+  const ext=(path||'').split('.').pop()||'plaintext';
+  const tmp=document.createElement('code');tmp.className=`language-${ext}`;tmp.textContent=content||'';
+  try{hljs.highlightElement(tmp)}catch(e){}
+  return `<div class="code-viewer"><div class="code-viewer-header">📄 ${esc(path||'file')}</div>
+    <pre class="hljs">${tmp.innerHTML}</pre></div>`;
+}
+
+// ── STOP STREAM ────────────────────────────────────────────────────────────────
+async function stopStream(){
+  if(currentStreamId){
+    await fetch(`/agent/stop/${currentStreamId}`,{method:'POST'}).catch(()=>{});
+  }
+  if(abortController) abortController.abort();
+  setBusy(false);
+}
+function setBusy(v){
+  busy=v;
+  document.getElementById('send-btn').disabled=v;
+  document.getElementById('stop-btn').classList.toggle('visible',v);
+  document.getElementById('send-btn').style.display=v?'none':'flex';
+}
+
+function normalizeFrontendErrorMessage(rawMsg){
+  const msg = String(rawMsg || '').trim();
+  const lower = msg.toLowerCase();
+  if(!msg) return 'The request could not be completed. Please try again.';
+  if(lower.includes('validation_error') || lower.includes('task is required')){
+    return 'Please enter a prompt before sending.';
+  }
+  if(lower.includes('rate limit') || lower.includes('429') || lower.includes('exhausted')){
+    return 'Providers are temporarily busy. Retry in a few seconds.';
+  }
+  if(lower.includes('streaming response body is unavailable') || lower.includes('unexpected response type')){
+    return 'Connection is unstable right now. Please retry this message.';
+  }
+  if(lower.includes('failed to fetch') || lower.includes('networkerror')){
+    return 'Network request failed. Check your connection and try again.';
+  }
+  return msg;
+}
+
+function formatFallbackReason(reason){
+  const normalized = String(reason || '').trim().toLowerCase();
+  if(!normalized) return '';
+  if(normalized === 'timeout') return 'Request timed out before provider response completed.';
+  if(normalized === 'provider_unavailable') return 'No provider was reachable for this turn.';
+  return normalized.replace(/_/g, ' ');
+}
+
+function makeActivityTrace(hostWrap){
+  const details=document.createElement('details');
+  details.className='activity-details';
+  details.open=false;
+  const summary=document.createElement('summary');
+  summary.innerHTML='<span>🛰️</span><span class="activity-summary-label">Started agent run</span><span class="activity-summary-count">0 updates</span>';
+  const log=document.createElement('div');
+  log.className='activity-log';
+  const groupsWrap=document.createElement('div');
+  groupsWrap.className='activity-groups';
+  details.appendChild(summary);
+  log.appendChild(groupsWrap);
+  details.appendChild(log);
+  hostWrap.insertBefore(details, hostWrap.firstChild);
+
+  let count=0;
+  const labelEl=summary.querySelector('.activity-summary-label');
+  const countEl=summary.querySelector('.activity-summary-count');
+  const GROUPS=[
+    {key:'planning', title:'Planning'},
+    {key:'tooling', title:'Tooling'},
+    {key:'finalization', title:'Finalization'},
+  ];
+  const groupState={};
+  GROUPS.forEach(({key,title})=>{
+    const group=document.createElement('div');
+    group.className='activity-group';
+    group.dataset.group=key;
+    const head=document.createElement('div');
+    head.className='activity-group-head';
+    head.innerHTML=`<span>${title}</span><span class="activity-group-count">0</span>`;
+    const body=document.createElement('div');
+    body.className='activity-group-body';
+    group.appendChild(head);
+    group.appendChild(body);
+    groupsWrap.appendChild(group);
+    groupState[key]={count:0,body,countEl:head.querySelector('.activity-group-count')};
+  });
+
+  const clip=(txt,max=180)=>{
+    const s=String(txt||'').replace(/\s+/g,' ').trim();
+    return s.length>max ? `${s.slice(0,max-1)}…` : s;
+  };
+
+  const stamp=()=>new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+
+  const push=(headline, detail='', section='planning')=>{
+    if(!headline) return;
+    count += 1;
+    if(labelEl) labelEl.textContent = clip(headline, 84);
+    if(countEl) countEl.textContent = `${count} update${count===1?'':'s'}`;
+    const safeSection = groupState[section] ? section : 'planning';
+    groupState[safeSection].count += 1;
+    if(groupState[safeSection].countEl){
+      groupState[safeSection].countEl.textContent = String(groupState[safeSection].count);
+    }
+    const row=document.createElement('div');
+    row.className='activity-item';
+    const body=detail ? `${headline} — ${clip(detail, 220)}` : headline;
+    row.innerHTML=`<span class="activity-time">${stamp()}</span><span class="activity-text">${esc(body)}</span>`;
+    groupState[safeSection].body.appendChild(row);
+    log.scrollTop=log.scrollHeight;
+  };
+
+  return {details, push};
+}
+
+function summarizeActivityEvent(evt){
+  if(!evt || !evt.type) return null;
+  const t=evt.type;
+  if(t==='status') return {headline: evt.message || 'Processing request', section:'planning'};
+  if(t==='complexity') return {headline: `Complexity routing: ${evt.level || 'unknown'}`, section:'planning'};
+  if(t==='plan') return {headline:'Updated execution plan', detail:`${(evt.steps||[]).length} step(s)`, section:'planning'};
+  if(t==='clarify') return {headline:'Needs clarification', detail:'Awaiting user input before continuing', section:'planning'};
+  if(t==='think') return {headline:'Reasoning step', detail:evt.thought || '', section:'planning'};
+  if(t==='subtask') return {headline:'Started subtask', detail:evt.subtask?.description || evt.description || evt.message || '', section:'planning'};
+  if(t==='subtask_done') return {headline:'Completed subtask', detail:evt.subtask?.description || evt.description || evt.message || evt.result || '', section:'planning'};
+  if(t==='autonomy_done') return {headline:'Autonomous run complete', detail:evt.description || evt.message || evt.result || '', section:'finalization'};
+  if(t==='tool_start') return {headline:`Started ${evt.action || 'tool'} batch`, detail:evt.label || '', section:'tooling'};
+  if(t==='tool') return {headline:`Tool: ${evt.action || 'unknown'}`, detail:evt.label || evt.result || '', section:'tooling'};
+  if(t==='file_diff') return {headline:'Generated file diff', detail:evt.path || '', section:'tooling'};
+  if(t==='image') return {headline:'Generated image artifact', detail:evt.prompt || '', section:'tooling'};
+  if(t==='sandbox') return {headline:'Sandbox context set', detail:evt.repo || 'session workdir', section:'planning'};
+  if(t==='approval_required') return {headline:'Approval required', detail:evt.note || evt.approval_id || '', section:'tooling'};
+  if(t==='fallback') return {headline:'Provider fallback activated', detail:evt.chain || '', section:'finalization'};
+  if(t==='diagnostic') return {headline:'Diagnostics updated', section:'finalization'};
+  if(t==='confidence') return {headline:`Confidence ${(Number(evt.value||0)*100).toFixed(0)}%`, section:'finalization'};
+  if(t==='trace') return {headline:'Execution trace received', detail:`${(evt.steps||[]).length} step(s)`, section:'finalization'};
+  if(t==='token') return {headline:'Token usage updated', section:'finalization'};
+  if(t==='token_chunk') return {headline:'Streaming final response', section:'finalization'};
+  if(t==='system') return {headline:evt.message || 'System update', section:'planning'};
+  if(t==='done') return {headline:'Response complete', section:'finalization'};
+  if(t==='error') return {headline:'Response error', detail:evt.message || '', section:'finalization'};
+  return null;
+}
+
+// ── STREAMING SEND ─────────────────────────────────────────────────────────────
+async function send(){
+  const ta = document.getElementById('task');
+  if(!ta) return;
+  const val=ta.value.trim();
+  if(!val||busy) return;
+  // Auto-show token bar if a GitHub URL is in the message (for private repos)
+  if(/https:\/\/github\.com\/.+\/.+/.test(val) && !val.includes('ghp_') && !val.includes('github_pat_')){
+    document.getElementById('token-bar').style.display='flex';
+  }
+  setBusy(true);
+  haptic('medium');
+  if(drawerOpen) toggleDrawer();
+  if(isListening){voiceRecognition?.stop();setListening(false)}
+
+  showChat();
+  triggerAutoSave(500);  // create entry in sidebar as soon as user sends
+
+  let userHtml=esc(val).replace(/\n/g,'<br>');
+  if(attachedFiles.length){
+    const previews=attachedFiles.map(f=>
+      f.type.startsWith('image/')?
+      `<img src="data:${f.type};base64,${f.content}" style="max-width:120px;max-height:80px;border-radius:6px;display:block;margin-top:4px">`:
+      `<span style="font-size:.7rem;opacity:.7">📄 ${esc(f.name)}</span>`
+    ).join('');
+    userHtml+=`<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px">${previews}</div>`;
+  }
+  addBubble('user',userHtml);
+
+  const files=[...attachedFiles];
+  attachedFiles=[];renderFileChips();
+  // Store task for clarify continuation
+  window._lastTask = val;
+  ta.value='';ta.style.height='auto';
+  showTyping(true);
+
+  currentStreamId=crypto.randomUUID();
+  abortController=new AbortController();
+  const {wrap:agentWrap,bub:agentBub,row:agentRow}=addBubble('agent','');
+  const activityTrace = makeActivityTrace(agentWrap);
+  activityTrace.push('Queued user request', val, 'planning');
+  let toolContainer=null, gotFirst=false;
+  let streamedMarkdown='';
+  let hasTokenStream=false;
+  let loggedTokenStreamActivity=false;
+  let streamElapsedSeconds=0;
+  let sawAnySseEvent=false;
+  let sawTerminalEvent=false;
+  let sawDoneMarker=false;
+  let sawClarifyEvent=false;
+
+  const recoverTerminalEventFromTrace = async(traceId)=>{
+    if(!traceId) return false;
+    const retryDelays=[120,420];
+    for(const delayMs of retryDelays){
+      if(delayMs>0) await new Promise(r=>setTimeout(r,delayMs));
+      try{
+        const tr=await fetch(`/agent/trace/${encodeURIComponent(traceId)}`, {cache:'no-store'});
+        if(!tr.ok) continue;
+        const payload=await tr.json();
+        const events=Array.isArray(payload?.events)?payload.events:[];
+        const terminal=[...events].reverse().find(e=>e && (e.type==='done' || e.type==='error'));
+        if(!terminal) continue;
+
+        sawTerminalEvent=true;
+        agentBub.querySelector('[data-stream-status="1"]')?.remove();
+
+        if(terminal.type==='error'){
+          const errEl=document.createElement('div');
+          errEl.style.cssText='color:var(--red);font-size:.82rem;margin-top:4px';
+          errEl.textContent='⚠️ '+normalizeFrontendErrorMessage(String(terminal.message||'Unknown error'));
+          agentBub.appendChild(errEl);
+          return true;
+        }
+
+        const recoveredText=String(terminal.content||'').trim() || 'Request completed without a text payload.';
+        const recoveredMeta=document.createElement('div');
+        recoveredMeta.className='msg-meta';
+        recoveredMeta.textContent='Recovered final response from trace.';
+        agentBub.appendChild(recoveredMeta);
+        const recoveredBody=document.createElement('div');
+        recoveredBody.innerHTML=renderMd(recoveredText);
+        enhanceRenderedContent(recoveredBody);
+        agentBub.appendChild(recoveredBody);
+        return true;
+      }catch{}
+    }
+    return false;
+  };
+
+  try{
+    const resp=await fetch('/agent/stream',{
+      method:'POST',signal:abortController.signal,
+      headers:{'Content-Type':'application/json','X-Nexus-Session-Id':sid||''},
+      body:JSON.stringify({task:val,session_id:sid,files,stream_id:currentStreamId}),
+    });
+    if(!resp.ok){
+      let backendMsg = `Request failed (${resp.status})`;
+      try{
+        const raw = await resp.text();
+        if(raw){
+          try{
+            const parsed = JSON.parse(raw);
+            backendMsg = parsed.error || parsed.detail || raw;
+          } catch {
+            backendMsg = raw;
+          }
+        }
+      } catch {}
+      throw new Error(backendMsg);
+    }
+    const contentType = (resp.headers.get('content-type')||'').toLowerCase();
+    if(!contentType.includes('text/event-stream')){
+      let backendMsg = `Unexpected response type: ${contentType||'unknown'}`;
+      try{
+        const raw = await resp.text();
+        if(raw){
+          try{
+            const parsed = JSON.parse(raw);
+            backendMsg = parsed.error || parsed.detail || raw;
+          } catch {
+            backendMsg = raw;
+          }
+        }
+      } catch {}
+      throw new Error(backendMsg);
+    }
+    if(!resp.body){
+      throw new Error('Streaming response body is unavailable.');
+    }
+    const reader=resp.body.getReader(),decoder=new TextDecoder();
+    let buf='';
+
+    while(true){
+      const{value,done}=await reader.read();
+      if(done) break;
+      buf+=decoder.decode(value,{stream:true});
+      const parts=buf.split('\n\n');buf=parts.pop();
+
+      for(const part of parts){
+        if(!part.startsWith('data:')) continue;
+        const rawData = part.slice(5).trim();
+        if(rawData === '[DONE]'){
+          sawDoneMarker = true;
+          continue;
+        }
+        let evt;try{evt=JSON.parse(rawData)}catch{continue}
+        sawAnySseEvent = true;
+        if(!gotFirst){showTyping(false);gotFirst=true}
+
+        const act=summarizeActivityEvent(evt);
+        if(act){
+          if(evt.type==='token_chunk'){
+            if(!loggedTokenStreamActivity){
+              loggedTokenStreamActivity=true;
+              activityTrace.push(act.headline, act.detail||'', act.section||'planning');
+            }
+          } else if(evt.type==='token'){
+            // Token updates are noisy; keep only meaningful milestones in trace.
+          } else {
+            activityTrace.push(act.headline, act.detail||'', act.section||'planning');
+          }
+        }
+
+        if(evt.type==='clarify'){
+          sawClarifyEvent = true;
+          // Render interactive clarify card
+          const cardModel=evt.card||{};
+          const card=document.createElement('div');card.className='clarify-card';
+          const title=document.createElement('div');title.className='clarify-title';
+          title.textContent='Clarification required before execution';
+          card.appendChild(title);
+
+          if(Array.isArray(cardModel.what_is_unclear)&&cardModel.what_is_unclear.length){
+            const label=document.createElement('div');label.className='clarify-section-label';
+            label.textContent='What is unclear';
+            card.appendChild(label);
+            const ul=document.createElement('ul');ul.className='clarify-unclear';
+            cardModel.what_is_unclear.forEach(item=>{
+              const li=document.createElement('li');li.textContent=String(item||'');ul.appendChild(li);
+            });
+            card.appendChild(ul);
+          }
+
+          if(cardModel.why_it_blocks_correctness){
+            const why=document.createElement('div');why.className='clarify-why';
+            why.textContent=String(cardModel.why_it_blocks_correctness);
+            card.appendChild(why);
+          }
+
+          const answers={};
+          (evt.questions||[]).forEach(q=>{
+            const qDiv=document.createElement('div');qDiv.className='clarify-q';
+            const qText=document.createElement('div');qText.className='clarify-q-text';
+            qText.textContent=q.text;qDiv.appendChild(qText);
+
+            if(q.type==='text'||(!q.options||!q.options.length)){
+              // Free-text input (e.g. GitHub username, repo name)
+              const inp=document.createElement('input');
+              inp.type='text';inp.placeholder=q.placeholder||'Type your answer…';
+              inp.style.cssText='width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:7px 11px;color:var(--text);font-size:.82rem;outline:none;margin-top:2px';
+              inp.addEventListener('focus',()=>inp.style.borderColor='var(--accent)');
+              inp.addEventListener('blur', ()=>inp.style.borderColor='var(--border)');
+              inp.addEventListener('input',()=>{ answers[q.id||q.text]=inp.value.trim(); });
+              qDiv.appendChild(inp);
+            } else {
+              // Multiple choice
+              const opts=document.createElement('div');opts.className='clarify-options';
+              (q.options||[]).forEach(opt=>{
+                const btn=document.createElement('button');btn.className='clarify-opt';
+                btn.textContent=opt;
+                btn.onclick=()=>{
+                  opts.querySelectorAll('.clarify-opt').forEach(b=>b.classList.remove('selected'));
+                  btn.classList.add('selected');
+                  answers[q.id||q.text]=opt;
+                };
+                opts.appendChild(btn);
+              });
+              qDiv.appendChild(opts);
+            }
+            card.appendChild(qDiv);
+          });
+
+          if(Array.isArray(cardModel.options)&&cardModel.options.length){
+            const qDiv=document.createElement('div');qDiv.className='clarify-q';
+            const qText=document.createElement('div');qText.className='clarify-q-text';
+            qText.textContent='Choose one option:';qDiv.appendChild(qText);
+            const opts=document.createElement('div');opts.className='clarify-options';
+            cardModel.options.forEach(opt=>{
+              const optLabel=typeof opt==='string'?opt:(opt?.label||opt?.id||'Option');
+              const btn=document.createElement('button');btn.className='clarify-opt';
+              btn.textContent=optLabel;
+              btn.onclick=()=>{
+                opts.querySelectorAll('.clarify-opt').forEach(b=>b.classList.remove('selected'));
+                btn.classList.add('selected');
+                answers.option=optLabel;
+              };
+              if(typeof opt==='object'&&opt?.recommended){btn.classList.add('selected');answers.option=optLabel;}
+              opts.appendChild(btn);
+            });
+            qDiv.appendChild(opts);
+            card.appendChild(qDiv);
+          }
+
+          if(cardModel.allow_freeform){
+            const qDiv=document.createElement('div');qDiv.className='clarify-q';
+            const qText=document.createElement('div');qText.className='clarify-q-text';
+            qText.textContent=cardModel.freeform_label||'Additional clarification';qDiv.appendChild(qText);
+            const inp=document.createElement('input');
+            inp.type='text';inp.placeholder='Optional details...';
+            inp.style.cssText='width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:7px 11px;color:var(--text);font-size:.82rem;outline:none;margin-top:2px';
+            inp.addEventListener('input',()=>{answers.freeform=inp.value.trim();});
+            qDiv.appendChild(inp);
+            card.appendChild(qDiv);
+          }
+
+          // Submit button — sends answers back as a follow-up message
+          const sub=document.createElement('button');sub.className='clarify-submit';
+          sub.textContent='Continue →';
+          sub.onclick=async()=>{
+            const answerText=Object.entries(answers)
+              .map(([k,v])=>`${k}: ${v}`).join('\n');
+            if(!answerText){alert('Please select at least one option.');return}
+            card.style.opacity='.5';card.style.pointerEvents='none';
+            // Include original task so agent has full context
+            const original=window._lastTask||'';
+            ta.value=`[Clarification answers for: "${original}"]\n${answerText}\n\nNow proceed with the original task.`;
+            await new Promise(r=>setTimeout(r,100));
+            send();
+          };
+          card.appendChild(sub);
+          agentBub.appendChild(card);scrollBottom();
+
+        } else if(evt.type==='plan'){
+          if (typeof swarmRecordProgressEvent === 'function') swarmRecordProgressEvent(evt);
+          const card=document.createElement('div');card.className='plan-card';
+          const title=document.createElement('div');title.className='plan-title';
+          title.textContent='📋 ' + (evt.title||'Build plan');
+          card.appendChild(title);
+          const ol=document.createElement('ul');ol.className='plan-steps';
+          (evt.steps||[]).forEach((step,i)=>{
+            const li=document.createElement('li');li.className='plan-step';
+            // Strip leading number if model already numbered it (e.g. "1. Do thing")
+            const clean=step.replace(/^\d+[\.\)\]\s]+/,'').trim();
+            li.innerHTML=`<span class="plan-step-num">${i+1}</span><span>${esc(clean)}</span>`;
+            ol.appendChild(li);
+          });
+          card.appendChild(ol);agentBub.appendChild(card);scrollBottom();
+
+        } else if(evt.type==='complexity'){
+          const colors={high:'#f59e0b',medium:'#7c6af7',low:'#22c55e'};
+          const labels={high:'🧠 Complex — routing to strongest provider',
+                        medium:'⚡ Medium complexity',low:'💬 Simple query'};
+          const tag=document.createElement('div');tag.className='complexity-tag';
+          tag.style.color=colors[evt.level]||'var(--muted)';
+          tag.textContent=labels[evt.level]||evt.level;
+          agentBub.appendChild(tag);scrollBottom();
+
+        } else if(evt.type==='think'){
+          const el=document.createElement('div');el.className='think-step';
+          el.textContent=evt.thought;agentBub.appendChild(el);scrollBottom();
+
+        } else if(evt.type==='subtask' || evt.type==='subtask_done' || evt.type==='autonomy_done'){
+          if (typeof swarmRecordProgressEvent === 'function') swarmRecordProgressEvent(evt);
+          const el=document.createElement('div');el.className='think-step';
+          const label = evt.type==='subtask_done' ? '✅' : (evt.type==='subtask' ? '🧩' : '🏁');
+          const text = evt.subtask?.description || evt.description || evt.message || evt.result || evt.type;
+          el.textContent=`${label} ${text}`;
+          agentBub.appendChild(el);scrollBottom();
+
+        } else if(evt.type==='system'){
+          addSysMsg(evt.message||'');
+        } else if(evt.type==='sandbox'){
+          // Sandbox indicator — show which repo is active
+          const tag=document.createElement('div');tag.className='sandbox-tag';
+          tag.textContent=`🔒 Sandbox: ${esc(evt.repo||'session workdir')}`;
+          agentBub.appendChild(tag);scrollBottom();
+
+        } else if(evt.type==='approval_required'){haptic('medium');
+          // Render inline approval card — user must approve/reject before tool executes
+          const apprCard=document.createElement('div');apprCard.className='approval-card';
+          const apprId=evt.approval_id||'';
+          const actionData=evt.action||{};
+          const actionStr=JSON.stringify(actionData,null,2);
+          apprCard.innerHTML=`
+            <div class="approval-card-header">⚠️ Action requires approval</div>
+            <div class="approval-card-action">${esc(actionStr)}</div>
+            <div class="approval-card-btns">
+              <button class="btn-approve" data-id="${esc(apprId)}" onclick="inlineApprove('${esc(apprId)}',true,this.closest('.approval-card'))">✓ Approve</button>
+              <button class="btn-reject" data-id="${esc(apprId)}" onclick="inlineApprove('${esc(apprId)}',false,this.closest('.approval-card'))">✕ Reject</button>
+              <span style="font-size:.72rem;color:var(--muted);">${esc(evt.note||'Waiting for decision…')}</span>
+            </div>`;
+          if(!toolContainer){toolContainer=document.createElement('div');agentBub.appendChild(toolContainer);}
+          toolContainer.appendChild(apprCard);
+          updateApprovalsBadge();
+          scrollBottom();
+
+        } else if(evt.type==='tool'){haptic('light');
+          if(!toolContainer){
+            const det=document.createElement('details');
+            det.className='tool-details';det.open=true;
+            const sumEl=document.createElement('summary');
+            sumEl.textContent='Working…';det.appendChild(sumEl);
+            agentBub.appendChild(det);toolContainer=det;
+          }
+          // Deduplicate: if the last tool step has the same action+label, increment its counter
+          const lastStep = toolContainer.querySelector('.tool-step:last-child');
+          const stepKey  = evt.action + '|' + evt.label;
+          if(lastStep && lastStep.dataset.key === stepKey){
+            const cnt = parseInt(lastStep.dataset.count||1) + 1;
+            lastStep.dataset.count = cnt;
+            const countEl = lastStep.querySelector('.t-count');
+            if(countEl) countEl.textContent = `×${cnt}`;
+            else {
+              const span = document.createElement('span');
+              span.className='t-count';
+              span.style.cssText='color:var(--accent);margin-left:6px;font-size:.7rem;font-weight:700';
+              span.textContent=`×${cnt}`;
+              lastStep.appendChild(span);
+            }
+          } else {
+            const el=document.createElement('div');el.className='tool-step';
+            el.dataset.key=stepKey;el.dataset.count='1';
+            const resultText = evt.result||'';
+            const isParseErr = resultText.startsWith('{"action"') || resultText.startsWith('Unknown action');
+            el.innerHTML=`<span class="t-icon">${esc(evt.icon)}</span>
+              <span class="t-label">${esc(evt.action)}</span>
+              <span class="t-result" style="${isParseErr?'color:var(--red)':''}">${esc(evt.label)}${isParseErr?' ⚠️ parse error':''}</span>`;
+              toolContainer.appendChild(el);
+          } // end dedup else
+          // Source cards for web_search results
+          if(evt.action==='web_search' && evt.result){
+            const sources=extractSources(evt.result);
+            if(sources?.length){
+              const cardsDiv=document.createElement('div');
+              cardsDiv.innerHTML=renderSourceCards(sources);
+              toolContainer.appendChild(cardsDiv);
+            }
+          }
+          // Artifact — open in side panel + show mini badge inline
+          if(evt.artifact && evt.file_content && evt.file_path){
+            openArtifactPanel(evt.file_path, evt.file_content);
+            const badge=document.createElement('div');
+            badge.style.cssText='font-size:.7rem;color:var(--teal);padding:3px 0;cursor:pointer';
+            badge.textContent=`✨ ${evt.file_path} opened in panel →`;
+            badge.onclick=()=>document.getElementById('artifact-panel').classList.add('open');
+            toolContainer.appendChild(badge);
+          } else if(evt.file_content&&evt.file_path){
+            toolContainer.insertAdjacentHTML('beforeend',makeCodeViewer(evt.file_path,evt.file_content));
+          }
+          scrollBottom();
+
+        } else if(evt.type==='image'){
+          // Render image inline
+          const imgWrap=document.createElement('div');imgWrap.className='img-bubble';
+          const img=document.createElement('img');
+          img.src=evt.url;
+          img.alt=evt.prompt||'Generated image';
+          img.loading='lazy';
+          img.onclick=()=>window.open(evt.url,'_blank');
+          const prompt=document.createElement('div');
+          prompt.className='img-prompt';prompt.textContent=evt.prompt||'';
+          imgWrap.appendChild(img);imgWrap.appendChild(prompt);
+          agentBub.appendChild(imgWrap);scrollBottom();
+
+        } else if(evt.type==='file_diff'){
+          const diffCard=document.createElement('div');
+          diffCard.style.cssText='margin:6px 0;border:1px solid var(--border);border-radius:8px;overflow:hidden;font-size:12px;font-family:monospace;';
+          const diffHdr=document.createElement('div');
+          diffHdr.style.cssText='padding:6px 10px;background:var(--surface2);display:flex;align-items:center;gap:8px;';
+          diffHdr.innerHTML=`<span>± ${esc(evt.path)}</span>${evt.truncated?'<span style="color:var(--muted);font-size:11px;">(truncated)</span>':''}`;
+          const diffBody=document.createElement('div');
+          diffBody.style.cssText='display:grid;grid-template-columns:1fr 1fr;max-height:280px;overflow:auto;';
+          const before=document.createElement('pre');
+          before.style.cssText='margin:0;padding:8px;background:rgba(255,80,80,0.06);border-right:1px solid var(--border);overflow:auto;white-space:pre-wrap;word-break:break-all;';
+          before.textContent=evt.before||'';
+          const after=document.createElement('pre');
+          after.style.cssText='margin:0;padding:8px;background:rgba(80,200,120,0.06);overflow:auto;white-space:pre-wrap;word-break:break-all;';
+          after.textContent=evt.after||'';
+          diffBody.appendChild(before); diffBody.appendChild(after);
+          diffCard.appendChild(diffHdr); diffCard.appendChild(diffBody);
+          if(!toolContainer){
+            const det=document.createElement('details');
+            det.className='tool-details';det.open=true;
+            const sumEl=document.createElement('summary');
+            sumEl.textContent='Working\u2026';det.appendChild(sumEl);
+            agentBub.appendChild(det);toolContainer=det;
+          }
+          toolContainer.appendChild(diffCard);
+          scrollBottom();
+
+        } else if(evt.type==='fallback'){
+          const tag=document.createElement('div');tag.className='fallback-tag';
+          tag.innerHTML=`↩️ Auto-fallback: ${esc(evt.chain)}`;
+          agentBub.insertBefore(tag,agentBub.firstChild);
+
+        } else if(evt.type==='token'){
+          updateLiveTokenCount(evt);
+          if(evt.elapsed_s!=null){
+            const parsedElapsed = parseFloat(evt.elapsed_s);
+            if(Number.isFinite(parsedElapsed)) streamElapsedSeconds = parsedElapsed;
+          }
+
+        } else if(evt.type==='token_chunk'){
+          hasTokenStream=true;
+          streamedMarkdown += String(evt.delta||'');
+          agentBub.innerHTML = renderMd(streamedMarkdown);
+          enhanceRenderedContent(agentBub);
+          scrollBottom();
+
+        } else if(evt.type==='status'){
+          const statusEl=document.createElement('div');
+          statusEl.className='msg-meta';
+          statusEl.dataset.streamStatus='1';
+          statusEl.textContent=evt.message||'Processing request...';
+          // Keep only one status line to avoid clutter.
+          const prior = agentBub.querySelector('[data-stream-status="1"]');
+          if(prior) prior.remove();
+          agentBub.appendChild(statusEl);
+          scrollBottom();
+
+        } else if(evt.type==='diagnostic'){
+          // Diagnostic info is already shown in the done-event footer — suppress inline display.
+
+        } else if(evt.type==='done'){haptic('success');
+          sawTerminalEvent = true;
+          activityTrace.details.open = false;
+          if (typeof swarmRecordProgressEvent === 'function') swarmRecordProgressEvent(evt);
+          if(evt.input_tokens||evt.output_tokens) showTokenCount(evt.input_tokens,evt.output_tokens);
+          if(toolContainer){
+            // Collapse the working section and show a step count in the summary
+            const stepCount=toolContainer.querySelectorAll('.tool-step').length;
+            const sumEl=toolContainer.querySelector('summary');
+            if(sumEl) sumEl.textContent=`⚙️ ${stepCount} step${stepCount!==1?'s':''} used`;
+            toolContainer.open=false;
+            agentBub.appendChild(document.createElement('hr'));
+          }
+          const finalText = evt.content||'';
+          const combinedText = streamedMarkdown || finalText;
+          const isClarifyTerminal = finalText.trim().startsWith('Clarification required before I can continue');
+          if(isClarifyTerminal && !sawClarifyEvent && !agentBub.querySelector('.clarify-card')){
+            const fallbackCard=document.createElement('div');fallbackCard.className='clarify-card';
+            const title=document.createElement('div');title.className='clarify-title';
+            title.textContent='Clarification required before execution';
+            fallbackCard.appendChild(title);
+            const why=document.createElement('div');why.className='clarify-why';
+            why.textContent='Please provide the missing details so I can continue correctly.';
+            fallbackCard.appendChild(why);
+            const qDiv=document.createElement('div');qDiv.className='clarify-q';
+            const qText=document.createElement('div');qText.className='clarify-q-text';
+            qText.textContent='What should I focus on first?';
+            qDiv.appendChild(qText);
+            const inp=document.createElement('input');
+            inp.type='text';inp.placeholder='Example: optimize combat loop and fix save bug';
+            inp.style.cssText='width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:7px 11px;color:var(--text);font-size:.82rem;outline:none;margin-top:2px';
+            qDiv.appendChild(inp);
+            fallbackCard.appendChild(qDiv);
+            const sub=document.createElement('button');sub.className='clarify-submit';
+            sub.textContent='Continue →';
+            sub.onclick=async()=>{
+              const ans=(inp.value||'').trim();
+              if(!ans){alert('Please enter a clarification first.');return;}
+              fallbackCard.style.opacity='.5';fallbackCard.style.pointerEvents='none';
+              const original=window._lastTask||'';
+              ta.value=`[Clarification answers for: "${original}"]\nfocus: ${ans}\n\nNow proceed with the original task.`;
+              await new Promise(r=>setTimeout(r,100));
+              send();
+            };
+            fallbackCard.appendChild(sub);
+            agentBub.appendChild(fallbackCard);
+          }
+          // Only render a text node if there is actual content to show.
+          // When the agent emits done with empty content (e.g. after a clarify card)
+          // we skip rendering to avoid leaving an empty container in the bubble.
+          if(combinedText.trim()){
+            const textNode=document.createElement('div');
+            agentBub.appendChild(textNode);
+            if(hasTokenStream){
+              textNode.innerHTML = renderMd(combinedText);
+              enhanceRenderedContent(textNode);
+            } else {
+              await typewrite(textNode,finalText);
+            }
+          } else if(!agentBub.children.length && !agentBub.textContent.trim()){
+            // Completely empty bubble with no prior content — show a soft fallback
+            const emptyEl=document.createElement('div');
+            emptyEl.style.cssText='color:var(--muted);font-size:.82rem;font-style:italic';
+            emptyEl.textContent='No response generated. Please try again.';
+            agentBub.appendChild(emptyEl);
+          }
+          agentBub.querySelector('[data-stream-status="1"]')?.remove();
+          agentRow.dataset.markdown = combinedText;
+          if(evt.provider&&evt.provider!=='Built-in'){
+            const m=document.createElement('div');m.className='msg-meta';
+            m.textContent=`${evt.provider} · ${evt.model}`;agentWrap.appendChild(m);
+          }
+          if(evt.fallback_reason || evt.provider_attempt_chain){
+            const fallbackMeta = document.createElement('div');
+            fallbackMeta.className = 'msg-meta';
+            fallbackMeta.style.color = 'var(--amber)';
+            const reasonText = formatFallbackReason(evt.fallback_reason);
+            const chainText = String(evt.provider_attempt_chain || '').trim();
+            fallbackMeta.textContent = `Fallback: ${reasonText || 'activated'}${chainText ? ` · ${chainText}` : ''}`;
+            agentWrap.appendChild(fallbackMeta);
+          }
+          // Confidence badge
+          if(evt.confidence!=null){
+            const conf = parseFloat(evt.confidence);
+            const cls  = conf>=0.85?'conf-high':conf>=0.6?'conf-medium':'conf-low';
+            const lbl  = conf>=0.85?'High confidence':conf>=0.6?'Uncertain':'Low confidence';
+            const badge=document.createElement('span');
+            badge.className=`confidence-badge ${cls}`;
+            badge.textContent=`${lbl} (${Math.round(conf*100)}%)`;
+            agentWrap.appendChild(badge);
+          }
+          // Token counter
+          addTokenCount(agentWrap, val, finalText);
+          if(streamElapsedSeconds >= 10){
+            notifyTaskComplete('Nexus AI task finished', `Your request completed in ${streamElapsedSeconds.toFixed(1)}s.`);
+          }
+          scrollBottom();refreshProviders();
+          triggerAutoSave();  // auto-save after every response
+
+        } else if(evt.type==='error'){
+          sawTerminalEvent = true;
+          activityTrace.details.open = true;
+          const msg = normalizeFrontendErrorMessage(evt.message || '');
+          const isExhausted = msg.toLowerCase().includes('exhausted') ||
+                              msg.toLowerCase().includes('rate limit') ||
+                              msg.toLowerCase().includes('429');
+
+          if (isExhausted) {
+            // Show friendly toast above input, keep conversation intact
+            showRateLimitToast(msg, val);
+            // Remove the empty agent bubble if nothing was streamed into it
+            if (!agentBub.children.length && !agentBub.textContent.trim()) {
+              agentWrap.closest('.msg-row')?.remove();
+            }
+          } else {
+            // Non-rate-limit errors: show inline in bubble (don't replace content)
+            const errEl = document.createElement('div');
+            errEl.style.cssText = 'color:var(--red);font-size:.82rem;margin-top:4px';
+            errEl.textContent = '⚠️ ' + msg;
+            agentBub.appendChild(errEl);
+          }
+          agentBub.querySelector('[data-stream-status="1"]')?.remove();
+          showTyping(false);
+          scrollBottom();
+        }
+      }
+    }
+  } catch(err){
+    if(err.name!=='AbortError'){
+      showTyping(false);
+      const errEl2=document.createElement('div');
+      errEl2.style.cssText='color:var(--red);font-size:.82rem;margin-top:4px';
+      errEl2.textContent='⚠️ '+normalizeFrontendErrorMessage(String(err));
+      agentBub.appendChild(errEl2);
+    }
+  }
+
+  // Stream ended cleanly ([DONE]) but no logical terminal payload arrived.
+  // Replace lingering status-only UI with a clear incomplete-response message.
+  if(sawDoneMarker && !sawTerminalEvent){
+    agentBub.querySelector('[data-stream-status="1"]')?.remove();
+    const hasRenderable = (
+      (agentBub.textContent||'').trim().length > 0 ||
+      !!agentBub.querySelector('.clarify-card,.plan-card,.tool-step,.approval-card,.think-step,.img-bubble,.code-viewer,img,pre,table,blockquote')
+    );
+    if(!hasRenderable){
+      const incompleteEl=document.createElement('div');
+      incompleteEl.style.cssText='color:var(--muted);font-size:.82rem;font-style:italic';
+      incompleteEl.textContent='The agent completed its steps but ran out of turns before summarising. The work shown above has been done — you can ask a follow-up or try again.';
+      agentBub.appendChild(incompleteEl);
+    }
+  }
+
+  // Last-line guard: avoid leaving a visually empty assistant container.
+  const hasMeaningfulAssistantContent = (
+    (agentBub.textContent||'').trim().length > 0 ||
+    !!agentBub.querySelector('.clarify-card,.plan-card,.tool-step,.approval-card,.think-step,.img-bubble,.code-viewer,img,pre,table,blockquote')
+  );
+  if(!hasMeaningfulAssistantContent){
+    const emptyEl=document.createElement('div');
+    emptyEl.style.cssText='color:var(--muted);font-size:.82rem;font-style:italic';
+    emptyEl.textContent = (sawAnySseEvent && !sawTerminalEvent)
+      ? 'Request started but no final response was produced. Please try again.'
+      : 'No response generated. Please try again.';
+    agentBub.appendChild(emptyEl);
+  }
+
+  showTyping(false);
+  setBusy(false);
+  currentStreamId=null;
+  abortController=null;
+  ta.focus();
+}
+
+// smooth word-by-word typewriter using rAF
+async function typewrite(el,md){
+  const words=md.split(/(\s+)/);let built='';
+  for(const chunk of words){
+    built+=chunk;
+    el.innerHTML=renderMd(built);
+    scrollBottom();
+    await new Promise(r=>requestAnimationFrame(()=>setTimeout(r,6)));
+  }
+  el.innerHTML=renderMd(md);
+  el.querySelectorAll('pre code').forEach(b=>{try{hljs.highlightElement(b)}catch(e){}});
+  enhanceRenderedContent(el);
+}
+
+// ── NEW CHAT ───────────────────────────────────────────────────────────────────
+async function newChat(){
+  if(sid) await fetch(`/session/${sid}`,{method:'DELETE'}).catch(()=>{});
+  const s=await fetch('/session',{method:'POST'}).then(r=>r.json());
+  sid=s.session_id;activeChatId=null;
+  attachedFiles=[];renderFileChips();clearMessages();
+  document.getElementById('welcome').style.display='flex';
+  // autosave handles this
+  await refreshSessionSafetyUI();
+  showTyping(false);if(drawerOpen)toggleDrawer();closeSidebar();ta.focus();
+}
+
+
+
+// ── THEME ──────────────────────────────────────────────────────────────────────
+// Theme and preferences utilities moved to static/js/utilities/theme-prefs.js
+
+
+// ── KEYBOARD SHORTCUTS ─────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && e.key === 'k' && !e.shiftKey) { e.preventDefault(); openCommandPalette(); }
+  if (mod && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); newChat(); }
+  if (mod && e.key === '/') { e.preventDefault(); toggleSidebar(); }
+  if (mod && e.key === 'f') { e.preventDefault(); toggleSearch(); }
+  if (e.key === 'Escape') {
+    if (busy) stopStream();
+    // Close any open modal
+    document.querySelectorAll('.modal-overlay.open').forEach(m => m.classList.remove('open'));
+    if (drawerOpen) toggleDrawer();
+  }
+});
+
+
+// Search utilities moved to static/js/utilities/search-command.js
+// ── PIN CHAT ───────────────────────────────────────────────────────────────────
+// Pin chat utility moved to static/js/utilities/sidebar.js
+
+
+// ── TOKEN COUNTER ──────────────────────────────────────────────────────────────
+// UI helper utilities moved to static/js/utilities/ui-helpers.js
+
+
+// ── CUSTOM PERSONA EDITOR ──────────────────────────────────────────────────────
+// Persona editor utilities moved to static/js/utilities/persona-editor.js
+
+
+// ── KEYBOARD SHORTCUTS ────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  const mod = e.metaKey || e.ctrlKey;
+  if (e.key === '?' && !e.target.matches('input,textarea')) { openShortcuts(); return; }
+  if (e.key === 'Escape') { stopStream(); closeShortcuts(); closeCommandPalette(); return; }
+  if (mod && e.key === 'k' && !e.shiftKey) { e.preventDefault(); openCommandPalette(); return; }
+  if (mod && e.shiftKey && e.key.toLowerCase() === 'k') { e.preventDefault(); newChat(); return; }
+  if (mod && e.key === '/') { e.preventDefault(); toggleSidebar(); return; }
+  if (mod && e.key === 'l') { e.preventDefault(); ta.focus(); ta.select(); return; }
+  if (mod && e.key === 's') { e.preventDefault(); autoSave(); return; }
+});
+// Shortcuts modal helpers moved to static/js/utilities/ui-helpers.js
+
+// Command palette utilities moved to static/js/utilities/search-command.js
+// ── PINS ──────────────────────────────────────────────────────────────────────
+// Pin chat utility moved to static/js/utilities/sidebar.js
+
+
+// ── THEME & FONT SIZE ─────────────────────────────────────────────────────────
+// Theme and preferences utilities moved to static/js/utilities/theme-prefs.js
+
+
+// ── TOKEN COUNTER ─────────────────────────────────────────────────────────────
+// UI helper utilities moved to static/js/utilities/ui-helpers.js
+
+
+
+// ── USAGE DASHBOARD ───────────────────────────────────────────────────────────
+// Usage dashboard utilities moved to static/js/utilities/usage.js
+
+
+// Session safety override utilities moved to static/js/utilities/settings.js
+
+// Provider health utilities moved to static/js/utilities/providers.js
+// ── MESSAGE REACTIONS ─────────────────────────────────────────────────────────
+// Interaction utilities moved to static/js/utilities/interaction-ui.js
+
+// Panel modules moved to static/js/panels/*.js
+
+
+// ── CUSTOM INSTRUCTIONS ───────────────────────────────────────────────────────
+// Interaction utilities moved to static/js/utilities/interaction-ui.js
+
+
+// Memory and projects utilities moved to static/js/utilities/memory-projects.js
+
+// ── SOURCE CARDS ──────────────────────────────────────────────────────────────
+// Source card utilities moved to static/js/utilities/source-cards.js
+
+// ── HITL APPROVALS PANEL ──────────────────────────────────────────────────────
+function openApprovalsPanel(){
+  const p=document.getElementById('approvals-panel');
+  p.style.display='flex';
+  loadHitlMode();
+  loadApprovals();
+}
+function closeApprovalsPanel(){
+  document.getElementById('approvals-panel').style.display='none';
+}
+async function loadHitlMode(){
+  try{
+    const r=await fetch('/settings/hitl');
+    if(!r.ok) return;
+    const d=await r.json();
+    const sel=document.getElementById('hitl-mode-select');
+    if(sel) sel.value=d.hitl_approval_mode||'off';
+  }catch(e){console.warn('loadHitlMode:',e)}
+}
+async function saveHitlMode(mode){
+  try{
+    await fetch('/settings/hitl',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({hitl_approval_mode:mode})});
+  }catch(e){console.warn('saveHitlMode:',e)}
+}
+async function loadApprovals(){
+  const feed=document.getElementById('approvals-feed');
+  const count=document.getElementById('approvals-panel-count');
+  if(!feed) return;
+  feed.innerHTML='<div style="color:var(--muted);font-size:.78rem;padding:8px 0;">Loading…</div>';
+  try{
+    const r=await fetch('/approvals');
+    if(!r.ok){feed.innerHTML='<div style="color:var(--red);font-size:.78rem;">Failed to load approvals.</div>';return;}
+    const d=await r.json();
+    const items=d.items||[];
+    if(count) count.textContent=`${items.length} item${items.length!==1?'s':''}`;
+    feed.innerHTML='';
+    if(!items.length){
+      feed.innerHTML='<div style="color:var(--muted);font-size:.78rem;padding:8px 0;">No pending approvals.</div>';
+      updateApprovalsBadge(0); return;
+    }
+    const pending=items.filter(i=>i.status==='pending').length;
+    updateApprovalsBadge(pending);
+    items.forEach(item=>{
+      const card=document.createElement('div');card.className='approval-card';
+      const actionStr=JSON.stringify(item.action||{},null,2);
+      const ts=item.created_at?new Date(item.created_at).toLocaleTimeString():'';
+      const isPending=item.status==='pending';
+      card.innerHTML=`
+        <div class="approval-card-header">⚠️ ${esc(item.action?.action||'action')} <span style="font-weight:400;text-transform:none;font-size:.65rem;color:var(--muted);margin-left:auto">${esc(ts)}</span></div>
+        <div class="approval-card-action">${esc(actionStr)}</div>
+        <div class="approval-card-btns">
+          ${isPending
+            ?`<button class="btn-approve" onclick="panelApprove('${esc(item.id)}',true,this.closest('.approval-card'))">✓ Approve</button>
+               <button class="btn-reject" onclick="panelApprove('${esc(item.id)}',false,this.closest('.approval-card'))">✕ Reject</button>`
+            :`<span class="approval-resolved ${esc(item.status)}">${item.status==='approved'?'✓ Approved':'✕ Rejected'}</span>${item.note?`<span style="font-size:.7rem;color:var(--muted);">${esc(item.note)}</span>`:''}`
+          }
+        </div>`;
+      feed.appendChild(card);
+    });
+  }catch(e){
+    if(feed) feed.innerHTML='<div style="color:var(--red);font-size:.78rem;">Error loading approvals.</div>';
+    console.warn('loadApprovals:',e);
+  }
+}
+async function panelApprove(approvalId, approved, card){
+  await _resolveApproval(approvalId, approved, card);
+  // Refresh panel list
+  setTimeout(loadApprovals,300);
+}
+async function inlineApprove(approvalId, approved, card){
+  await _resolveApproval(approvalId, approved, card);
+  updateApprovalsBadge();
+}
+async function _resolveApproval(approvalId, approved, card){
+  if(!approvalId) return;
+  // Disable buttons immediately
+  card.querySelectorAll('button').forEach(b=>{b.disabled=true;});
+  try{
+    const r=await fetch(`/approvals/${encodeURIComponent(approvalId)}`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({approved,note:approved?'Approved via UI':'Rejected via UI'})
+    });
+    const d=await r.json();
+    const btnsDiv=card.querySelector('.approval-card-btns');
+    if(btnsDiv){
+      btnsDiv.innerHTML=`<span class="approval-resolved ${approved?'approved':'rejected'}">${approved?'✓ Approved':'✕ Rejected'}</span>`;
+    }
+  }catch(e){
+    card.querySelectorAll('button').forEach(b=>{b.disabled=false;});
+    console.warn('_resolveApproval:',e);
+  }
+}
+async function updateApprovalsBadge(count){
+  const badge=document.getElementById('approvals-badge');
+  if(!badge) return;
+  if(count===undefined){
+    try{
+      const r=await fetch('/approvals');
+      const d=await r.json();
+      count=(d.items||[]).filter(i=>i.status==='pending').length;
+    }catch{count=0;}
+  }
+  if(count>0){
+    badge.textContent=count>99?'99+':String(count);
+    badge.classList.add('visible');
+  } else {
+    badge.classList.remove('visible');
+  }
+}
+
+</script>
+<script src="/static/js/api.js"></script>
+<script src="/static/js/utilities/bootstrap-helpers.js"></script>
+<script src="/static/js/utilities/providers.js"></script>
+<script src="/static/js/utilities/search-command.js"></script>
+<script src="/static/js/utilities/memory-projects.js"></script>
+<script src="/static/js/utilities/settings.js"></script>
+<script src="/static/js/utilities/usage.js"></script>
+<script src="/static/js/utilities/source-cards.js"></script>
+<script src="/static/js/utilities/device-utils.js"></script>
+<script src="/static/js/utilities/artifacts.js"></script>
+<script src="/static/js/utilities/input-handling.js"></script>
+<script src="/static/js/utilities/ui-helpers.js"></script>
+<script src="/static/js/utilities/sidebar.js"></script>
+<script src="/static/js/utilities/theme-prefs.js"></script>
+<script src="/static/js/utilities/personas-runtime.js"></script>
+<script src="/static/js/utilities/persona-editor.js"></script>
+<script src="/static/js/utilities/interaction-ui.js"></script>
+<script src="/static/js/panels/documents.js"></script>
+<script src="/static/js/panels/debate.js"></script>
+<script src="/static/js/panels/hypothesis.js"></script>
+<script src="/static/js/panels/adaptive-routing.js"></script>
+<script src="/static/js/panels/safety-audit.js"></script>
+<script src="/static/js/panels/diff-history.js"></script>
+<script src="/static/js/panels/self-review.js"></script>
+<script src="/static/js/panels/architecture.js"></script>
+<script src="/static/js/panels/swarm.js"></script>
+<script src="/static/js/panels/scheduler.js"></script>
+<script src="/static/js/panels/knowledge-graph.js"></script>
+<script src="/static/js/panels/trace-viewer.js"></script>
+<script src="/static/js/panels/ensemble.js"></script>
+<script src="/static/js/panels/benchmark-leaderboard.js"></script>
+<script src="/static/js/panels/benchmark-dashboard.js"></script>
+<script src="/static/js/panels/finetune-dashboard.js"></script>
+<script src="/static/js/panels/rag-corpus.js"></script>
+<script src="/static/js/panels/admin-dashboard.js"></script>
+<script src="/static/js/panels/code-runner.js"></script>
+<script src="/static/js/panels/tooling-utilities.js"></script>
+<script>
+init();
+</script>
+
+<!-- ── Task History Panel (Sprint K) ── -->
+<div id="task-history-panel" style="position:fixed;bottom:80px;left:18px;width:480px;max-height:560px;background:var(--surface);border:1px solid var(--border);border-radius:14px;display:none;flex-direction:column;z-index:42;box-shadow:0 8px 40px rgba(0,0,0,.45);">
+  <!-- Header -->
+  <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <span style="font-size:.85rem;font-weight:700;">🗂 Task History</span>
+    <span id="th-count" style="font-size:.68rem;background:var(--surface2);border-radius:99px;padding:1px 8px;color:var(--muted);">0</span>
+    <div style="flex:1;"></div>
+    <input id="th-search" type="text" placeholder="Search tasks…" oninput="thSetSearch(this.value)"
+      style="width:150px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;padding:4px 9px;color:var(--text);font-size:.75rem;outline:none;" />
+    <button id="th-sort-btn" onclick="thToggleSort()"
+      style="font-size:.7rem;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">↓ Newest</button>
+    <button onclick="closeTaskHistoryPanel()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;line-height:1;">×</button>
+  </div>
+  <!-- Filter bar -->
+  <div style="display:flex;gap:4px;padding:7px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <button class="th-filter-btn" data-filter="all"     onclick="thSetFilter('all')"     style="font-size:.7rem;padding:3px 10px;border:none;border-radius:99px;cursor:pointer;background:var(--accent);color:#fff;">All</button>
+    <button class="th-filter-btn" data-filter="done"    onclick="thSetFilter('done')"    style="font-size:.7rem;padding:3px 10px;border:none;border-radius:99px;cursor:pointer;background:transparent;color:var(--muted);">✓ Done</button>
+    <button class="th-filter-btn" data-filter="running" onclick="thSetFilter('running')" style="font-size:.7rem;padding:3px 10px;border:none;border-radius:99px;cursor:pointer;background:transparent;color:var(--muted);">… Running</button>
+    <button class="th-filter-btn" data-filter="failed"  onclick="thSetFilter('failed')"  style="font-size:.7rem;padding:3px 10px;border:none;border-radius:99px;cursor:pointer;background:transparent;color:var(--muted);">✕ Failed</button>
+    <div style="flex:1;"></div>
+    <button onclick="thRefresh()" style="font-size:.7rem;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">↻</button>
+  </div>
+  <!-- List -->
+  <div id="th-list" style="flex:1;overflow-y:auto;padding:8px 12px;display:flex;flex-direction:column;gap:6px;min-height:0;"></div>
+</div>
+
+<!-- ── Live Trace Panel (Sprint K) ── -->
+<div id="live-trace-panel" style="position:fixed;bottom:80px;right:18px;width:460px;max-height:560px;background:var(--surface);border:1px solid var(--border);border-radius:14px;display:none;flex-direction:column;z-index:43;box-shadow:0 8px 40px rgba(0,0,0,.45);">
+  <!-- Header -->
+  <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <span style="font-size:.85rem;font-weight:700;">📡 Live Trace</span>
+    <span id="lt-status" style="font-size:.68rem;color:var(--muted);">○ Idle</span>
+    <div style="flex:1;"></div>
+    <span id="lt-event-count" style="font-size:.65rem;color:var(--muted);">0 events</span>
+    <button onclick="ltConnectLive()" style="font-size:.7rem;padding:3px 9px;border:none;border-radius:6px;background:var(--accent);color:#fff;cursor:pointer;font-weight:600;">● Live</button>
+    <button onclick="ltStop()" style="font-size:.7rem;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">⏹</button>
+    <button onclick="ltClearFeed()" style="font-size:.7rem;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">🗑</button>
+    <button onclick="closeLiveTracePanel()" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:18px;line-height:1;">×</button>
+  </div>
+  <!-- Timeline bar -->
+  <div id="lt-timeline-bar" title="Event timeline — each tick is one event"></div>
+  <!-- Feed -->
+  <div id="lt-feed" class="lt-feed-wrap"></div>
+  <!-- Replay controls -->
+  <div style="display:flex;gap:6px;padding:8px 12px;border-top:1px solid var(--border);flex-shrink:0;align-items:center;">
+    <select id="lt-trace-select" style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.75rem;">
+      <option value="">— Select trace to replay —</option>
+    </select>
+    <button onclick="ltReplaySelected()" style="font-size:.7rem;padding:5px 10px;border:none;border-radius:6px;background:var(--surface2);color:var(--text);border:1px solid var(--border);cursor:pointer;">⏮ Replay</button>
+  </div>
+</div>
+
+  <script src="/static/js/panels/task-history.js"></script>
+  <script src="/static/js/panels/live-trace.js"></script>
+</body>
+</html>

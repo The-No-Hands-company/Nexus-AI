@@ -1,0 +1,244 @@
+name: Mobile Capacitor CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - 'release'
+      - 'release/**'
+    paths:
+      - 'mobile/capacitor/**'
+      - 'static/**'
+      - '.github/workflows/mobile-capacitor-ci.yml'
+  push:
+    branches:
+      - 'release'
+      - 'release/**'
+    tags:
+      - 'v*'
+    paths:
+      - 'mobile/capacitor/**'
+      - 'static/**'
+      - '.github/workflows/mobile-capacitor-ci.yml'
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: mobile/capacitor/package-lock.json
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Capacitor dependencies
+        working-directory: mobile/capacitor
+        run: npm ci
+
+      - name: Generate and sync Android project
+        working-directory: mobile/capacitor
+        run: |
+          npm run setup:android
+          npm run android:sync
+
+      - name: Build Android debug APK
+        working-directory: mobile/capacitor/android
+        run: ./gradlew assembleDebug
+
+      - name: Upload Android artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacitor-android-debug-apk
+          path: mobile/capacitor/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+  android-release:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: mobile/capacitor/package-lock.json
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Capacitor dependencies
+        working-directory: mobile/capacitor
+        run: npm ci
+
+      - name: Generate and sync Android project
+        working-directory: mobile/capacitor
+        run: |
+          npm run setup:android
+          npm run android:sync
+
+      - name: Build Android release APK
+        working-directory: mobile/capacitor/android
+        run: ./gradlew assembleRelease
+
+      - name: Sign Android release
+        if: secrets.ANDROID_KEYSTORE_BASE64 != ''
+        uses: r0adkll/sign-android-release@v1
+        with:
+          releaseDirectory: mobile/capacitor/android/app/build/outputs/apk/release
+          signingKeyBase64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          alias: ${{ secrets.ANDROID_KEY_ALIAS }}
+          keyStorePassword: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyPassword: ${{ secrets.ANDROID_KEY_PASSWORD }}
+
+      - name: Upload Android release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacitor-android-release
+          path: |
+            mobile/capacitor/android/app/build/outputs/apk/release/*.apk
+            mobile/capacitor/android/app/build/outputs/apk/release/*.aab
+          if-no-files-found: ignore
+
+  ios:
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: mobile/capacitor/package-lock.json
+
+      - name: Install Capacitor dependencies
+        working-directory: mobile/capacitor
+        run: npm ci
+
+      - name: Generate and sync iOS project
+        working-directory: mobile/capacitor
+        run: |
+          npm run setup:ios
+          npm run ios:sync
+
+      - name: Build iOS simulator target
+        working-directory: mobile/capacitor
+        run: npm run ios:build:sim
+
+  ios-release:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: mobile/capacitor/package-lock.json
+
+      - name: Install Capacitor dependencies
+        working-directory: mobile/capacitor
+        run: npm ci
+
+      - name: Generate and sync iOS project
+        working-directory: mobile/capacitor
+        run: |
+          npm run setup:ios
+          npm run ios:sync
+
+      - name: Import signing certificate
+        if: secrets.IOS_BUILD_CERTIFICATE_BASE64 != ''
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.IOS_BUILD_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.IOS_P12_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.IOS_KEYCHAIN_PASSWORD }}
+        run: |
+          CERT_PATH="$RUNNER_TEMP/ios_certificate.p12"
+          KEYCHAIN_PATH="$RUNNER_TEMP/app-signing.keychain-db"
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o "$CERT_PATH"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security list-keychain -d user -s "$KEYCHAIN_PATH"
+
+      - name: Install provisioning profile
+        if: secrets.IOS_PROVISIONING_PROFILE_BASE64 != ''
+        env:
+          IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          PROFILE_PATH="$HOME/Library/MobileDevice/Provisioning Profiles/nexus-ai.mobileprovision"
+          echo -n "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode -o "$PROFILE_PATH"
+
+      - name: Archive signed iOS build
+        if: secrets.IOS_BUILD_CERTIFICATE_BASE64 != '' && secrets.IOS_PROVISIONING_PROFILE_BASE64 != ''
+        working-directory: mobile/capacitor
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          IOS_CODE_SIGN_IDENTITY: ${{ secrets.IOS_CODE_SIGN_IDENTITY }}
+          IOS_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_PROVISIONING_PROFILE_SPECIFIER }}
+        run: |
+          xcodebuild -workspace ios/App/App.xcworkspace -scheme App -configuration Release -archivePath ios/App/build/NexusAI.xcarchive DEVELOPMENT_TEAM="$IOS_TEAM_ID" CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="$IOS_CODE_SIGN_IDENTITY" PROVISIONING_PROFILE_SPECIFIER="$IOS_PROVISIONING_PROFILE_SPECIFIER" archive
+
+      - name: Export signed IPA
+        if: secrets.IOS_BUILD_CERTIFICATE_BASE64 != '' && secrets.IOS_PROVISIONING_PROFILE_BASE64 != ''
+        working-directory: mobile/capacitor
+        env:
+          IOS_TEAM_ID: ${{ secrets.IOS_TEAM_ID }}
+          IOS_CODE_SIGN_IDENTITY: ${{ secrets.IOS_CODE_SIGN_IDENTITY }}
+          IOS_PROVISIONING_PROFILE_SPECIFIER: ${{ secrets.IOS_PROVISIONING_PROFILE_SPECIFIER }}
+        run: |
+          cat > ios/App/ExportOptions.plist <<'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>teamID</key>
+            <string>${IOS_TEAM_ID}</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>ai.nexus.mobile</key>
+              <string>${IOS_PROVISIONING_PROFILE_SPECIFIER}</string>
+            </dict>
+          </dict>
+          </plist>
+          EOF
+          xcodebuild -exportArchive -archivePath ios/App/build/NexusAI.xcarchive -exportOptionsPlist ios/App/ExportOptions.plist -exportPath ios/App/build/export
+
+      - name: Upload iOS release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: capacitor-ios-release
+          path: |
+            mobile/capacitor/ios/App/build/NexusAI.xcarchive
+            mobile/capacitor/ios/App/build/export/*.ipa
+          if-no-files-found: ignore

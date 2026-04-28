@@ -1,6 +1,5 @@
 import os, re, json, glob, time, subprocess, threading, resource, hmac, hashlib
 import urllib.request
-from urllib.parse import quote as _url_quote
 from functools import lru_cache
 from datetime import datetime, timezone
 from contextlib import nullcontext
@@ -102,18 +101,6 @@ _config: Dict[str, Any] = {
     # for all OpenAI-compatible providers.  Set NATIVE_TOOL_CALLING=false to
     # revert to the legacy JSON-parsing path.
     "native_tool_calling": os.getenv("NATIVE_TOOL_CALLING", "true").lower() in ("1", "true", "yes", "on"),
-    # Token-efficiency controls
-    "native_tool_budget_mode": os.getenv("NATIVE_TOOL_BUDGET_MODE", "adaptive").lower(),
-    "injected_context_max_chars": int(os.getenv("INJECTED_CONTEXT_MAX_CHARS", "2200")),
-    "tool_result_context_max_chars": int(os.getenv("TOOL_RESULT_CONTEXT_MAX_CHARS", "900")),
-    "context_reserve_tokens": int(os.getenv("CONTEXT_RESERVE_TOKENS", "3072")),
-    "turn_budget_enforced": os.getenv("TURN_BUDGET_ENFORCED", "true").lower() in ("1", "true", "yes", "on"),
-    "turn_budget_ratio_low": float(os.getenv("TURN_BUDGET_RATIO_LOW", "0.30")),
-    "turn_budget_ratio_medium": float(os.getenv("TURN_BUDGET_RATIO_MEDIUM", "0.42")),
-    "turn_budget_ratio_high": float(os.getenv("TURN_BUDGET_RATIO_HIGH", "0.58")),
-    "turn_output_reserve_low": int(os.getenv("TURN_OUTPUT_RESERVE_LOW", "1400")),
-    "turn_output_reserve_medium": int(os.getenv("TURN_OUTPUT_RESERVE_MEDIUM", "2600")),
-    "turn_output_reserve_high": int(os.getenv("TURN_OUTPUT_RESERVE_HIGH", "5200")),
 }
 
 _STRICT_MODE_PRESETS: Dict[str, Dict[str, Any]] = {
@@ -154,9 +141,7 @@ def update_config(provider=None, model=None, temperature=None, persona=None,
                   ensemble_mode=None, ensemble_threshold=None, hitl_approval_mode=None,
                   safety_profile=None, strict_no_guess_mode=None,
                   strict_confidence_threshold=None, strict_evidence_threshold=None,
-                  strict_mode_profile=None, native_tool_budget_mode=None,
-                  injected_context_max_chars=None, tool_result_context_max_chars=None,
-                  context_reserve_tokens=None, turn_budget_enforced=None):
+                  strict_mode_profile=None):
     if provider           is not None: _config["provider"]           = provider.lower()
     if model              is not None: _config["model"]              = model
     if temperature        is not None: _config["temperature"]        = float(temperature)
@@ -191,28 +176,6 @@ def update_config(provider=None, model=None, temperature=None, persona=None,
             _config["strict_evidence_threshold"] = max(0, value)
         except Exception:
             pass
-    if native_tool_budget_mode is not None:
-        _config["native_tool_budget_mode"] = str(native_tool_budget_mode).lower().strip()
-    if injected_context_max_chars is not None:
-        try:
-            _config["injected_context_max_chars"] = max(200, int(injected_context_max_chars))
-        except Exception:
-            pass
-    if tool_result_context_max_chars is not None:
-        try:
-            _config["tool_result_context_max_chars"] = max(200, int(tool_result_context_max_chars))
-        except Exception:
-            pass
-    if context_reserve_tokens is not None:
-        try:
-            _config["context_reserve_tokens"] = max(512, int(context_reserve_tokens))
-        except Exception:
-            pass
-    if turn_budget_enforced is not None:
-        if isinstance(turn_budget_enforced, bool):
-            _config["turn_budget_enforced"] = turn_budget_enforced
-        else:
-            _config["turn_budget_enforced"] = str(turn_budget_enforced).lower().strip() in ("1", "true", "yes", "on")
     # Keep profile metadata coherent when direct values diverge from preset values.
     if strict_mode_profile is None and any(
         v is not None for v in (strict_no_guess_mode, strict_confidence_threshold, strict_evidence_threshold)
@@ -319,24 +282,6 @@ def extract_token(text: str) -> Optional[str]:
 def mask_token(text: str) -> str:
     """Replace tokens with a placeholder so they never reach the LLM."""
     return _TOKEN_RE.sub('[GITHUB_TOKEN_REDACTED]', text)
-
-
-def _redact_sensitive_text(text: str, secrets: list[str] | tuple[str, ...] = ()) -> str:
-    """Best-effort redaction for secrets and credentialed URLs in user-visible output."""
-    redacted = str(text or "")
-    for secret in secrets:
-        if not secret:
-            continue
-        redacted = redacted.replace(secret, "[REDACTED]")
-        try:
-            encoded = _url_quote(secret, safe="")
-            if encoded:
-                redacted = redacted.replace(encoded, "[REDACTED]")
-        except Exception:
-            pass
-    # Hide URL userinfo credentials if present (e.g. https://token@host/...)
-    redacted = re.sub(r"https://[^@/\s]+@", "https://[REDACTED]@", redacted)
-    return redacted
 
 # ── session working directories ───────────────────────────────────────────────
 # sid → {"dir": "/tmp/session_xxx", "token": "ghp_...", "repos": [...]}
@@ -1082,231 +1027,6 @@ def _score_complexity(task: str) -> str:
     return _build_complexity_profile(task).get("label", "low")
 
 
-_TURN_BUDGET_BASE_DEFAULTS: Dict[str, float | int] = {
-    "turn_budget_ratio_low": 0.30,
-    "turn_budget_ratio_medium": 0.42,
-    "turn_budget_ratio_high": 0.58,
-    "turn_output_reserve_low": 1400,
-    "turn_output_reserve_medium": 2600,
-    "turn_output_reserve_high": 5200,
-}
-
-_TURN_BUDGET_FAMILY_DEFAULTS: Dict[str, Dict[str, float | int]] = {
-    "compact": {
-        "turn_budget_ratio_low": 0.24,
-        "turn_budget_ratio_medium": 0.34,
-        "turn_budget_ratio_high": 0.46,
-        "turn_output_reserve_low": 1100,
-        "turn_output_reserve_medium": 1900,
-        "turn_output_reserve_high": 3200,
-    },
-    "balanced": {
-        "turn_budget_ratio_low": 0.30,
-        "turn_budget_ratio_medium": 0.42,
-        "turn_budget_ratio_high": 0.58,
-        "turn_output_reserve_low": 1400,
-        "turn_output_reserve_medium": 2600,
-        "turn_output_reserve_high": 5200,
-    },
-    "reasoning": {
-        "turn_budget_ratio_low": 0.34,
-        "turn_budget_ratio_medium": 0.48,
-        "turn_budget_ratio_high": 0.66,
-        "turn_output_reserve_low": 1800,
-        "turn_output_reserve_medium": 3400,
-        "turn_output_reserve_high": 6800,
-    },
-    "local": {
-        "turn_budget_ratio_low": 0.22,
-        "turn_budget_ratio_medium": 0.32,
-        "turn_budget_ratio_high": 0.44,
-        "turn_output_reserve_low": 900,
-        "turn_output_reserve_medium": 1600,
-        "turn_output_reserve_high": 2600,
-    },
-}
-
-
-def _resolve_turn_budget_model_name() -> str:
-    configured_model = str(_config.get("model") or "").strip()
-    if configured_model:
-        return configured_model
-    provider_key = str(_config.get("provider") or "auto").lower().strip()
-    provider_cfg = PROVIDERS.get(provider_key, {}) if provider_key and provider_key != "auto" else {}
-    return str(provider_cfg.get("default_model") or "")
-
-
-def _classify_turn_budget_model_family(model_name: str) -> str:
-    normalized = str(model_name or "").strip().lower()
-    if not normalized:
-        return "balanced"
-    if any(token in normalized for token in ("local-model", "ollama", "llama3.2", "3b", "7b", "8b", "9b", "12b")):
-        return "local"
-    if any(token in normalized for token in ("mini", "flash", "haiku", "small", "nano", "3.5", "gemma-2-9b", "qwen3-8b")):
-        return "compact"
-    if any(token in normalized for token in ("o1", "o3", "o4", "opus", "sonnet", "70b", "72b", "90b", "405b", "large", "r1")):
-        return "reasoning"
-    return "balanced"
-
-
-def _turn_budget_defaults_for_model(model_name: str) -> Dict[str, Any]:
-    family = _classify_turn_budget_model_family(model_name)
-    defaults = dict(_TURN_BUDGET_FAMILY_DEFAULTS.get(family, _TURN_BUDGET_FAMILY_DEFAULTS["balanced"]))
-    has_custom_override = any(
-        os.getenv(env_name) is not None
-        for env_name in (
-            "TURN_BUDGET_RATIO_LOW",
-            "TURN_BUDGET_RATIO_MEDIUM",
-            "TURN_BUDGET_RATIO_HIGH",
-            "TURN_OUTPUT_RESERVE_LOW",
-            "TURN_OUTPUT_RESERVE_MEDIUM",
-            "TURN_OUTPUT_RESERVE_HIGH",
-        )
-    )
-    if not has_custom_override:
-        has_custom_override = any(_config.get(key) != value for key, value in _TURN_BUDGET_BASE_DEFAULTS.items())
-    if has_custom_override:
-        for key in _TURN_BUDGET_BASE_DEFAULTS:
-            defaults[key] = _config.get(key, defaults[key])
-    return {
-        "family": family,
-        "defaults": defaults,
-        "source": "config_override" if has_custom_override else "model_family_default",
-    }
-
-
-def _build_turn_budget_policy(task: str, model_budget: int, input_tokens: int) -> Dict[str, Any]:
-    complexity = _score_complexity(task)
-    model_name = _resolve_turn_budget_model_name()
-    model_defaults = _turn_budget_defaults_for_model(model_name)
-    default_values = model_defaults["defaults"]
-    ratio_map = {
-        "low": float(default_values.get("turn_budget_ratio_low", 0.30) or 0.30),
-        "medium": float(default_values.get("turn_budget_ratio_medium", 0.42) or 0.42),
-        "high": float(default_values.get("turn_budget_ratio_high", 0.58) or 0.58),
-    }
-    reserve_map = {
-        "low": int(default_values.get("turn_output_reserve_low", 1400) or 1400),
-        "medium": int(default_values.get("turn_output_reserve_medium", 2600) or 2600),
-        "high": int(default_values.get("turn_output_reserve_high", 5200) or 5200),
-    }
-    ratio = ratio_map.get(complexity, 0.42)
-    output_reserve = reserve_map.get(complexity, 2600)
-    input_budget = min(max(512, model_budget - output_reserve), max(512, int(model_budget * ratio)))
-    soft_budget = max(256, int(input_budget * 0.90))
-
-    pressure = "none"
-    if input_tokens > input_budget:
-        pressure = "hard"
-    elif input_tokens > soft_budget:
-        pressure = "soft"
-
-    disable_ensemble = pressure == "hard" and complexity != "high"
-    disable_mcts = pressure in ("soft", "hard")
-    tool_budget_mode = "minimal" if pressure == "hard" else str(_config.get("native_tool_budget_mode", "adaptive") or "adaptive")
-    if pressure == "soft" and tool_budget_mode == "full":
-        tool_budget_mode = "adaptive"
-
-    if complexity == "high":
-        system_prompt_max_chars = 3600 if pressure == "hard" else 4200
-    elif complexity == "medium":
-        system_prompt_max_chars = 2800 if pressure == "hard" else 3400
-    else:
-        system_prompt_max_chars = 2200 if pressure == "hard" else 2800
-
-    context_max_chars = int(_config.get("injected_context_max_chars", 2200) or 2200)
-    tool_result_max_chars = int(_config.get("tool_result_context_max_chars", 900) or 900)
-    if pressure == "soft":
-        context_max_chars = min(context_max_chars, 1800)
-        tool_result_max_chars = min(tool_result_max_chars, 800)
-    elif pressure == "hard":
-        context_max_chars = min(context_max_chars, 1200)
-        tool_result_max_chars = min(tool_result_max_chars, 650)
-
-    return {
-        "complexity": complexity,
-        "model": model_name,
-        "model_family": model_defaults.get("family", "balanced"),
-        "defaults_source": model_defaults.get("source", "model_family_default"),
-        "pressure": pressure,
-        "input_tokens": int(input_tokens),
-        "input_budget": int(input_budget),
-        "soft_budget": int(soft_budget),
-        "output_reserve": int(output_reserve),
-        "disable_ensemble": disable_ensemble,
-        "disable_mcts": disable_mcts,
-        "tool_budget_mode": tool_budget_mode,
-        "system_prompt_max_chars": int(system_prompt_max_chars),
-        "context_max_chars": int(context_max_chars),
-        "tool_result_max_chars": int(tool_result_max_chars),
-    }
-
-
-def get_turn_budget_summary(limit: int = 100, since_ts: float = 0.0) -> Dict[str, Any]:
-    capped_limit = max(1, min(int(limit), _MAX_ACTIVITY))
-    events = [event for event in activity_log if str(event.get("action") or "") == "turn_budget"]
-    if since_ts > 0:
-        events = [event for event in events if float(event.get("ts") or 0.0) >= since_ts]
-    window = events[-capped_limit:]
-
-    pressure_counts: Dict[str, int] = {}
-    complexity_counts: Dict[str, int] = {}
-    model_family_counts: Dict[str, int] = {}
-    tool_budget_modes: Dict[str, int] = {}
-    disable_mcts_count = 0
-    disable_ensemble_count = 0
-    pressured_turns = 0
-
-    for event in window:
-        pressure = str(event.get("pressure") or "none")
-        complexity = str(event.get("complexity") or "unknown")
-        model_family = str(event.get("model_family") or "balanced")
-        tool_budget_mode = str(event.get("tool_budget_mode") or "adaptive")
-        pressure_counts[pressure] = pressure_counts.get(pressure, 0) + 1
-        complexity_counts[complexity] = complexity_counts.get(complexity, 0) + 1
-        model_family_counts[model_family] = model_family_counts.get(model_family, 0) + 1
-        tool_budget_modes[tool_budget_mode] = tool_budget_modes.get(tool_budget_mode, 0) + 1
-        if pressure in ("soft", "hard"):
-            pressured_turns += 1
-        if bool(event.get("disable_mcts")):
-            disable_mcts_count += 1
-        if bool(event.get("disable_ensemble")):
-            disable_ensemble_count += 1
-
-    total_turns = len(window)
-    recent = [
-        {
-            "ts": event.get("ts"),
-            "session": event.get("session"),
-            "pressure": event.get("pressure"),
-            "complexity": event.get("complexity"),
-            "model_family": event.get("model_family"),
-            "disable_mcts": bool(event.get("disable_mcts")),
-            "disable_ensemble": bool(event.get("disable_ensemble")),
-            "tool_budget_mode": event.get("tool_budget_mode"),
-        }
-        for event in window[-10:]
-    ]
-    return {
-        "total_turns": total_turns,
-        "pressured_turns": pressured_turns,
-        "downgrade_rate": round(pressured_turns / total_turns, 4) if total_turns else 0.0,
-        "disable_mcts_count": disable_mcts_count,
-        "disable_ensemble_count": disable_ensemble_count,
-        "pressure_counts": pressure_counts,
-        "complexity_counts": complexity_counts,
-        "model_family_counts": model_family_counts,
-        "tool_budget_modes": tool_budget_modes,
-        "recent": recent,
-        "source": "activity_log",
-        "window_size": capped_limit,
-        "unfiltered_total": len([event for event in activity_log if str(event.get("action") or "") == "turn_budget"]),
-        "filters": {
-            "since_ts": since_ts if since_ts > 0 else None,
-        },
-    }
-
-
 def _auto_mcts_guidance(task: str) -> Dict[str, Any] | None:
     profile = _build_complexity_profile(task)
     if profile.get("label") != "high":
@@ -1613,7 +1333,6 @@ def _has_key(cfg: Dict[str, Any]) -> bool:
 _FREE_PROVIDERS: frozenset = frozenset(
     pid for pid, cfg in PROVIDERS.items() if cfg.get("keyless", False)
 )
-_recent_provider_hint: Dict[str, str] = {}
 
 def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[str]:
     pref = _config["provider"]
@@ -1868,62 +1587,15 @@ def get_provider_system_prompt(max_chars: int = 7000, native_tools: bool = False
 
 # ── Native tool-calling helpers ───────────────────────────────────────────────
 
-_nexus_tools_cache: Dict[str, List[Dict]] = {}
+_nexus_tools_cache: List[Dict] | None = None
 
 
-def _select_native_tool_include(task: str) -> set[str] | None:
-    mode = str(_config.get("native_tool_budget_mode", "adaptive") or "adaptive").lower()
-    if mode == "full":
-        return None
-
-    include: set[str] = {
-        "calculate", "get_time", "json_format",
-        "read_file", "write_file", "list_files", "search_in_files",
-        "run_command", "diff", "read_page", "web_search", "api_call",
-        "respond", "clarify", "plan", "think", "think_deep",
-    }
-    text = (task or "").lower()
-
-    if any(k in text for k in ("github.com/", "git ", "repo", "repository", "commit", "branch", "pr ")):
-        include.update({"clone_repo", "git_status", "git_diff", "git_log", "git_checkout", "git_pull", "commit_push", "create_pull_request"})
-    if any(k in text for k in ("database", "sql", "postgres", "sqlite", "query")):
-        include.update({"query_db", "inspect_db", "pg_query", "sqlite_query", "inspect_sqlite", "inspect_postgres"})
-    if any(k in text for k in ("pdf", ".pdf", "docx", ".docx", "xlsx", ".xlsx", "pptx", ".pptx", "csv", ".csv")):
-        include.update({"read_pdf", "read_docx", "read_xlsx", "read_pptx", "read_csv", "write_csv"})
-    if any(k in text for k in ("rag", "retrieval", "knowledge base", "vector")):
-        include.update({"rag_ingest", "rag_query", "rag_status"})
-    if any(k in text for k in ("schedule", "cron", "periodic", "background job")):
-        include.update({"cron_schedule", "cron_list", "cron_cancel"})
-    if any(k in text for k in ("music", "song", "melody", "audio track")):
-        include.add("generate_music")
-    if any(k in text for k in ("3d", "mesh", "glb", "obj model", "three dimensional")):
-        include.add("generate_3d_model")
-
-    if mode == "minimal":
-        include = {
-            "read_file", "write_file", "list_files", "run_command",
-            "web_search", "read_page", "json_format", "calculate", "get_time",
-            "respond", "clarify", "plan", "think", "think_deep",
-        } | ({"generate_music"} if "generate_music" in include else set()) | ({"generate_3d_model"} if "generate_3d_model" in include else set())
-    return include
-
-
-def _get_nexus_tools(task: str = "") -> List[Dict]:
-    """Return cached OpenAI tools, using adaptive subsets to reduce token cost."""
-    include = _select_native_tool_include(task)
-    if include is None:
-        cache_key = "full"
-    else:
-        joined = "|".join(sorted(include))
-        cache_key = "subset:" + hashlib.sha1(joined.encode("utf-8")).hexdigest()[:12]
-    cached = _nexus_tools_cache.get(cache_key)
-    if cached is not None:
-        return cached
-    built = build_openai_tools(include=include)
-    if len(_nexus_tools_cache) > 64:
-        _nexus_tools_cache.clear()
-    _nexus_tools_cache[cache_key] = built
-    return built
+def _get_nexus_tools() -> List[Dict]:
+    """Return (and cache) the full OpenAI tools array for all built-in tools."""
+    global _nexus_tools_cache
+    if _nexus_tools_cache is None:
+        _nexus_tools_cache = build_openai_tools()
+    return _nexus_tools_cache
 
 
 def _get_native_tools_system_prompt(max_chars: int = 4000) -> str:
@@ -2235,7 +1907,6 @@ def tool_run_command(cmd: str, workdir: str) -> str:
         r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
                            cwd=workdir, timeout=60, preexec_fn=_preexec)
         out = (r.stdout + r.stderr).strip()
-        out = _redact_sensitive_text(mask_token(out))
         return out[:4000] if out else "(no output)"
     except subprocess.TimeoutExpired: return "⏱ Command timed out after 60s"
     except Exception as e: return f"Error: {e}"
@@ -2333,9 +2004,8 @@ def tool_clone_repo(url: str, token: str, workdir: str, dest_path: str = "") -> 
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}
         )
         if r.returncode != 0:
-            git_err = _redact_sensitive_text((r.stdout + r.stderr).strip(), [token])
             return (f"❌ Both API fetch and git clone failed.\n"
-                    f"API: fetched 0 files. Git: {git_err[:300]}")
+                    f"API: fetched 0 files. Git: {(r.stdout+r.stderr).strip()[:300]}")
         count = sum(len(fs) for _,_,fs in os.walk(dest))
 
     top = sorted([f for f in os.listdir(dest) if not f.startswith('.')])[:20]
@@ -2524,14 +2194,8 @@ _STRICT_HIGH_RISK_ACTIONS = {
     "create_repo", "api_call", "query_db", "db_migrate", "inspect_db",
 }
 _DESTRUCTIVE_ACTIONS = {
-    "delete_file", "run_command", "clone_repo", "commit_push",
+    "write_file", "delete_file", "run_command", "clone_repo", "commit_push",
     "create_repo", "api_call", "db_migrate",
-}
-_STRICT_EVIDENCE_REQUIRED_ACTIONS = {
-    "delete_file", "run_command", "commit_push", "create_repo", "api_call", "query_db", "db_migrate", "inspect_db",
-}
-_STRICT_EXECUTION_CONTRACT_ACTIONS = {
-    "delete_file", "run_command", "commit_push", "create_repo", "api_call", "query_db", "db_migrate", "inspect_db",
 }
 _STRICT_EVIDENCE_ACTIONS = {
     "web_search", "read_page", "api_call", "query_db", "inspect_db", "rag_query", "read_file",
@@ -2737,32 +2401,32 @@ def _strict_doubt_assessment(
             reasons.append("low_model_confidence")
             score += 0.20
 
-    if kind in _STRICT_EVIDENCE_REQUIRED_ACTIONS and evidence_hits < evidence_threshold:
+    if kind in _STRICT_HIGH_RISK_ACTIONS and evidence_hits < evidence_threshold:
         if explicit_repo_clone:
             suppressed_reasons.append("weak_retrieval_evidence")
         else:
             reasons.append("weak_retrieval_evidence")
             score += 0.25
 
-    if kind in _STRICT_EXECUTION_CONTRACT_ACTIONS and not _task_has_explicit_goal(task):
+    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_explicit_goal(task):
         if explicit_repo_clone:
             suppressed_reasons.append("execution_contract_missing_goal")
         else:
             reasons.append("execution_contract_missing_goal")
             score += 0.20
-    if kind in _STRICT_EXECUTION_CONTRACT_ACTIONS and not _task_has_complete_inputs(task):
+    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_complete_inputs(task):
         if explicit_repo_clone:
             suppressed_reasons.append("execution_contract_missing_inputs")
         else:
             reasons.append("execution_contract_missing_inputs")
             score += 0.20
-    if kind in _STRICT_EXECUTION_CONTRACT_ACTIONS and not _task_has_constraints(task):
+    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_constraints(task):
         if explicit_repo_clone:
             suppressed_reasons.append("execution_contract_missing_constraints")
         else:
             reasons.append("execution_contract_missing_constraints")
             score += 0.10
-    if kind in _STRICT_EXECUTION_CONTRACT_ACTIONS and not _task_has_format_requirement(task):
+    if kind in _STRICT_HIGH_RISK_ACTIONS and not _task_has_format_requirement(task):
         if explicit_repo_clone:
             suppressed_reasons.append("execution_contract_missing_output_format")
         else:
@@ -2774,7 +2438,7 @@ def _strict_doubt_assessment(
         reasons.append("adversarial_self_check")
         score += 0.20
 
-    if kind in _DESTRUCTIVE_ACTIONS and reasons and not explicit_repo_clone:
+    if kind in _STRICT_HIGH_RISK_ACTIONS and reasons and not explicit_repo_clone:
         reasons.append("unsafe_side_effects")
         score += 0.15
 
@@ -3290,7 +2954,6 @@ def call_llm_with_fallback(
     source: str = "runtime",
     tools: List[Dict] | None = None,
     system_prompt: str | None = None,
-    routing_hints: Dict[str, Any] | None = None,
 ) -> tuple[Dict, str]:
     import requests as _r
     tracer = None
@@ -3308,8 +2971,7 @@ def call_llm_with_fallback(
     resources = get_system_resources()
     attempts: List[Dict[str, Any]] = []
     _set_last_provider_attempts([])
-    effective_task = task or (messages[-1].get("content","") if messages else "")
-    order = _smart_order(effective_task, resources)
+    order = _smart_order(task or (messages[-1].get("content","") if messages else ""), resources)
     if provider_order:
         seen: set[str] = set()
         constrained: List[str] = []
@@ -3323,12 +2985,6 @@ def call_llm_with_fallback(
     if not order:
         _set_last_provider_attempts(attempts)
         raise AllProvidersExhausted("No providers available.")
-
-    # Latency optimization: prefer most recently successful provider for this complexity tier.
-    hint_key = _score_complexity(effective_task)
-    hinted_pid = _recent_provider_hint.get(hint_key)
-    if hinted_pid and hinted_pid in order:
-        order = [hinted_pid] + [p for p in order if p != hinted_pid]
 
     # Vision routing: if any message contains image_url parts, promote
     # vision-capable providers to the front of the queue and select the
@@ -3393,7 +3049,6 @@ def call_llm_with_fallback(
             _set_last_provider_attempts(attempts)
             if isinstance(result, dict):
                 result = _attach_provider_diagnostics(result, attempts)
-            _recent_provider_hint[hint_key] = pid
             return result, pid
         except CircuitBreakerOpen as e:
             last_err = e
@@ -3512,7 +3167,6 @@ def _graceful_degraded_response(messages: List[Dict], task: str, reason: str) ->
 def call_llm_smart(
     messages: List[Dict],
     task: str = "",
-    routing_hints: Dict[str, Any] | None = None,
 ) -> tuple[Dict, str, Dict]:
     """Route a single LLM call through ensemble mode when the task is high-risk,
     otherwise use the standard fallback chain.
@@ -3527,52 +3181,14 @@ def call_llm_smart(
     effective_task = task or (messages[-1].get("content", "") if messages else "")
     risk = score_task_risk(effective_task)
     meta: Dict[str, Any] = {"ensemble": False, "risk_score": risk}
-    hints = routing_hints or {}
-
-    # Federated path (feature-flagged): if disabled/unavailable/fails, continue
-    # through the normal smart routing chain without raising to callers.
-    try:
-        from .config.feature_flags import ENABLE_FEDERATED_LLM
-        from .feature_flags import is_enabled as _flag_enabled
-        if _flag_enabled(ENABLE_FEDERATED_LLM, default=False):
-            from .federated import try_federated_inference
-
-            fed = try_federated_inference(messages=messages, task=effective_task, routing_hints=hints)
-            if bool(fed.get("ok")) and isinstance(fed.get("response"), dict):
-                meta.update(
-                    {
-                        "federated": True,
-                        "federated_reason": "used",
-                        "federated_latency_ms": int(fed.get("latency_ms") or 0),
-                    }
-                )
-                return fed["response"], str(fed.get("provider") or "federated"), meta
-            meta.update(
-                {
-                    "federated": False,
-                    "federated_reason": str(fed.get("reason") or "fallback"),
-                    "federated_latency_ms": int(fed.get("latency_ms") or 0),
-                }
-            )
-    except Exception as exc:
-        meta.update({"federated": False, "federated_reason": f"error:{exc}"})
 
     # Build tools + system prompt once for the whole routing chain.
     _native = _config.get("native_tool_calling", False)
-    tool_mode_override = hints.get("tool_budget_mode")
-    original_tool_budget_mode = _config.get("native_tool_budget_mode")
-    if tool_mode_override:
-        _config["native_tool_budget_mode"] = str(tool_mode_override)
-    try:
-        _tools: List[Dict] | None = _get_nexus_tools(effective_task) if _native else None
-    finally:
-        if tool_mode_override:
-            _config["native_tool_budget_mode"] = original_tool_budget_mode
-    sys_max_chars = int(hints.get("system_prompt_max_chars") or 4000)
-    _sys_prompt: str | None = get_provider_system_prompt(max_chars=sys_max_chars, native_tools=True) if _native else None
+    _tools: List[Dict] | None = _get_nexus_tools() if _native else None
+    _sys_prompt: str | None = get_provider_system_prompt(native_tools=True) if _native else None
 
     threshold = float(_config.get("ensemble_threshold", 0.4))
-    if not hints.get("disable_ensemble") and _config.get("ensemble_mode", True) and is_high_risk(effective_task, threshold=threshold):
+    if _config.get("ensemble_mode", True) and is_high_risk(effective_task, threshold=threshold):
         print(f"🔴 High-risk task (score={risk:.2f}) — entering ensemble mode")
         try:
             result, pid, ens_meta = call_llm_ensemble(
@@ -3595,7 +3211,7 @@ def call_llm_smart(
 
     # Standard single-provider-with-fallback path.
     result, pid = call_llm_with_fallback(
-        messages, effective_task, tools=_tools, system_prompt=_sys_prompt, routing_hints=hints
+        messages, effective_task, tools=_tools, system_prompt=_sys_prompt
     )
     meta["ensemble"] = False
     return result, pid, meta
@@ -3646,7 +3262,6 @@ TOOL_ICONS = {
     "read_docx":"📝","read_xlsx":"📊","read_pptx":"📽️",
     "youtube_transcript":"▶️","read_page":"🌐","api_call":"🔌","sub_agent":"🤖",
     "orchestrate_goal":"🧩","decompose_goal":"🧭","select_model":"🧠",
-    "generate_music":"🎵","generate_3d_model":"🧱",
     "simulate":"🧬","agent_message":"📨",
     "rag_ingest":"📚","rag_query":"🔎","rag_status":"📊",
     "inspect_db":"🔬","file_diff":"±",
@@ -3948,77 +3563,29 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             "usage_ratio": round(raw_tokens / max(1, model_budget), 4),
         }
 
-    def _assemble_turn_messages(reserve_tokens: int, injected_ctx_chars: int) -> tuple[List[Dict], int]:
-        assembled: List[Dict] = _maybe_compress_history(history_list)
-        assembled = CONTEXT_WINDOW.compress_to_token_budget(
-            assembled,
-            token_budget=model_budget,
-            reserve_tokens=reserve_tokens,
-        )
-        injected_count = 0
-        _kg_ctx = kg_to_context_string(clean_task, limit=5)
-        _mem_ctx = get_memory_context()
-        injected_chunks: List[str] = []
-        if _kg_ctx:
-            injected_chunks.append("[KG CONTEXT]\n" + _kg_ctx)
-        if _mem_ctx:
-            injected_chunks.append("[MEMORY CONTEXT]\n" + _mem_ctx)
-        if injected_chunks:
-            merged = "\n\n".join(injected_chunks)
-            if len(merged) > injected_ctx_chars:
-                merged = merged[:injected_ctx_chars] + "\n... [context truncated for token budget]"
-            assembled = [{
-                "role": "system",
-                "content": "Runtime context (do not repeat verbatim unless asked):\n" + merged,
-            }] + assembled
-            injected_count = 1
-        assembled.append({"role": "user", "content": _build_content(clean_task, files or [])})
-        return assembled, injected_count
-
-    base_reserve_tokens = int(_config.get("context_reserve_tokens", 3072) or 3072)
-    base_ctx_chars = int(_config.get("injected_context_max_chars", 2200) or 2200)
-    messages, _n_injected = _assemble_turn_messages(base_reserve_tokens, base_ctx_chars)
-    input_token_estimate = _messages_token_estimate(messages)
-    turn_budget_policy = _build_turn_budget_policy(clean_task, model_budget, input_token_estimate)
-
-    if bool(_config.get("turn_budget_enforced", True)) and turn_budget_policy.get("pressure") in ("soft", "hard"):
-        reserve_override = max(
-            base_reserve_tokens,
-            int(turn_budget_policy.get("output_reserve", base_reserve_tokens)),
-            max(512, model_budget - int(turn_budget_policy.get("input_budget", model_budget))),
-        )
-        ctx_override = int(turn_budget_policy.get("context_max_chars", base_ctx_chars))
-        messages, _n_injected = _assemble_turn_messages(reserve_override, ctx_override)
-        input_token_estimate = _messages_token_estimate(messages)
-        turn_budget_policy = _build_turn_budget_policy(clean_task, model_budget, input_token_estimate)
-        yield {
-            "type": "turn_budget",
-            "pressure": turn_budget_policy.get("pressure"),
-            "input_tokens": turn_budget_policy.get("input_tokens"),
-            "input_budget": turn_budget_policy.get("input_budget"),
-            "output_reserve": turn_budget_policy.get("output_reserve"),
-            "tool_budget_mode": turn_budget_policy.get("tool_budget_mode"),
-            "disable_ensemble": turn_budget_policy.get("disable_ensemble"),
-            "disable_mcts": turn_budget_policy.get("disable_mcts"),
-        }
-    _push_activity({
-        "ts": time.time(),
-        "action": "turn_budget",
-        "label": f"{turn_budget_policy.get('pressure', 'none')}:{turn_budget_policy.get('complexity', 'unknown')}",
-        "status": str(turn_budget_policy.get("pressure") or "none"),
-        "session": sid,
-        "pressure": turn_budget_policy.get("pressure"),
-        "complexity": turn_budget_policy.get("complexity"),
-        "model": turn_budget_policy.get("model"),
-        "model_family": turn_budget_policy.get("model_family"),
-        "defaults_source": turn_budget_policy.get("defaults_source"),
-        "input_tokens": turn_budget_policy.get("input_tokens"),
-        "input_budget": turn_budget_policy.get("input_budget"),
-        "output_reserve": turn_budget_policy.get("output_reserve"),
-        "disable_ensemble": bool(turn_budget_policy.get("disable_ensemble")),
-        "disable_mcts": bool(turn_budget_policy.get("disable_mcts")),
-        "tool_budget_mode": turn_budget_policy.get("tool_budget_mode"),
-    })
+    messages: List[Dict] = _maybe_compress_history(history_list)
+    messages = CONTEXT_WINDOW.compress_to_token_budget(messages, token_budget=model_budget, reserve_tokens=4096)
+    # Track how many messages we prepend so we can strip them from history returned to clients.
+    # Injected context (memory, KG) must NOT persist in the chat history stored by the front-end —
+    # it is re-injected fresh on every turn.
+    _n_injected = 0
+    # Inject long-term knowledge graph context when relevant entities exist
+    _kg_ctx = kg_to_context_string(clean_task, limit=5)
+    if _kg_ctx:
+        messages = [
+            {"role": "user",      "content": _kg_ctx},
+            {"role": "assistant", "content": "Noted — I have reviewed the relevant knowledge graph context."},
+        ] + messages
+        _n_injected += 2
+    # Inject long-term memory context (semantic summaries of past conversations)
+    _mem_ctx = get_memory_context()
+    if _mem_ctx:
+        messages = [
+            {"role": "user",      "content": _mem_ctx},
+            {"role": "assistant", "content": "Noted — I have context from previous conversations."},
+        ] + messages
+        _n_injected += 2
+    messages.append({"role":"user","content":_build_content(clean_task, files or [])})
 
     def _pub_history() -> List[Dict]:
         """History slice safe to return to the client (no injected context prefixes)."""
@@ -4027,13 +3594,15 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         "type": "token_breakdown",
         "messages": CONTEXT_WINDOW.token_breakdown(messages),
     }
+    input_token_estimate = _messages_token_estimate(messages)
+
     providers_used: List[str] = []
     complexity = _score_complexity(clean_task)
     yield {"type":"complexity","level":complexity}
 
     # Skip MCTS for already-cloned/bypass tasks: the operation is well-defined (read → respond)
     # and MCTS guidance messages prime the model to return score/rationale JSON instead of actions.
-    _skip_mcts = clean_task.startswith("[REPOS ALREADY CLONED") or bool(turn_budget_policy.get("disable_mcts"))
+    _skip_mcts = clean_task.startswith("[REPOS ALREADY CLONED")
     mcts_guidance = None if _skip_mcts else _auto_mcts_guidance(clean_task)
     if mcts_guidance:
         best_plan = mcts_guidance.get("best_plan", [])
@@ -4068,22 +3637,13 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     def _next_action(msgs: List[Dict], task_text: str) -> tuple[Dict[str, Any], str, Dict[str, Any]]:
         def _from_fallback() -> tuple[Dict[str, Any], str, Dict[str, Any]]:
             _native = bool(_config.get("native_tool_calling", False))
-            _routing_hints = {
-                "disable_ensemble": bool(turn_budget_policy.get("disable_ensemble")),
-                "tool_budget_mode": turn_budget_policy.get("tool_budget_mode"),
-                "system_prompt_max_chars": int(turn_budget_policy.get("system_prompt_max_chars", 4000)),
-            }
-            _tools = _get_nexus_tools(task_text) if _native else None
-            _sys_prompt = get_provider_system_prompt(
-                max_chars=int(_routing_hints.get("system_prompt_max_chars", 4000)),
-                native_tools=True,
-            ) if _native else None
+            _tools = _get_nexus_tools() if _native else None
+            _sys_prompt = get_provider_system_prompt(native_tools=True) if _native else None
             resp, pid = call_llm_with_fallback(
                 msgs,
                 task_text,
                 tools=_tools,
                 system_prompt=_sys_prompt,
-                routing_hints=_routing_hints,
             )
             if isinstance(resp, dict) and "action" in resp:
                 return resp, pid, {}
@@ -4099,23 +3659,18 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         test_sid = (sid or "")
         if test_sid.startswith("test-") or test_sid.endswith("-test"):
             if llm_smart_is_mock:
-                action, pid, meta = call_llm_smart(msgs, task_text, routing_hints=turn_budget_policy)
+                action, pid, meta = call_llm_smart(msgs, task_text)
                 return action, pid, meta
             return _from_fallback()
 
         if llm_smart_is_mock:
-            action, pid, meta = call_llm_smart(msgs, task_text, routing_hints=turn_budget_policy)
+            action, pid, meta = call_llm_smart(msgs, task_text)
             return action, pid, meta
         if llm_fallback_is_mock:
             return _from_fallback()
-        return call_llm_smart(msgs, task_text, routing_hints=turn_budget_policy)
+        return call_llm_smart(msgs, task_text)
 
     for _ in range(MAX_LOOP):
-        _step_started = time.perf_counter()
-        _step_llm_ms = 0.0
-        _step_safety_ms = 0.0
-        _step_planning_ms = 0.0
-        _step_tool_ms = 0.0
         # Budget checks
         if max_time_s > 0 and (time.time() - _budget_start) > max_time_s:
             _elapsed = round(time.time() - _budget_start, 1)
@@ -4153,9 +3708,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             return
 
         try:
-            _llm_t0 = time.perf_counter()
             action, pid, _llm_meta = _next_action(messages, clean_task)
-            _step_llm_ms = (time.perf_counter() - _llm_t0) * 1000.0
             if _llm_meta.get("ensemble"):
                 yield {"type": "ensemble",
                        "unanimous": _llm_meta.get("unanimous"),
@@ -4247,7 +3800,6 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         # strict gating for non-test runtime sessions.
         _skip_strict_for_test_respond = _is_test_session and kind == "respond"
         if gate_mode_active and not _skip_strict_for_test_respond and kind not in ("clarify", "plan", "think", "think_deep"):
-            _safety_t0 = time.perf_counter()
             doubt = _strict_doubt_assessment(
                 task=clean_task,
                 action=action,
@@ -4258,7 +3810,6 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 evidence_threshold=action_evidence_threshold,
                 strict_no_guess_mode=_strict_mode,
             )
-            _step_safety_ms += (time.perf_counter() - _safety_t0) * 1000.0
             if doubt.get("score", 0.0) > 0.0:
                 clarify_evt = _build_clarification_payload(
                     task=clean_task,
@@ -4355,19 +3906,6 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             return
 
         if kind == "plan":
-            _step_planning_ms += (time.perf_counter() - _step_started) * 1000.0
-            yield {
-                "type": "step_latency",
-                "step": _step_idx,
-                "action": kind,
-                "latency_ms": {
-                    "llm": int(_step_llm_ms),
-                    "safety": int(_step_safety_ms),
-                    "planning": int(_step_planning_ms),
-                    "tool_dispatch": int(_step_tool_ms),
-                    "total": int((time.perf_counter() - _step_started) * 1000.0),
-                },
-            }
             yield {"type":"plan","title":action.get("title",""),"steps":action.get("steps",[])}
             messages.append({"role":"assistant","content":json.dumps(action)})
             messages.append({"role":"user","content":"Plan looks good. Start building."})
@@ -4375,7 +3913,6 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
 
         if kind == "think_deep":
-            _plan_t0 = time.perf_counter()
             mode = action.get("mode", "tree")
             query = action.get("query", "") or action.get("thought", "")
             if mode == "critique":
@@ -4415,38 +3952,12 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 except Exception as e:
                     reasoning = "Tree-of-Thought reasoning failed: " + str(e)
             yield {"type": "think", "thought": reasoning}
-            _step_planning_ms += (time.perf_counter() - _plan_t0) * 1000.0
-            yield {
-                "type": "step_latency",
-                "step": _step_idx,
-                "action": kind,
-                "latency_ms": {
-                    "llm": int(_step_llm_ms),
-                    "safety": int(_step_safety_ms),
-                    "planning": int(_step_planning_ms),
-                    "tool_dispatch": int(_step_tool_ms),
-                    "total": int((time.perf_counter() - _step_started) * 1000.0),
-                },
-            }
             _trace_steps.append({"kind": "think_deep", "mode": mode, "thought": reasoning})
             messages.append({"role": "assistant", "content": json.dumps(action)})
             messages.append({"role": "user", "content": "Continue using that reasoning."})
             continue
 
         if kind == "think":
-            _step_planning_ms += (time.perf_counter() - _step_started) * 1000.0
-            yield {
-                "type": "step_latency",
-                "step": _step_idx,
-                "action": kind,
-                "latency_ms": {
-                    "llm": int(_step_llm_ms),
-                    "safety": int(_step_safety_ms),
-                    "planning": int(_step_planning_ms),
-                    "tool_dispatch": int(_step_tool_ms),
-                    "total": int((time.perf_counter() - _step_started) * 1000.0),
-                },
-            }
             yield {"type":"think","thought":action.get("thought","")}
             _trace_steps.append({"kind": "think", "thought": action.get("thought", "")})
             messages.append({"role":"assistant","content":json.dumps(action)})
@@ -4502,18 +4013,6 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 pass
 
             # ── Sprint E: live SSE signals ────────────────────────────────────
-            yield {
-                "type": "step_latency",
-                "step": _step_idx,
-                "action": kind,
-                "latency_ms": {
-                    "llm": int(_step_llm_ms),
-                    "safety": int(_step_safety_ms),
-                    "planning": int(_step_planning_ms),
-                    "tool_dispatch": int(_step_tool_ms),
-                    "total": int((time.perf_counter() - _step_started) * 1000.0),
-                },
-            }
             yield {"type": "confidence", "value": round(confidence, 4)}
             if _trace_steps:
                 yield {"type": "trace", "steps": _trace_steps}
@@ -4864,9 +4363,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 _save_checkpoint(trace_id, _step_idx, clean_task, messages, _checkpoint_events)
             continue
 
-        _tool_safety_t0 = time.perf_counter()
         tool_input_verdict = screen_tool_action(action, policy_profile=get_session_safety_profile(sid))
-        _step_safety_ms += (time.perf_counter() - _tool_safety_t0) * 1000.0
         if tool_input_verdict.action == SafetyAction.BLOCK:
             result = describe_block(tool_input_verdict)
             _tid = f"tool_{int(time.time()*1000)}"
@@ -4941,9 +4438,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         # read_file and list_files must use the session workdir, not dispatch_builtin's
         # action.get("workdir", "/tmp") default — keep them in the explicit elif chain below.
         if kind not in {"web_search", "write_file", "read_file", "list_files", "delete_file"}:
-            _tool_t0 = time.perf_counter()
             builtin_result = _dispatch_builtin_traced(action, sid=sid)
-            _step_tool_ms += (time.perf_counter() - _tool_t0) * 1000.0
 
         icon  = TOOL_ICONS.get(kind, "🔧")
         label = (action.get("query") or action.get("path") or action.get("cmd") or
@@ -4980,18 +4475,6 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 "file_path":None, "file_content":None, "artifact":False,
             }
             yield _evt
-            yield {
-                "type": "step_latency",
-                "step": _step_idx,
-                "action": kind,
-                "latency_ms": {
-                    "llm": int(_step_llm_ms),
-                    "safety": int(_step_safety_ms),
-                    "planning": int(_step_planning_ms),
-                    "tool_dispatch": int(_step_tool_ms),
-                    "total": int((time.perf_counter() - _step_started) * 1000.0),
-                },
-            }
             _checkpoint_events.append({k: v for k, v in _evt.items() if k not in ("file_content", "workdir")})
             _push_activity({"ts": time.time(), "action": kind, "label": str(label)[:120],
                             "status": result_stat, "session": sid})
@@ -5035,7 +4518,6 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         file_path    = None
         artifact     = False
         try:
-            _tool_fs_t0 = time.perf_counter()
             if kind == "write_file":
                 file_path    = action.get("path","file.txt")
                 fc           = action.get("content","")
@@ -5131,7 +4613,6 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 result = tool_web_search(action.get("query",""))
             else:
                 result = f"Unknown action: {kind}"
-            _step_tool_ms += (time.perf_counter() - _tool_fs_t0) * 1000.0
         except Exception as e:
             err_class   = _classify_tool_error(e)
             retry_delay = _RETRY_DELAYS.get(err_class, 0.0)
@@ -5173,18 +4654,6 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                "file_path":file_path, "file_content":file_content,
                "artifact":artifact, "workdir":workdir if artifact else None}
         yield _evt
-        yield {
-            "type": "step_latency",
-            "step": _step_idx,
-            "action": kind,
-            "latency_ms": {
-                "llm": int(_step_llm_ms),
-                "safety": int(_step_safety_ms),
-                "planning": int(_step_planning_ms),
-                "tool_dispatch": int(_step_tool_ms),
-                "total": int((time.perf_counter() - _step_started) * 1000.0),
-            },
-        }
         _checkpoint_events.append({k: v for k, v in _evt.items() if k not in ("file_content", "workdir")})
         _push_activity({"ts": time.time(), "action": kind, "label": str(label)[:120],
                         "status": "done", "session": sid})
@@ -5222,12 +4691,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         messages.append({"role":"assistant","content":json.dumps(action)})
         # Truncate large file results stored in context to prevent 413 payload-too-large errors.
         # Tool-result text in messages is for the model's reasoning; full content is shown to user separately.
-        _CONTEXT_RESULT_MAX = int(
-            turn_budget_policy.get(
-                "tool_result_max_chars",
-                int(_config.get("tool_result_context_max_chars", 900) or 900),
-            )
-        )
+        _CONTEXT_RESULT_MAX = 1200
         _result_for_ctx = result if isinstance(result, str) else str(result)
         if len(_result_for_ctx) > _CONTEXT_RESULT_MAX:
             _result_for_ctx = _result_for_ctx[:_CONTEXT_RESULT_MAX] + f"\n…[truncated — {len(result) - _CONTEXT_RESULT_MAX} chars omitted for context]"

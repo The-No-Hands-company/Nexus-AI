@@ -1,4 +1,4 @@
-import os, uuid, json, asyncio, threading, time, hmac, secrets, hashlib, base64, re
+import os, uuid, json, asyncio, threading, time, hmac, secrets, hashlib, base64
 from urllib import parse as _urlparse
 from urllib import request as _urlrequest
 from urllib import error as _urlerror
@@ -9,7 +9,7 @@ from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSO
 from pydantic import ValidationError
 
 router = APIRouter()
-from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_provider_health, get_provider_capabilities, get_free_provider_diagnostics, set_provider_persona_override, get_provider_persona_override, get_config, update_config, call_llm_with_fallback, call_llm_smart, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event, AllProvidersExhausted, warmup_agent, get_turn_budget_summary)
+from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_provider_health, get_provider_capabilities, get_free_provider_diagnostics, set_provider_persona_override, get_provider_persona_override, get_config, update_config, call_llm_with_fallback, call_llm_smart, get_session_dir, set_session_token, _session_state, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, set_session_safety_profile, safety_log, _push_safety_event, AllProvidersExhausted, warmup_agent)
 from ..approvals import list_tool_approvals, decide_tool_approval
 from ..auth import JWT_SECRET, JWT_ALGO, JWT_EXPIRE_H, AuthManager, MULTI_USER
 from ..scheduler import (
@@ -798,7 +798,7 @@ def _orchestrator_llm(prompt: str, task: str = "") -> str:
 def _save_autonomy_checkpoint(trace_id: str, step_idx: int, goal: str, events: list[dict]) -> None:
     """Persist autonomy execution checkpoint snapshots for replay/resume."""
     try:
-        _save_checkpoint(trace_id, step_idx, {"task": goal, "trace_id": trace_id, "events": list(events)})
+        _save_checkpoint(trace_id, step_idx, goal, [], events)
     except Exception:
         # Checkpointing should not fail the user-visible autonomy request.
         pass
@@ -2160,12 +2160,6 @@ def admin_bypass_history(days: int = 30):
     }
 
 
-@router.get("/admin/turn-budget-summary")
-def admin_turn_budget_summary(limit: int = 100, since_ts: float = 0.0):
-    """Recent summary of turn-budget pressure and downgrade decisions from activity_log."""
-    return get_turn_budget_summary(limit=limit, since_ts=since_ts)
-
-
 @router.post("/admin/reset-providers")
 def admin_reset_providers():
     """Clear all provider demotion flags, warmup strike counters, and rate-limit cooldowns.
@@ -2298,50 +2292,7 @@ async def pii_scan(request: Request):
     text = (data.get("text") or "")
     if not text.strip():
         return _api_error("text is required", "validation_error", 422)
-
-    # Build a structured scan result expected by contract tests.
-    email_re = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-    token_re = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]+)\b")
-    phone_re = re.compile(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
-
-    findings = []
-    for match in email_re.finditer(text):
-        findings.append(
-            {
-                "type": "email",
-                "match": match.group(0),
-                "start": match.start(),
-                "end": match.end(),
-            }
-        )
-    for match in token_re.finditer(text):
-        findings.append(
-            {
-                "type": "token",
-                "match": "[REDACTED]",
-                "start": match.start(),
-                "end": match.end(),
-            }
-        )
-    for match in phone_re.finditer(text):
-        findings.append(
-            {
-                "type": "phone",
-                "match": "[REDACTED]",
-                "start": match.start(),
-                "end": match.end(),
-            }
-        )
-
-    redacted = email_re.sub("[REDACTED_EMAIL]", text)
-    redacted = phone_re.sub("[REDACTED_PHONE]", redacted)
-    redacted = scrub_pii(redacted)["redacted_text"]
-    result = {
-        "text": text,
-        "redacted_text": redacted,
-        "findings": findings,
-        "total_findings": len(findings),
-    }
+    result = scrub_pii(text)
     if result.get("total_findings", 0) > 0:
         _push_safety_event("pii_scrub", {
             "scope": "scan",
@@ -2378,11 +2329,11 @@ async def prompt_injection_scan(request: Request):
         "threat": (prompt_issues[0].get("threat") if prompt_issues else "none"),
         "issues": [
             {
-                "code": issue.get("code", "prompt_injection"),
-                "reason": issue.get("reason", issue.get("message", "Prompt injection detected")),
-                "detail": issue.get("detail", issue.get("message", "Prompt injection detected")),
-                "severity": issue.get("threat", issue.get("severity", "high")),
-                "pattern": issue.get("pattern"),
+                "code": issue["code"],
+                "reason": issue["reason"],
+                "detail": issue["detail"],
+                "severity": issue["threat"],
+                "pattern": issue["pattern"],
             }
             for issue in prompt_issues
         ],
@@ -2440,20 +2391,9 @@ async def scheduler_create_job(request: Request):
     if not task:
         return _api_error("task is required", "validation_error", 422)
     try:
-        safe_task = check_user_task(task)
-    except GuardrailViolation as exc:
-        return JSONResponse(
-            {
-                "error": exc.reason,
-                "type": exc.code,
-                "safety": {"blocked": True, "code": exc.code, "message": exc.reason},
-            },
-            status_code=422,
-        )
-    try:
         job = schedule_job(
             name=name,
-            task=safe_task,
+            task=task,
             schedule=schedule,
             max_retries=int(body.get("max_retries", 0)),
             retry_backoff_secs=int(body.get("retry_backoff_secs", 60)),
@@ -3781,13 +3721,8 @@ def benchmark_history(provider: str = "", model: str = "", task_type: str = "", 
 @router.get("/benchmark/leaderboard")
 def benchmark_leaderboard(sort_by: str = "task_type", limit: int = 20, provider: str = ""):
     """Return ranked benchmark leaderboard entries."""
-    from dataclasses import asdict
-    from ..leaderboard import get_leaderboard
-
-    entries = [asdict(item) for item in get_leaderboard(limit=limit)]
-    if provider:
-        entries = [row for row in entries if str(row.get("provider", "")) == provider]
-    return {"entries": entries, "sort_by": sort_by}
+    from ..benchmark import get_benchmark_leaderboard
+    return get_benchmark_leaderboard(sort_by=sort_by, limit=limit, provider=provider)
 
 
 @router.get("/benchmark/tradeoff")
@@ -4761,7 +4696,7 @@ def diff_history(trace_id: str = "", limit: int = 50):
 
 
 @router.get("/diff/{diff_id}")
-def diff_detail(diff_id: str):
+def diff_detail(diff_id: int):
     """Return full diff detail (including before/after text and unified diff) by id."""
     record = _get_file_diff_detail(diff_id)
     if not record:
@@ -5384,37 +5319,19 @@ async def autonomy_plan(request: Request):
         max_subtasks = 6
     trace_id = secrets.token_hex(8)
     try:
-        planner = PlanningSystem()
-        steps_list: list[dict[str, Any]] = []
-        if hasattr(planner, "decompose"):
-            tasks = planner.decompose(goal, max_subtasks)
-            steps_list = [
-                {
-                    "id": t.task_id,
-                    "name": t.name,
-                    "description": t.description,
-                    "priority": t.priority,
-                    "dependencies": t.dependencies,
-                    "estimated_hours": t.estimated_hours,
-                    "agent": classify_subtask(t.description),
-                }
+        planner = PlanningSystem(_orchestrator_llm)
+        tasks   = planner.decompose(goal, max_subtasks)
+        plan = {
+            "trace_id":   trace_id,
+            "goal":       goal,
+            "steps": [
+                {"id": t.task_id, "name": t.name, "description": t.description,
+                 "priority": t.priority, "dependencies": t.dependencies,
+                 "estimated_hours": t.estimated_hours,
+                 "agent": classify_subtask(t.description)}
                 for t in tasks
-            ]
-        else:
-            raw_steps = planner.plan(goal)[:max_subtasks]
-            steps_list = [
-                {
-                    "id": f"t{i}",
-                    "name": step,
-                    "description": step,
-                    "priority": 1,
-                    "dependencies": [],
-                    "estimated_hours": 1,
-                    "agent": classify_subtask(step),
-                }
-                for i, step in enumerate(raw_steps, 1)
-            ]
-        plan = {"trace_id": trace_id, "goal": goal, "steps": steps_list}
+            ],
+        }
         autonomy_traces[trace_id] = {"type": "plan", "status": "ready", **plan}
         db_save_autonomy_trace(trace_id, autonomy_traces[trace_id])
         return plan
@@ -5502,9 +5419,10 @@ async def autonomy_execute(request: Request):
 
 
 @router.get("/autonomy/trace/{trace_id}")
-async def autonomy_trace(trace_id: str):
+def autonomy_trace(trace_id: str):
+    """Retrieve a stored plan or execution trace by its ID."""
     trace = autonomy_traces.get(trace_id) or db_load_autonomy_trace(trace_id)
-    if not trace:
+    if trace is None:
         return JSONResponse({"error": "trace not found"}, status_code=404)
     return trace
 
@@ -7531,7 +7449,6 @@ async def run_specialist_agent(agent_id: str, request: Request):
     Returns the agent's response using its system prompt + preferred providers.
     """
     from ..agents import get_specialist
-    from .. import agent as _agent_mod
     from ..agent import call_llm_with_fallback, _smart_order, get_system_resources, PROVIDERS
 
     body: dict = {}
@@ -7575,7 +7492,7 @@ async def run_specialist_agent(agent_id: str, request: Request):
             "provider":  pid,
             "content":   content,
         }
-    except _agent_mod.AllProvidersExhausted as exc:
+    except AllProvidersExhausted as exc:
         return JSONResponse(
             {
                 "error": str(exc),
@@ -8460,8 +8377,7 @@ async def kg_import_endpoint(request: Request):
 def kg_hybrid_search_endpoint(q: str = "", limit: int = 10):
     if not q.strip():
         return _api_error("q is required", "validation_error", 422)
-    kg_results = _kg_hybrid_search(q.strip(), limit=limit)
-    return {"kg": kg_results, "semantic": []}
+    return _kg_hybrid_search(q.strip(), limit=limit)
 
 
 # ── Execution Trace replay/resume endpoints ──────────────────────────────────
@@ -11605,8 +11521,8 @@ async def schedule_continual_finetune(request: Request):
 
     row = {
         "id": policy_id,
-        "scheduler_job_id": job["id"],
-        "name": job["name"],
+        "scheduler_job_id": job.id,
+        "name": job.name,
         "model": model,
         "schedule": schedule,
         "threshold": threshold,
@@ -14079,102 +13995,6 @@ async def api_federated_status():
 async def api_federated_rounds(limit: int = 20):
     from ..federated import list_rounds
     return {"rounds": list_rounds(limit=limit)}
-
-
-@router.get("/admin/federated/fallback-hooks")
-async def api_admin_federated_fallback_hooks(request: Request, limit: int = 200, since_ts: float = 0.0):
-    require_admin(request)
-    from ..federated import get_fallback_hook_summary, list_fallback_hooks
-
-    hooks = list_fallback_hooks(limit=limit, since_ts=since_ts)
-    summary = get_fallback_hook_summary(limit=limit, since_ts=since_ts)
-    return {
-        "summary": summary,
-        "hooks": hooks,
-    }
-
-
-@router.post("/admin/retention/eval-creative")
-async def api_admin_retention_eval_creative(request: Request):
-    require_admin(request)
-    from ..db import run_eval_creative_retention_cleanup
-
-    body = await _read_json_body(request, "invalid JSON body")
-    result = run_eval_creative_retention_cleanup(
-        eval_retention_days=int(body.get("eval_retention_days") or 0) or None,
-        creative_retention_days=int(body.get("creative_retention_days") or 0) or None,
-        max_rows=int(body.get("max_rows") or 5000),
-    )
-    return result
-
-
-# ── Creative async jobs (Phase 2 contract) ───────────────────────────────────
-
-@router.post("/creative/music/jobs")
-async def api_create_music_job(request: Request):
-    require_auth(request)
-    from ..creative_jobs import create_creative_job
-
-    body = await _read_json_body(request, "invalid JSON body")
-    prompt = str(body.get("prompt") or "").strip()
-    if not prompt:
-        return _api_error("prompt is required", "validation_error", 422)
-
-    created = create_creative_job(
-        kind="music",
-        prompt=prompt,
-        params={
-            "duration": int(body.get("duration") or 15),
-            "style": str(body.get("style") or "ambient"),
-        },
-    )
-    if not bool(created.get("ok", False)):
-        code = str(created.get("error") or "creative_job_failed")
-        status = 503 if code == "creative_tools_disabled" else 400
-        return JSONResponse(created, status_code=status)
-    return JSONResponse({"job": created}, status_code=202)
-
-
-@router.post("/creative/3d/jobs")
-async def api_create_3d_job(request: Request):
-    require_auth(request)
-    from ..creative_jobs import create_creative_job
-
-    body = await _read_json_body(request, "invalid JSON body")
-    prompt = str(body.get("prompt") or "").strip()
-    if not prompt:
-        return _api_error("prompt is required", "validation_error", 422)
-
-    created = create_creative_job(
-        kind="3d",
-        prompt=prompt,
-        params={"format": str(body.get("format") or "glb")},
-    )
-    if not bool(created.get("ok", False)):
-        code = str(created.get("error") or "creative_job_failed")
-        status = 503 if code == "creative_tools_disabled" else 400
-        return JSONResponse(created, status_code=status)
-    return JSONResponse({"job": created}, status_code=202)
-
-
-@router.get("/creative/jobs/{job_id}")
-async def api_get_creative_job(job_id: str, request: Request):
-    require_auth(request)
-    from ..creative_jobs import get_creative_job_status
-
-    row = get_creative_job_status(job_id)
-    if row is None:
-        return _api_error("creative job not found", "not_found", 404)
-    return {"job": row}
-
-
-@router.get("/creative/jobs")
-async def api_list_creative_jobs(request: Request, kind: str = "", limit: int = 50):
-    require_auth(request)
-    from ..creative_jobs import list_creative_jobs_status
-
-    rows = list_creative_jobs_status(kind=kind, limit=limit)
-    return {"jobs": rows, "count": len(rows)}
 
 
 # ── Drift detection (Sections 19.3, 20.2) ────────────────────────────────────

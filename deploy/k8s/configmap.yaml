@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nexus-ai-config
+  namespace: nexus-ai
+data:
+  PROVIDER: "auto"
+  MULTI_USER: "true"
+  PORT: "8000"
+  WEB_WORKERS: "4"
+  WORKER_TIMEOUT: "120"
+  LOG_LEVEL: "info"
+  RATE_LIMIT_COOLDOWN: "60"
