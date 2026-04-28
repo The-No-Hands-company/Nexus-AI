@@ -1565,6 +1565,33 @@ class TestStrictNoGuessMode(unittest.TestCase):
         self.assertFalse(clarify_events)
         self.assertTrue(done_events)
 
+    def test_strict_mode_allows_safe_write_file_with_complete_inputs(self):
+        from src.agent import stream_agent_task
+
+        client.post(
+            "/settings",
+            json={
+                "strict_no_guess_mode": True,
+                "strict_confidence_threshold": 0.95,
+                "strict_evidence_threshold": 1,
+            },
+        )
+
+        actions = [
+            ({"action": "write_file", "path": "notes.txt", "content": "hello", "confidence": 0.99}, "llm7", {}),
+            ({"action": "respond", "content": "Done.", "confidence": 0.99}, "llm7", {}),
+        ]
+
+        with patch("src.agent.call_llm_smart", side_effect=actions), \
+             patch("src.agent.tool_write_file", return_value="✅ wrote file") as tool_write_file:
+            events = list(stream_agent_task("create notes.txt with content hello", [], sid="strict-test-write-ok"))
+
+        clarify_events = [e for e in events if e.get("type") == "clarify"]
+        done_events = [e for e in events if e.get("type") == "done"]
+        self.assertFalse(clarify_events)
+        self.assertTrue(done_events)
+        tool_write_file.assert_called_once()
+
 
 class TestHITLApprovalPersistence(unittest.TestCase):
     def setUp(self):

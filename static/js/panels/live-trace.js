@@ -6,6 +6,13 @@ let _ltEventSource  = null;
 let _ltTraceId      = null;
 let _ltEventCount   = 0;
 let _ltStartTime    = null;
+let _ltTurnBudgetHistory = [];
+let _ltTurnBudgetHistoryWindow = 10;
+let _ltConnectionMode = "live";
+const LT_HISTORY_WINDOW_STORAGE_KEY = "nexus.liveTrace.historyWindow";
+const LT_CONNECTION_MODE_STORAGE_KEY = "nexus.liveTrace.connectionMode";
+const LT_REPLAY_TRACE_STORAGE_KEY = "nexus.liveTrace.replayTraceId";
+const LT_AUTO_REPLAY_OPEN_STORAGE_KEY = "nexus.liveTrace.autoReplayOnOpen";
 
 const LT_TYPE_META = {
   plan:       { icon: "📋", color: "#7c6af7", label: "Plan" },
@@ -16,13 +23,313 @@ const LT_TYPE_META = {
   error:      { icon: "❌", color: "#ef4444", label: "Error" },
   fallback:   { icon: "↩️", color: "#f59e0b", label: "Fallback" },
   complexity: { icon: "🧠", color: "#7c6af7", label: "Complexity" },
+  turn_budget:{ icon: "🎛️", color: "#f97316", label: "Turn Budget" },
   system:     { icon: "ℹ️", color: "#64748b", label: "System" },
   image:      { icon: "🎨", color: "#ec4899", label: "Image" },
 };
 
+function ltTurnBudgetTheme(pressure) {
+  if (pressure === "hard") {
+    return {
+      borderColor: "color-mix(in srgb, var(--red) 55%, var(--border))",
+      background: "color-mix(in srgb, var(--red) 12%, var(--surface2))",
+      accent: "#ef4444",
+    };
+  }
+  if (pressure === "soft") {
+    return {
+      borderColor: "color-mix(in srgb, var(--amber) 55%, var(--border))",
+      background: "color-mix(in srgb, var(--amber) 12%, var(--surface2))",
+      accent: "#f59e0b",
+    };
+  }
+  return {
+    borderColor: "var(--border)",
+    background: "var(--surface2)",
+    accent: "#94a3b8",
+  };
+}
+
+function ltDescribeTurnBudget(evt) {
+  const pressure = String(evt?.pressure || "none");
+  const family = String(evt?.model_family || "balanced");
+  const complexity = String(evt?.complexity || "unknown");
+  const helperState = [evt?.disable_mcts ? "MCTS off" : "MCTS on", evt?.disable_ensemble ? "ensemble off" : "ensemble on"].join(" · ");
+  return {
+    pressureLabel: `Pressure: ${pressure} · ${complexity} · ${family}`,
+    helpersLabel: `Helpers: ${helperState}`,
+    modeLabel: `Tool mode: ${String(evt?.tool_budget_mode || "adaptive")}`,
+    helperState,
+    pressure,
+  };
+}
+
+function ltPressureTickTheme(pressure) {
+  if (pressure === "hard") {
+    return { color: "#ef4444", height: "12px", title: "hard" };
+  }
+  if (pressure === "soft") {
+    return { color: "#f59e0b", height: "9px", title: "soft" };
+  }
+  return { color: "#64748b", height: "6px", title: "none" };
+}
+
+function ltSummarizePressureHistory(pressures) {
+  const history = Array.isArray(pressures) ? pressures : [];
+  const hardCount = history.filter((p) => p === "hard").length;
+  const softCount = history.filter((p) => p === "soft").length;
+  const tail = history.slice(-3);
+  const hardStreak = tail.length === 3 && tail.every((p) => p === "hard");
+  if (hardStreak || hardCount >= 4) {
+    return `Trend: sustained hard (${hardCount}/${history.length || _ltTurnBudgetHistoryWindow})`;
+  }
+  if (hardCount > 0) {
+    return `Trend: intermittent hard (${hardCount}/${history.length || _ltTurnBudgetHistoryWindow})`;
+  }
+  if (softCount >= 4) {
+    return `Trend: sustained soft (${softCount}/${history.length || _ltTurnBudgetHistoryWindow})`;
+  }
+  if (softCount > 0) {
+    return `Trend: occasional soft (${softCount}/${history.length || _ltTurnBudgetHistoryWindow})`;
+  }
+  return "Trend: stable";
+}
+
+function ltRenderPressureHistory(pressures) {
+  const history = Array.isArray(pressures) ? pressures.slice(-_ltTurnBudgetHistoryWindow) : [];
+  if (!history.length) {
+    return '<span style="font-size:.68rem;color:var(--muted)">No pressure samples yet</span>';
+  }
+  return history
+    .map((pressure) => {
+      const theme = ltPressureTickTheme(String(pressure || "none"));
+      return `<span title="${theme.title}" style="display:inline-block;width:7px;height:${theme.height};background:${theme.color};border-radius:2px;opacity:.95"></span>`;
+    })
+    .join("");
+}
+
+function ltUpdatePressureHistory(pressure) {
+  const normalized = pressure === "hard" || pressure === "soft" ? pressure : "none";
+  _ltTurnBudgetHistory.push(normalized);
+  if (_ltTurnBudgetHistory.length > 30) {
+    _ltTurnBudgetHistory = _ltTurnBudgetHistory.slice(-30);
+  }
+  const historyEl = document.getElementById("lt-turn-budget-history");
+  const trendEl = document.getElementById("lt-turn-budget-trend");
+  if (historyEl) {
+    historyEl.innerHTML = ltRenderPressureHistory(_ltTurnBudgetHistory);
+  }
+  if (trendEl) {
+    trendEl.textContent = ltSummarizePressureHistory(_ltTurnBudgetHistory);
+    trendEl.style.color = normalized === "hard"
+      ? "#ef4444"
+      : normalized === "soft"
+        ? "#f59e0b"
+        : "var(--muted)";
+  }
+}
+
+function ltRefreshPressureHistoryWindow() {
+  const historyEl = document.getElementById("lt-turn-budget-history");
+  const trendEl = document.getElementById("lt-turn-budget-trend");
+  if (historyEl) {
+    historyEl.innerHTML = ltRenderPressureHistory(_ltTurnBudgetHistory);
+  }
+  if (trendEl) {
+    const visibleHistory = _ltTurnBudgetHistory.slice(-_ltTurnBudgetHistoryWindow);
+    trendEl.textContent = ltSummarizePressureHistory(visibleHistory);
+  }
+}
+
+function ltLoadStoredHistoryWindow() {
+  try {
+    if (typeof localStorage === "undefined") return 10;
+    const raw = Number(localStorage.getItem(LT_HISTORY_WINDOW_STORAGE_KEY) || 10);
+    return [10, 20, 30].includes(raw) ? raw : 10;
+  } catch (_) {
+    return 10;
+  }
+}
+
+function ltStoreHistoryWindow(value) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(LT_HISTORY_WINDOW_STORAGE_KEY, String(value));
+  } catch (_) {}
+}
+
+function ltLoadStoredConnectionMode() {
+  try {
+    if (typeof localStorage === "undefined") return "live";
+    const raw = String(localStorage.getItem(LT_CONNECTION_MODE_STORAGE_KEY) || "live");
+    return raw === "replay" ? "replay" : "live";
+  } catch (_) {
+    return "live";
+  }
+}
+
+function ltStoreConnectionMode(value) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const normalized = value === "replay" ? "replay" : "live";
+    localStorage.setItem(LT_CONNECTION_MODE_STORAGE_KEY, normalized);
+  } catch (_) {}
+}
+
+function ltLoadStoredReplayTraceId() {
+  try {
+    if (typeof localStorage === "undefined") return "";
+    return String(localStorage.getItem(LT_REPLAY_TRACE_STORAGE_KEY) || "");
+  } catch (_) {
+    return "";
+  }
+}
+
+function ltStoreReplayTraceId(value) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    const normalized = String(value || "").trim();
+    localStorage.setItem(LT_REPLAY_TRACE_STORAGE_KEY, normalized);
+  } catch (_) {}
+}
+
+function ltRememberReplayTrace(value) {
+  const normalized = String(value || "").trim();
+  _ltTraceId = normalized || null;
+  ltStoreReplayTraceId(normalized);
+}
+
+function ltApplyStoredReplayTrace() {
+  if (typeof document === "undefined") return;
+  const sel = document.getElementById("lt-trace-select");
+  if (!sel) return false;
+  const stored = ltLoadStoredReplayTraceId();
+  if (!stored) {
+    sel.value = "";
+    return false;
+  }
+  const options = Array.from(sel.options || []);
+  const exists = options.some((option) => option.value === stored);
+  sel.value = exists ? stored : "";
+  if (exists) {
+    _ltTraceId = stored;
+  }
+  return exists;
+}
+
+function ltLoadStoredAutoReplayOnOpen() {
+  try {
+    if (typeof localStorage === "undefined") return false;
+    return String(localStorage.getItem(LT_AUTO_REPLAY_OPEN_STORAGE_KEY) || "0") === "1";
+  } catch (_) {
+    return false;
+  }
+}
+
+function ltStoreAutoReplayOnOpen(enabled) {
+  try {
+    if (typeof localStorage === "undefined") return;
+    localStorage.setItem(LT_AUTO_REPLAY_OPEN_STORAGE_KEY, enabled ? "1" : "0");
+  } catch (_) {}
+}
+
+function ltSetAutoReplayOnOpen(enabled, options) {
+  const normalized = Boolean(enabled);
+  if (!options || options.persist !== false) {
+    ltStoreAutoReplayOnOpen(normalized);
+  }
+  if (typeof document === "undefined") return;
+  const checkbox = document.getElementById("lt-auto-replay-open");
+  if (checkbox) {
+    checkbox.checked = normalized;
+  }
+}
+
+function ltShouldAutoReplayOnOpen() {
+  return ltLoadStoredConnectionMode() === "replay" && ltLoadStoredAutoReplayOnOpen();
+}
+
+function ltApplyConnectionModeUi(mode) {
+  if (typeof document === "undefined") return;
+  const normalized = mode === "replay" ? "replay" : "live";
+  const liveBtn = document.getElementById("lt-live-btn");
+  const replayBtn = document.getElementById("lt-replay-btn");
+  const modePref = document.getElementById("lt-mode-pref");
+  const traceSelect = document.getElementById("lt-trace-select");
+  if (modePref) {
+    modePref.textContent = `Mode: ${normalized}`;
+    modePref.style.borderColor = normalized === "replay"
+      ? "color-mix(in srgb, var(--amber) 55%, var(--border))"
+      : "color-mix(in srgb, var(--accent) 45%, var(--border))";
+    modePref.style.color = normalized === "replay" ? "#f59e0b" : "var(--accent)";
+  }
+  if (liveBtn) {
+    liveBtn.style.background = normalized === "live" ? "var(--accent)" : "var(--surface2)";
+    liveBtn.style.color = normalized === "live" ? "#fff" : "var(--muted)";
+    liveBtn.style.border = normalized === "live" ? "none" : "1px solid var(--border)";
+    liveBtn.style.fontWeight = normalized === "live" ? "600" : "500";
+  }
+  if (replayBtn) {
+    replayBtn.style.background = normalized === "replay" ? "color-mix(in srgb, var(--amber) 20%, var(--surface2))" : "var(--surface2)";
+    replayBtn.style.color = normalized === "replay" ? "#f59e0b" : "var(--text)";
+    replayBtn.style.border = normalized === "replay"
+      ? "1px solid color-mix(in srgb, var(--amber) 50%, var(--border))"
+      : "1px solid var(--border)";
+    replayBtn.style.fontWeight = normalized === "replay" ? "600" : "500";
+  }
+  if (traceSelect) {
+    traceSelect.style.borderColor = normalized === "replay"
+      ? "color-mix(in srgb, var(--amber) 45%, var(--border))"
+      : "var(--border)";
+  }
+}
+
+function ltSetConnectionMode(value) {
+  const normalized = value === "replay" ? "replay" : "live";
+  _ltConnectionMode = normalized;
+  ltStoreConnectionMode(normalized);
+  ltApplyConnectionModeUi(normalized);
+}
+
+function ltSetHistoryWindow(value) {
+  const parsed = Number(value);
+  if (![10, 20, 30].includes(parsed)) return;
+  _ltTurnBudgetHistoryWindow = parsed;
+  ltStoreHistoryWindow(parsed);
+  const select = typeof document !== "undefined" ? document.getElementById("lt-history-window") : null;
+  if (select && String(select.value) !== String(parsed)) {
+    select.value = String(parsed);
+  }
+  if (typeof document !== "undefined") {
+    ltRefreshPressureHistoryWindow();
+  }
+}
+
+function ltUpdateTurnBudgetStrip(evt) {
+  const pressureEl = document.getElementById("lt-turn-budget-pressure");
+  const helpersEl = document.getElementById("lt-turn-budget-helpers");
+  const modeEl = document.getElementById("lt-turn-budget-mode");
+  if (!pressureEl || !helpersEl || !modeEl) return;
+  const described = ltDescribeTurnBudget(evt || {});
+  const theme = ltTurnBudgetTheme(described.pressure);
+  [pressureEl, helpersEl, modeEl].forEach((el) => {
+    el.style.borderColor = theme.borderColor;
+    el.style.background = theme.background;
+  });
+  pressureEl.style.color = theme.accent;
+  helpersEl.style.color = "var(--text)";
+  modeEl.style.color = "var(--text)";
+  pressureEl.textContent = described.pressureLabel;
+  helpersEl.textContent = described.helpersLabel;
+  modeEl.textContent = described.modeLabel;
+}
+
 function openLiveTracePanel() {
   NexusApi.setPanelOpen("live-trace-panel", true);
-  _ltRefreshTraceList();
+  ltSetConnectionMode(ltLoadStoredConnectionMode());
+  ltSetHistoryWindow(ltLoadStoredHistoryWindow());
+  ltSetAutoReplayOnOpen(ltLoadStoredAutoReplayOnOpen(), { persist: false });
+  _ltRefreshTraceList({ autoReplayOnOpen: true });
 }
 
 function closeLiveTracePanel() {
@@ -33,6 +340,7 @@ function closeLiveTracePanel() {
 // ── SSE connection ────────────────────────────────────────────────────────────
 function ltConnectLive() {
   // Connect to the live SSE stream for agent events
+  ltSetConnectionMode("live");
   _ltDisconnect();
   _ltClearFeed();
   _ltStartTime = Date.now();
@@ -74,6 +382,8 @@ function ltConnectLive() {
 function ltReplaySelected() {
   const sel = document.getElementById("lt-trace-select");
   if (!sel || !sel.value) return;
+  ltRememberReplayTrace(sel.value);
+  ltSetConnectionMode("replay");
   _ltDisconnect();
   _ltClearFeed();
   _ltStartTime = Date.now();
@@ -109,6 +419,16 @@ function _ltClearFeed() {
   if (cnt) cnt.textContent = "0 events";
   const bar = document.getElementById("lt-timeline-bar");
   if (bar) bar.innerHTML = "";
+  _ltConnectionMode = ltLoadStoredConnectionMode();
+  ltApplyConnectionModeUi(_ltConnectionMode);
+  _ltTurnBudgetHistoryWindow = ltLoadStoredHistoryWindow();
+  const select = typeof document !== "undefined" ? document.getElementById("lt-history-window") : null;
+  if (select) {
+    select.value = String(_ltTurnBudgetHistoryWindow);
+  }
+  _ltTurnBudgetHistory = [];
+  ltUpdateTurnBudgetStrip({ pressure: "none", complexity: "idle", model_family: "balanced", disable_mcts: false, disable_ensemble: false, tool_budget_mode: "adaptive" });
+  ltUpdatePressureHistory("none");
 }
 
 // ── Event rendering ───────────────────────────────────────────────────────────
@@ -130,6 +450,7 @@ function _ltRenderEvent(evt) {
   else if (evt.type === "think") detail = (evt.thought||"").slice(0,80);
   else if (evt.type === "error") detail = (evt.message||"").slice(0,80);
   else if (evt.type === "complexity") detail = `Complexity: ${evt.level||"?"}`;
+  else if (evt.type === "turn_budget") detail = ltDescribeTurnBudget(evt).pressureLabel;
   else if (evt.type === "fallback") detail = evt.chain || "";
   else detail = JSON.stringify(evt).slice(0,60);
 
@@ -183,6 +504,11 @@ function _ltRenderEvent(evt) {
   feed.appendChild(row);
   feed.scrollTop = feed.scrollHeight;
 
+  if (evt.type === "turn_budget") {
+    ltUpdateTurnBudgetStrip(evt);
+    ltUpdatePressureHistory(String(evt.pressure || "none"));
+  }
+
   // Update counter
   const cnt = document.getElementById("lt-event-count");
   if (cnt) cnt.textContent = `${_ltEventCount} event${_ltEventCount !== 1 ? "s" : ""}`;
@@ -213,7 +539,7 @@ function _ltAddTimelineTick(color, label) {
 }
 
 // ── Trace list (for replay) ───────────────────────────────────────────────────
-async function _ltRefreshTraceList() {
+async function _ltRefreshTraceList(options) {
   const sel = document.getElementById("lt-trace-select");
   if (!sel) return;
   try {
@@ -222,7 +548,32 @@ async function _ltRefreshTraceList() {
     const traces = d.traces || [];
     sel.innerHTML = '<option value="">— Select trace to replay —</option>' +
       traces.map(t => `<option value="${esc(t.trace_id||'')}">${esc((t.trace_id||'').slice(0,14))} — ${esc((t.task||'').slice(0,40))}</option>`).join('');
+    const restoredTrace = ltApplyStoredReplayTrace();
+    if (options?.autoReplayOnOpen && restoredTrace && ltShouldAutoReplayOnOpen()) {
+      ltReplaySelected();
+    }
   } catch(_) {}
 }
 
 function ltClearFeed() { _ltClearFeed(); }
+
+window.NexusLiveTrace = {
+  ltTurnBudgetTheme,
+  ltDescribeTurnBudget,
+  ltPressureTickTheme,
+  ltSummarizePressureHistory,
+  ltRenderPressureHistory,
+  ltSetHistoryWindow,
+  ltLoadStoredHistoryWindow,
+  ltStoreHistoryWindow,
+  ltLoadStoredConnectionMode,
+  ltStoreConnectionMode,
+  ltSetConnectionMode,
+  ltLoadStoredReplayTraceId,
+  ltStoreReplayTraceId,
+  ltRememberReplayTrace,
+  ltLoadStoredAutoReplayOnOpen,
+  ltStoreAutoReplayOnOpen,
+  ltSetAutoReplayOnOpen,
+  ltShouldAutoReplayOnOpen,
+};
