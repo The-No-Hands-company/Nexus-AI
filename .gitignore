@@ -1,99 +1,15 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
+*
+!/.gitignore
+!/AGENTS.md
+!/README.md
+!/package.json
+!/tsconfig.json
+!/docs/
+!/docs/**
+!/src/
+!/src/**
 
-# Environments
-.env
-.venv
-env/
-venv/
-ENV/
-env.bak/
-env.old/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*.code-workspace
-
-# ─── Autonomy Control Plane (Thin Wrapper / Thick Kernel design) ─────────────
-# These directories form the LOCAL-ONLY autonomous execution infrastructure:
-#   .github/skills/   — 69 nexus-ai-* SKILL.md agent definitions (not portable code)
-#   .github/prompts/  — 34 SOP .prompt.md files (operator-specific, env-specific)
-#
-# Design intent: The Kernel (nexus-ai-kernel-orchestrator) and all specialist agents
-# live here and are intentionally NOT committed. Each deployment environment generates
-# its own agent pack. Do NOT remove these gitignore lines.
-.github/skills/
-.github/prompts/
-
-# Test
-.pytest_cache/
-.coverage
-.coverage.*
-.cache/
-nosetests.xml
-coverage.xml
-*.cover
-.hypothesis/
-.pytest_cache/
-
-# Logs
-*.log
-logs/
-*.bak
-*.orig
-docs/personal-note-exclude-from-git.md
-
-# Database
-*.db
-*.sqlite
-
-# OS generated files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# ─── Local Planning Assets (local-only, autonomy planner input) ──────────────
-# These directories contain working-environment files used by the autonomy
-# engine as planner inputs. They are LOCAL-ONLY:
-#   docs/registry/       — Feature registries (v2, v3, sprint seeds). Generated
-#                          by scripts/build_operational_registry.py. Regenerate
-#                          locally; do not commit generated CSVs/JSOLs.
-#   docs/sprint-tickets/ — Sprint board and ticket stubs. Lifecycle-managed by
-#                          the autonomy engine. Not portable across deployments.
-#   scripts/             — Audit/build helper scripts. Local tooling only.
-#
-# NOTE: The autonomy planner references specific filenames in these dirs.
-# If a referenced file is missing, create a stub locally; do not remove the
-# gitignore entries to work around missing stubs.
-docs/registry/
-docs/sprint-tickets/
-scripts/
-.nexus/
+# Generated Python cache artifacts should never be committed.
+src/**/__pycache__/
+src/**/*.pyc
+src/**/*.pyo

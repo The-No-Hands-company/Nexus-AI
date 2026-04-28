@@ -2,6 +2,7 @@
 Built-in tools that don't need LLM calls — calculator, weather, currency,
 unit converter, regex tester, base64, JSON formatter, color info.
 """
+import importlib.util
 import os, re, json, math, subprocess, zipfile, base64 as b64lib, time, hashlib
 from pathlib import Path
 from datetime import datetime
@@ -685,6 +686,19 @@ def _dispatch_builtin_core(action: dict) -> dict | None:
             action.get("output_path", ""),
         )
         return _tool_trace(action, r, {"prompt": action.get("prompt", "")[:120]})
+    if kind == "generate_music":
+        r = tool_generate_music(
+            action.get("prompt", ""),
+            int(action.get("duration", 15)),
+            action.get("style", "ambient"),
+        )
+        return _tool_trace(action, r, {"prompt": action.get("prompt", "")[:120]})
+    if kind == "generate_3d_model":
+        r = tool_generate_3d_model(
+            action.get("prompt", ""),
+            action.get("format", "glb"),
+        )
+        return _tool_trace(action, r, {"prompt": action.get("prompt", "")[:120]})
     if kind == "image_edit":
         r = tool_image_edit(
             action.get("image_b64", ""),
@@ -932,6 +946,31 @@ def tool_generate_video(
         f"Bytes: {len(video_bytes)}\n"
         f"SHA256: `{digest}`"
     )
+
+
+def tool_generate_music(prompt: str, duration: int = 15, style: str = "ambient") -> str:
+    try:
+        from .tools.music_tools import generate_music
+
+        payload = generate_music(prompt=prompt, duration=duration, style=style)
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"❌ Music generation failed: {e}"
+
+
+def tool_generate_3d_model(prompt: str, format: str = "glb") -> str:
+    try:
+        tools_dir = Path(__file__).with_name("tools")
+        target = tools_dir / "3d_tools.py"
+        spec = importlib.util.spec_from_file_location("nexus_tools_3d", target)
+        if spec is None or spec.loader is None:
+            return "❌ 3D tools module is unavailable"
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        payload = mod.generate_3d_model(prompt=prompt, format=format)
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    except Exception as e:
+        return f"❌ 3D generation failed: {e}"
 
 
 def tool_ocr(image_b64: str = "", image_url: str = "") -> str:
@@ -1833,7 +1872,7 @@ def tool_kg_query(query: str, limit: int = 10) -> str:
         facts_str = ", ".join(f"{k}: {v}" for k, v in list(facts.items())[:5]) if facts else "—"
         rels = e.get("relations", [])
         rel_str = "; ".join(f"{r['relation']}→{r['entity']}" for r in rels[:3]) if rels else "—"
-        lines.append(f"• **[{e['type']}] {e['name']}**")
+        lines.append(f"• **[{e.get('entity_type', e.get('type', '?'))}] {e.get('name', e.get('id', '?'))}**")
         lines.append(f"  facts: {facts_str}")
         lines.append(f"  links: {rel_str}")
     return "\n".join(lines)
@@ -1847,7 +1886,9 @@ def tool_kg_list(entity_type: str | None = None) -> str:
         return f"No knowledge graph entities{filter_txt} found."
     lines = [f"**{len(entities)} KG entit{'y' if len(entities)==1 else 'ies'}:**\n"]
     for e in entities:
-        lines.append(f"• [{e['type']}] **{e['name']}** (updated: {e['updated_at'][:10]})")
+        updated_raw = e.get("updated_at")
+        updated_txt = "" if updated_raw is None else str(updated_raw)[:10]
+        lines.append(f"• [{e.get('entity_type', e.get('type', '?'))}] **{e.get('name', e.get('id', '?'))}** (updated: {updated_txt})")
     return "\n".join(lines)
 
 
@@ -3079,6 +3120,8 @@ _TOOL_SCHEMAS: dict[str, dict] = {
     "generate_image":       {"required": ["prompt"],                 "optional": ["width", "height", "model"], "types": {"prompt": "str"}},
     "generate_image_local": {"required": ["prompt"],                 "optional": ["negative_prompt", "width", "height", "steps", "backend", "model", "workdir", "output_path"], "types": {"prompt": "str"}},
     "generate_video":       {"required": ["prompt"],                 "optional": ["duration_seconds", "fps", "width", "height", "backend", "workdir", "output_path"], "types": {"prompt": "str"}},
+    "generate_music":       {"required": ["prompt"],                 "optional": ["duration", "style"], "types": {"prompt": "str"}},
+    "generate_3d_model":    {"required": ["prompt"],                 "optional": ["format"], "types": {"prompt": "str"}},
     "image_edit":           {"required": ["prompt"],                 "optional": ["image_b64", "image_url", "mask_b64", "backend", "workdir", "output_path"], "types": {"prompt": "str"}},
     "rag_ingest":           {"required": [],                         "optional": ["text", "path", "metadata", "doc_id_prefix", "workdir"]},
     "rag_query":            {"required": ["query"],                  "optional": ["top_k", "filter_metadata"], "types": {"query": "str"}},
@@ -3247,6 +3290,8 @@ _TOOL_DESCRIPTIONS: dict[str, str] = {
     "check_url_status": "Check HTTP status of one or more URLs",
     "generate_image_local": "Generate an image locally via Ollama/ComfyUI backend",
     "generate_video": "Generate a short video clip from a text prompt",
+    "generate_music": "Generate or queue a music artifact from a text prompt (feature-flag gated)",
+    "generate_3d_model": "Generate or queue a 3D model from a text prompt (feature-flag gated)",
     "image_edit": "Edit an existing image using an inpainting prompt",
 }
 

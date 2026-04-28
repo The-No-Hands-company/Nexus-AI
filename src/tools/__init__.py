@@ -1,9 +1,5 @@
-"""Tools package scaffold for Phase 2 refactor.
+"""Tools package compatibility layer plus creative tool modules."""
 
-The concrete built-in tools implementation remains in src/tools_builtin.py
-for compatibility while the canonical package path becomes src/tools/.
-"""
+from ..tools_builtin import dispatch_builtin, build_openai_tools
 
-from .builtin import dispatch_builtin
-
-__all__ = ["dispatch_builtin"]
+__all__ = ["dispatch_builtin", "build_openai_tools"]

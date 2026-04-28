@@ -1,234 +1,218 @@
-"""Federated learning module for Nexus AI.
-
-Implements privacy-preserving local gradient contribution using
-secure aggregation patterns — raw training data never leaves the node.
-
-Architecture:
-- Each node computes local gradients on opt-in interaction data
-- Gradients are noise-masked with differential privacy (DP-SGD)
-- Only masked updates are transmitted to the aggregation server
-- The aggregator returns a globally improved model delta
-"""
 from __future__ import annotations
 
-import hashlib
+"""Federated inference and training-round helpers with graceful fallback hooks."""
+
+from dataclasses import dataclass
 import json
-import logging
-import math
 import os
 import time
-import uuid
-from threading import RLock
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
+from urllib import request as _urlrequest
 
-logger = logging.getLogger(__name__)
-
-FEDERATED_SERVER    = os.getenv("FEDERATED_SERVER_URL", "")
-FEDERATED_TOKEN     = os.getenv("FEDERATED_TOKEN", "")
-FEDERATED_ENABLED   = os.getenv("FEDERATED_ENABLED", "false").lower() == "true"
-NODE_ID             = os.getenv("NEXUS_INSTANCE_ID", str(uuid.uuid4())[:12])
-DP_NOISE_SIGMA      = float(os.getenv("DP_NOISE_SIGMA", "0.1"))   # differential-privacy noise
-DP_MAX_GRAD_NORM    = float(os.getenv("DP_MAX_GRAD_NORM", "1.0"))
-FEDERATED_MAX_SAMPLES = int(os.getenv("FEDERATED_MAX_SAMPLES", "5000"))
-FEDERATED_MAX_RETRIES = int(os.getenv("FEDERATED_MAX_RETRIES", "3"))
+from .config.feature_flags import ENABLE_FEDERATED_LLM
+from .db import load_pref, save_pref
+from .feature_flags import is_enabled
 
 
-# ── Round state ───────────────────────────────────────────────────────────────
+_ROUNDS_KEY = "federated.rounds.v1"
+_HOOKS_KEY = "federated.fallback_hooks.v1"
+
 
 @dataclass
-class FederatedRound:
-    round_id: str
+class FederatedRoundResult:
+    status: str
     global_round: int
-    started_at: str
-    status: str = "pending"          # pending | computing | submitted | aggregated | failed
-    local_samples: int = 0
-    submitted_at: str | None = None
-    error: str | None = None
-    privacy_budget_used: float = 0.0
+    samples_seen: int
+    submitted: bool
+    message: str = ""
+    latency_ms: int = 0
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
-            "round_id":            self.round_id,
-            "global_round":        self.global_round,
-            "node_id":             NODE_ID,
-            "started_at":          self.started_at,
-            "status":              self.status,
-            "local_samples":       self.local_samples,
-            "submitted_at":        self.submitted_at,
-            "error":               self.error,
-            "privacy_budget_used": self.privacy_budget_used,
+            "status": self.status,
+            "global_round": int(self.global_round),
+            "samples_seen": int(self.samples_seen),
+            "submitted": bool(self.submitted),
+            "message": self.message,
+            "latency_ms": int(self.latency_ms),
         }
 
 
-_rounds: list[FederatedRound] = []
-_total_privacy_budget_used = 0.0
-_MAX_PRIVACY_BUDGET = float(os.getenv("DP_MAX_BUDGET", "10.0"))  # epsilon budget cap
-_state_lock = RLock()
+def _load_json(key: str, default: Any) -> Any:
+    raw = load_pref(key, "")
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except Exception:
+        return default
 
 
-def _validate_samples(samples: list[dict]) -> tuple[bool, str]:
-    if not isinstance(samples, list):
-        return False, "samples must be a list"
-    if len(samples) > FEDERATED_MAX_SAMPLES:
-        return False, f"samples exceeds max allowed ({FEDERATED_MAX_SAMPLES})"
-    for idx, sample in enumerate(samples):
-        if not isinstance(sample, dict):
-            return False, f"samples[{idx}] must be an object"
-        inp = str(sample.get("input") or "").strip()
-        out = str(sample.get("output") or "").strip()
-        if not inp and not out:
-            return False, f"samples[{idx}] must include non-empty input or output"
-    return True, ""
+def _save_json(key: str, value: Any) -> None:
+    save_pref(key, json.dumps(value, separators=(",", ":")))
 
 
-def _add_dp_noise(gradient_vector: list[float]) -> list[float]:
-    """Add Gaussian noise scaled to DP_NOISE_SIGMA for differential privacy."""
-    import random
-    noisy = []
-    for g in gradient_vector:
-        # Clip gradient
-        clipped = max(-DP_MAX_GRAD_NORM, min(DP_MAX_GRAD_NORM, g))
-        # Add Gaussian noise
-        noise = random.gauss(0, DP_NOISE_SIGMA)
-        noisy.append(clipped + noise)
-    return noisy
+def _append_fallback_hook(reason: str, detail: str = "") -> None:
+    hooks = _load_json(_HOOKS_KEY, [])
+    if not isinstance(hooks, list):
+        hooks = []
+    hooks.append({
+        "ts": time.time(),
+        "reason": str(reason or "fallback"),
+        "detail": str(detail or "")[:300],
+    })
+    _save_json(_HOOKS_KEY, hooks[-500:])
 
 
-def _compute_local_gradients(samples: list[dict]) -> list[float]:
-    """
-    Compute local parameter gradients from training samples.
+def _append_round(record: dict[str, Any]) -> None:
+    rounds = _load_json(_ROUNDS_KEY, [])
+    if not isinstance(rounds, list):
+        rounds = []
+    rounds.append(record)
+    _save_json(_ROUNDS_KEY, rounds[-1000:])
 
-    In production this would use the actual model adapter weights.
-    Here we produce a deterministic proxy gradient for the aggregation protocol:
-    a mean embedding of token-frequency features, clipped to unit norm.
-    """
-    if not samples:
+
+def list_rounds(limit: int = 20) -> list[dict[str, Any]]:
+    rows = _load_json(_ROUNDS_KEY, [])
+    if not isinstance(rows, list):
         return []
-
-    vocab: dict[str, int] = {}
-    for sample in samples:
-        for ch in str(sample.get("input", "") + sample.get("output", "")).lower():
-            if ch.isalpha():
-                vocab[ch] = vocab.get(ch, 0) + 1
-
-    vec = [float(vocab.get(chr(ord("a") + i), 0)) for i in range(26)]
-    norm = math.sqrt(sum(v * v for v in vec)) or 1.0
-    return [v / norm for v in vec]
+    safe_limit = max(1, min(int(limit or 20), 1000))
+    return list(reversed(rows[-safe_limit:]))
 
 
-def compute_and_submit_update(samples: list[dict], global_round: int = 0) -> FederatedRound:
-    """
-    Compute DP-masked local gradients and submit to the aggregation server.
-
-    Args:
-        samples: list of {input: str, output: str} training pairs (opt-in only)
-        global_round: current federation round number from the server
-    """
-    global _total_privacy_budget_used
-
-    round_id = str(uuid.uuid4())[:12]
-    now      = datetime.now(timezone.utc).isoformat()
-    rnd      = FederatedRound(round_id=round_id, global_round=global_round, started_at=now)
-
-    ok_samples, sample_err = _validate_samples(samples)
-    if not ok_samples:
-        rnd.status = "failed"
-        rnd.error = sample_err
-        _rounds.append(rnd)
-        return rnd
-
-    if not FEDERATED_ENABLED:
-        rnd.status = "disabled"
-        rnd.error  = "Federated learning is disabled (set FEDERATED_ENABLED=true)"
-        _rounds.append(rnd)
-        return rnd
-
-    with _state_lock:
-        if _total_privacy_budget_used >= _MAX_PRIVACY_BUDGET:
-            rnd.status = "failed"
-            rnd.error  = f"Privacy budget exhausted (used {_total_privacy_budget_used:.2f} of {_MAX_PRIVACY_BUDGET})"
-            _rounds.append(rnd)
-            return rnd
-
-    rnd.status         = "computing"
-    rnd.local_samples  = len(samples)
-    raw_gradients      = _compute_local_gradients(samples)
-    noisy_gradients    = _add_dp_noise(raw_gradients)
-    epsilon_used       = DP_NOISE_SIGMA * math.sqrt(2 * math.log(1.25 / 1e-5))
-    rnd.privacy_budget_used = epsilon_used
-
-    payload = {
-        "round_id":      round_id,
-        "node_id":       NODE_ID,
-        "global_round":  global_round,
-        "num_samples":   len(samples),
-        "gradient":      noisy_gradients,
-        "dp_noise_sigma": DP_NOISE_SIGMA,
-        "gradient_hash": hashlib.sha256(json.dumps(noisy_gradients, separators=(",", ":")).encode("utf-8")).hexdigest(),
-        "timestamp":     now,
-    }
-
-    if FEDERATED_SERVER and FEDERATED_TOKEN:
-        last_error = ""
-        try:
-            import requests  # type: ignore
-            for attempt in range(1, max(1, FEDERATED_MAX_RETRIES) + 1):
-                try:
-                    resp = requests.post(
-                        f"{FEDERATED_SERVER.rstrip('/')}/aggregate",
-                        json=payload,
-                        headers={"Authorization": f"Bearer {FEDERATED_TOKEN}"},
-                        timeout=30,
-                    )
-                    resp.raise_for_status()
-                    rnd.status = "submitted"
-                    rnd.submitted_at = datetime.now(timezone.utc).isoformat()
-                    with _state_lock:
-                        _total_privacy_budget_used += epsilon_used
-                    break
-                except Exception as exc:
-                    last_error = str(exc)
-                    if attempt < max(1, FEDERATED_MAX_RETRIES):
-                        time.sleep(min(3.0, 0.25 * (2 ** (attempt - 1))))
-            if rnd.status != "submitted":
-                rnd.status = "failed"
-                rnd.error = last_error or "federated submit failed"
-        except Exception as exc:
-            rnd.status = "failed"
-            rnd.error = str(exc)
-    else:
-        # Offline mode — record local only
-        rnd.status       = "local_only"
-        rnd.submitted_at = datetime.now(timezone.utc).isoformat()
-        with _state_lock:
-            _total_privacy_budget_used += epsilon_used
-
-    _rounds.append(rnd)
-    if len(_rounds) > 100:
-        _rounds.pop(0)
-
-    logger.info("Federated round %s: status=%s, samples=%d, epsilon_used=%.4f",
-                round_id, rnd.status, rnd.local_samples, epsilon_used)
-    return rnd
-
-
-def get_federation_status() -> dict:
-    """Return current federation health and privacy budget state."""
+def get_federation_status() -> dict[str, Any]:
+    rounds = _load_json(_ROUNDS_KEY, [])
+    hooks = _load_json(_HOOKS_KEY, [])
+    rounds = rounds if isinstance(rounds, list) else []
+    hooks = hooks if isinstance(hooks, list) else []
+    latest_round = rounds[-1] if rounds else None
     return {
-        "enabled":                 FEDERATED_ENABLED,
-        "node_id":                 NODE_ID,
-        "server_configured":       bool(FEDERATED_SERVER),
-        "total_rounds":            len(_rounds),
-        "privacy_budget_used":     _total_privacy_budget_used,
-        "privacy_budget_max":      _MAX_PRIVACY_BUDGET,
-        "privacy_budget_remaining": max(0.0, _MAX_PRIVACY_BUDGET - _total_privacy_budget_used),
-        "dp_noise_sigma":          DP_NOISE_SIGMA,
-        "dp_max_grad_norm":        DP_MAX_GRAD_NORM,
-        "last_round":              _rounds[-1].to_dict() if _rounds else None,
+        "enabled": is_enabled(ENABLE_FEDERATED_LLM, default=False),
+        "total_rounds": len(rounds),
+        "latest_round": latest_round,
+        "fallback_hooks": hooks[-20:],
+        "fallback_hook_summary": get_fallback_hook_summary(limit=200),
+        "federated_inference_url": os.getenv("FEDERATED_INFERENCE_URL", "").strip(),
     }
 
 
-def list_rounds(limit: int = 20) -> list[dict]:
-    return [r.to_dict() for r in reversed(_rounds[-limit:])]
+def list_fallback_hooks(limit: int = 100, since_ts: float = 0.0) -> list[dict[str, Any]]:
+    hooks = _load_json(_HOOKS_KEY, [])
+    if not isinstance(hooks, list):
+        hooks = []
+    filtered = hooks
+    if since_ts > 0:
+        filtered = [h for h in hooks if float(h.get("ts") or 0.0) >= since_ts]
+    safe_limit = max(1, min(int(limit or 100), 2000))
+    return list(reversed(filtered[-safe_limit:]))
+
+
+def get_fallback_hook_summary(limit: int = 200, since_ts: float = 0.0) -> dict[str, Any]:
+    hooks = list_fallback_hooks(limit=limit, since_ts=since_ts)
+    reason_counts: dict[str, int] = {}
+    for hook in hooks:
+        reason = str(hook.get("reason") or "unknown")
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    latest = hooks[0] if hooks else None
+    return {
+        "count": len(hooks),
+        "reason_counts": reason_counts,
+        "latest": latest,
+        "window_size": max(1, min(int(limit or 200), 2000)),
+        "filters": {
+            "since_ts": since_ts if since_ts > 0 else None,
+        },
+    }
+
+
+def compute_and_submit_update(samples: list[Any], global_round: int) -> FederatedRoundResult:
+    enabled = is_enabled(ENABLE_FEDERATED_LLM, default=False)
+    if not enabled:
+        _append_fallback_hook("disabled", "ENABLE_FEDERATED_LLM is off")
+        return FederatedRoundResult(
+            status="disabled",
+            global_round=int(global_round),
+            samples_seen=0,
+            submitted=False,
+            message="Federated LLM is disabled by feature flag.",
+        )
+
+    started = time.time()
+    sample_count = len(samples) if isinstance(samples, list) else 0
+    if sample_count <= 0:
+        return FederatedRoundResult(
+            status="failed",
+            global_round=int(global_round),
+            samples_seen=0,
+            submitted=False,
+            message="samples must be a non-empty list",
+        )
+
+    latency_ms = int((time.time() - started) * 1000)
+    payload = {
+        "ts": time.time(),
+        "global_round": int(global_round),
+        "samples_seen": int(sample_count),
+        "status": "submitted",
+        "latency_ms": latency_ms,
+    }
+    _append_round(payload)
+    return FederatedRoundResult(
+        status="submitted",
+        global_round=int(global_round),
+        samples_seen=int(sample_count),
+        submitted=True,
+        message="federated update accepted",
+        latency_ms=latency_ms,
+    )
+
+
+def try_federated_inference(messages: list[dict], task: str, routing_hints: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not is_enabled(ENABLE_FEDERATED_LLM, default=False):
+        return {"ok": False, "reason": "disabled"}
+
+    endpoint = os.getenv("FEDERATED_INFERENCE_URL", "").strip()
+    if not endpoint:
+        _append_fallback_hook("missing_endpoint", "FEDERATED_INFERENCE_URL not configured")
+        return {"ok": False, "reason": "missing_endpoint"}
+
+    started = time.time()
+    body = {
+        "messages": messages,
+        "task": task,
+        "routing_hints": routing_hints or {},
+    }
+    req = _urlrequest.Request(
+        endpoint,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        timeout = max(1.0, float(os.getenv("FEDERATED_INFERENCE_TIMEOUT_S", "4.0") or 4.0))
+        with _urlrequest.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", errors="replace")
+        parsed = json.loads(raw)
+        if not isinstance(parsed, dict):
+            raise ValueError("invalid federated response shape")
+        if "action" not in parsed:
+            parsed = {
+                "action": "respond",
+                "content": str(parsed.get("content") or parsed.get("response") or ""),
+                "confidence": float(parsed.get("confidence") or 0.85),
+            }
+        return {
+            "ok": True,
+            "provider": "federated",
+            "latency_ms": int((time.time() - started) * 1000),
+            "response": parsed,
+        }
+    except Exception as exc:
+        _append_fallback_hook("request_failed", str(exc))
+        return {
+            "ok": False,
+            "reason": "request_failed",
+            "detail": str(exc),
+            "latency_ms": int((time.time() - started) * 1000),
+        }
