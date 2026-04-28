@@ -70,24 +70,22 @@ function loadLiveTraceHelpers() {
 }
 
 describe("frontend panel smoke rendering", () => {
-  test("index.html includes turn-budget anchors in admin and live trace panels", () => {
-    expect(indexHtml).toContain('id="ad-turn-card-rate"');
-    expect(indexHtml).toContain('id="ad-turn-recent"');
-    expect(indexHtml).toContain('id="lt-turn-budget-strip"');
-    expect(indexHtml).toContain('id="lt-turn-budget-pressure"');
-    expect(indexHtml).toContain('id="lt-turn-budget-mode"');
-    expect(indexHtml).toContain('id="lt-turn-budget-history"');
-    expect(indexHtml).toContain('id="lt-turn-budget-trend"');
-    expect(indexHtml).toContain('id="lt-history-window"');
-    expect(indexHtml).toContain('option value="20"');
-    expect(indexHtml).toContain('option value="30"');
-    expect(indexHtml).toContain('id="lt-mode-pref"');
-    expect(indexHtml).toContain('id="lt-live-btn"');
-    expect(indexHtml).toContain('id="lt-replay-btn"');
+  test("index.html includes admin and live trace panel anchors", () => {
+    expect(indexHtml).toContain('id="admin-dashboard-panel"');
+    expect(indexHtml).toContain('id="ad-days"');
+    expect(indexHtml).toContain('id="ad-status"');
+    expect(indexHtml).toContain('id="ad-users"');
+    expect(indexHtml).toContain('id="ad-quota"');
+    expect(indexHtml).toContain('id="ad-usage"');
+
+    expect(indexHtml).toContain('id="live-trace-panel"');
+    expect(indexHtml).toContain('id="lt-status"');
+    expect(indexHtml).toContain('id="lt-event-count"');
+    expect(indexHtml).toContain('id="lt-timeline-bar"');
+    expect(indexHtml).toContain('id="lt-feed"');
     expect(indexHtml).toContain('id="lt-trace-select"');
-    expect(indexHtml).toContain('onchange="ltRememberReplayTrace(this.value)"');
-    expect(indexHtml).toContain('id="lt-auto-replay-open"');
-    expect(indexHtml).toContain('onchange="ltSetAutoReplayOnOpen(this.checked)"');
+    expect(indexHtml).toContain('onclick="ltConnectLive()"');
+    expect(indexHtml).toContain('onclick="ltReplaySelected()"');
   });
 
   test("admin dashboard render helper marks hard-pressure windows as severe", () => {
