@@ -1,0 +1,91 @@
+fastapi==0.115.12
+python-multipart>=0.0.9
+uvicorn[standard]==0.34.0
+requests==2.32.3
+duckduckgo-search==8.1.1
+pymupdf==1.24.5
+yt-dlp==2024.11.18
+pypdf==4.3.1
+youtube-transcript-api==1.2.4
+PyJWT>=2.8.0
+numpy>=1.21.0
+httpx>=0.24.0
+python-docx>=1.1.2
+openpyxl>=3.1.2
+python-pptx>=1.0.2
+gunicorn>=22.0.0
+alembic>=1.13.0
+psycopg2-binary>=2.9.9
+
+# ── Section 1: Foundational Infrastructure (optional, graceful fallback) ──────
+# Distributed state / rate limiting
+redis>=5.0.0
+
+# Async-safe PostgreSQL pool
+asyncpg>=0.29.0
+
+# MFA / TOTP
+pyotp>=2.9.0
+qrcode[pil]>=7.4.2
+
+# WebAuthn / passkeys
+webauthn==2.7.1
+
+# SAML 2.0 enterprise SSO
+pysaml2>=7.0.0
+
+# Observability — metrics + structured logging
+prometheus-client>=0.20.0
+structlog>=24.1.0
+
+# Secrets management
+cryptography>=42.0.0
+
+# OpenTelemetry (tracing)
+opentelemetry-sdk>=1.24.0
+opentelemetry-exporter-otlp-proto-grpc>=1.24.0
+opentelemetry-instrumentation-fastapi>=0.45b0
+
+# Hugging Face ecosystem
+huggingface_hub>=0.31.0
+transformers>=4.52.0
+datasets>=3.6.0
+tokenizers>=0.21.0
+safetensors>=0.5.0
+accelerate>=1.8.0
+
+# Accurate BPE token counting (replaces len(text)/4 heuristic)
+tiktoken>=0.7.0
+
+# BM25 sparse retrieval
+rank-bm25>=0.2.2
+
+# LoRA fine-tuning
+peft>=0.11.0
+
+# Safety classifier (sentence-transformers for cross-encoder reranker)
+sentence-transformers>=3.0.0
+
+# Content moderation — Google Perspective API client
+google-api-python-client>=2.130.0
+
+# ── Section 26: Production Readiness Gap-Fill (optional, graceful fallback) ───
+
+# JSON Schema validation (structured output enforcement)
+jsonschema>=4.21.0
+
+# JSON repair for malformed model outputs
+json-repair>=0.20.0
+
+# Grammar-constrained generation (optional, heavy)
+# outlines>=0.0.46
+
+# Statistical testing (A/B testing)
+# scipy>=1.13.0  — optional, falls back to normal approximation
+
+# GeoIP country lookup (IP geo-blocking)
+# maxminddb>=2.6.0  — requires MaxMind GeoLite2-Country.mmdb download
+
+# AWS / GCP KMS for field-level encryption
+# boto3>=1.34.0          — for AWS KMS
+# google-cloud-kms>=2.21.0  — for GCP Cloud KMS

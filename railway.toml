@@ -1,0 +1,6 @@
+[deploy]
+startCommand = "python main.py"
+
+[deploy.healthcheck]
+path = "/health"
+timeout = 10

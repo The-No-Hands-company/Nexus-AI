@@ -1,194 +1,393 @@
-from __future__ import annotations
+"""
+Knowledge Graph — SQLite-backed long-term entity/relation memory.
 
-import time
-from typing import Any
+Tables:
+  kg_entities  (id TEXT PK, name TEXT UNIQUE, type TEXT, facts TEXT, created_at TEXT, updated_at TEXT)
+  kg_relations (id INTEGER PK, from_entity TEXT, relation TEXT, to_entity TEXT, weight REAL, created_at TEXT)
+
+Public API:
+  init_kg_tables()
+  kg_store(name, entity_type, facts, relations) -> str
+  kg_query(query, limit) -> list[dict]
+  kg_list_entities(entity_type) -> list[dict]
+  kg_relate(from_entity, relation, to_entity, weight) -> None
+  kg_get(name) -> dict | None
+  kg_to_context_string(query) -> str
+  kg_delete(name) -> bool
+"""
+
+import json
+import os
+import sqlite3
+import threading
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+DB_PATH = os.getenv("DB_PATH", "/tmp/nexus_ai.db")
+_local = threading.local()
 
 
-_entities: dict[str, dict[str, Any]] = {}
-_edges: list[dict[str, Any]] = []
+def _conn() -> sqlite3.Connection:
+    if not hasattr(_local, "kg_conn") or _local.kg_conn is None:
+        Path(DB_PATH).parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA journal_mode=WAL")
+        _local.kg_conn = conn
+    return _local.kg_conn
+
+
+def init_kg_tables() -> None:
+    c = _conn()
+    c.executescript("""
+        CREATE TABLE IF NOT EXISTS kg_entities (
+            id         TEXT PRIMARY KEY,
+            name       TEXT NOT NULL,
+            type       TEXT NOT NULL DEFAULT 'concept',
+            facts      TEXT NOT NULL DEFAULT '{}',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE(name)
+        );
+        CREATE TABLE IF NOT EXISTS kg_relations (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            from_entity TEXT NOT NULL,
+            relation    TEXT NOT NULL,
+            to_entity   TEXT NOT NULL,
+            weight      REAL NOT NULL DEFAULT 1.0,
+            created_at  TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_kg_entities_type ON kg_entities(type);
+        CREATE INDEX IF NOT EXISTS idx_kg_relations_from ON kg_relations(from_entity);
+        CREATE INDEX IF NOT EXISTS idx_kg_relations_to   ON kg_relations(to_entity);
+    """)
+    c.commit()
+
+
+# Initialise on import
+init_kg_tables()
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def kg_store(
-    entity_id: str,
-    entity_type: str | dict[str, Any] | None = None,
-    payload: dict[str, Any] | list[Any] | None = None,
-    relations: list[Any] | None = None,
-    *,
-    facts: dict[str, Any] | None = None,
+    name: str,
+    entity_type: str = "concept",
+    facts: dict | None = None,
+    relations: list[dict] | None = None,
 ) -> str:
-    """Store an entity. Accepts several calling conventions:
-    - kg_store(id, entity_type_str, facts_dict, relations_list)  ← tools_builtin usage
-    - kg_store(id, entity_type_str, payload_dict)                ← test usage
-    - kg_store(id, payload_dict)                                 ← legacy usage
-    - kg_store(id, entity_type=..., facts=..., ...)              ← keyword usage
-    Returns the entity_id string.
+    """Upsert an entity and optionally add relations.
+
+    ``relations`` items: {"relation": "...", "to": "...entity name...", "weight": 1.0}
+
+    Returns the entity id.
     """
-    # Normalise overloaded second positional arg
-    if isinstance(entity_type, dict):
-        # Called as kg_store(id, payload_dict) — shift args
-        payload = entity_type
-        entity_type = (payload or {}).pop("entity_type", "concept")
-    elif entity_type is None:
-        entity_type = "concept"
-
-    # Third arg may be a facts dict or a payload dict
-    if isinstance(payload, list):
-        # Called as kg_store(id, entity_type, relations_list) — unlikely but safe
-        relations = payload
-        payload = {}
-    elif payload is None:
-        payload = {}
-
-    resolved_facts = facts or (payload.pop("facts", {}) if isinstance(payload, dict) else {})
-    resolved_relations = relations or (payload.pop("relations", []) if isinstance(payload, dict) else [])
-
-    record = {
-        "id": entity_id,
-        "name": entity_id,
-        "entity_type": str(entity_type),
-        "facts": resolved_facts,
-        "relations": resolved_relations,
-        **(payload if isinstance(payload, dict) else {}),
-        "updated_at": time.time(),
-    }
-    _entities[entity_id] = record
-    return entity_id
-    return record
-
-
-def kg_get(entity_id: str) -> dict[str, Any] | None:
-    return _entities.get(entity_id)
-
-
-def kg_list_entities(entity_type: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
-    items = list(_entities.values())
-    if entity_type:
-        wanted = str(entity_type).strip().lower()
-        items = [it for it in items if str(it.get("entity_type", "")).strip().lower() == wanted]
-    return items[:limit]
-
-
-def kg_query(query: str, limit: int = 10) -> list[dict[str, Any]]:
-    needle = (query or "").lower()
-    results = []
-    for item in _entities.values():
-        haystack = f"{item.get('id', '')} {item.get('text', '')} {item.get('content', '')}".lower()
-        if needle in haystack:
-            results.append(item)
-    return results[:limit]
-
-
-def kg_delete(entity_id: str) -> bool:
-    return _entities.pop(entity_id, None) is not None
-
-
-def kg_graph(limit: int = 500) -> dict[str, Any]:
-    nodes = list(_entities.values())[:limit]
-    return {"nodes": nodes, "edges": list(_edges)}
-
-
-def kg_merge(source_id: str, target_id: str) -> dict[str, Any]:
-    source = _entities.get(source_id)
-    target = _entities.get(target_id)
-    if not source or not target:
-        return {"merged": False}
-    target.setdefault("aliases", []).append(source_id)
-    _entities.pop(source_id, None)
-    return {"merged": True, "target": target}
-
-
-_NT_TRIPLE_RE = None  # compiled lazily
-
-
-def _parse_ntriples(text: str, limit: int) -> tuple[list[dict], list[dict]]:
-    """Very lightweight N-Triples parser (subject predicate object .) for import."""
-    import re
-    global _NT_TRIPLE_RE
-    if _NT_TRIPLE_RE is None:
-        _NT_TRIPLE_RE = re.compile(
-            r'<([^>]+)>\s+<([^>]+)>\s+(<[^>]+>|"[^"]*")\s*\.'
-        )
-    nodes: list[dict] = []
-    edges: list[dict] = []
-    seen_nodes: set[str] = set()
-    for m in _NT_TRIPLE_RE.finditer(text):
-        if len(edges) >= limit:
-            break
-        subj, pred, obj = m.group(1), m.group(2), m.group(3).strip('<>"')
-        if subj not in seen_nodes:
-            seen_nodes.add(subj)
-            nodes.append({"id": subj, "entity_type": "resource"})
-        edges.append({"from": subj, "to": obj, "rel": pred})
-    return nodes, edges
-
-
-def kg_import_ontology(
-    data: dict[str, Any] | str,
-    fmt: str = "auto",
-    limit: int = 2000,
-) -> dict[str, Any]:
-    import json as _json
-    nodes: list[dict] = []
-    edges_in: list[dict] = []
-    triples_processed = 0
-
-    if isinstance(data, str):
-        raw = data
-        # Try N-Triples / Turtle heuristic: lines ending with " ."
-        if (fmt in ("auto", "ntriples", "turtle")) and " ." in raw:
-            nodes, edges_in = _parse_ntriples(raw, limit)
-            triples_processed = len(edges_in)
-        if triples_processed == 0:
-            # Try JSON
-            try:
-                parsed = _json.loads(raw)
-                if isinstance(parsed, dict):
-                    nodes = parsed.get("nodes", [])[:limit]
-                    edges_in = parsed.get("edges", [])
-                    triples_processed = len(nodes) + len(edges_in)
-            except Exception:
-                # Plain text fallback
-                nodes = [{"id": f"imported-{len(_entities)+1}", "content": raw[:limit]}]
-                triples_processed = 1
-    elif isinstance(data, dict):
-        nodes = data.get("nodes", [])[:limit]
-        edges_in = data.get("edges", [])
-        triples_processed = len(nodes) + len(edges_in)
-
-    for node in nodes:
-        node_id = str(node.get("id") or f"node-{len(_entities) + 1}")
-        kg_store(node_id, node)
-    for edge in edges_in:
-        _edges.append(dict(edge))
-
-    result = kg_graph()
-    result["triples_processed"] = triples_processed
-    return result
-
-
-def kg_hybrid_search(query: str, limit: int = 10) -> list[dict[str, Any]]:
-    return kg_query(query, limit=limit)
-
-
-def kg_to_context_string(graph: Any, limit: int | None = None, **kwargs: Any) -> str:
-    if not graph:
+    if not name or not name.strip():
         return ""
-    if isinstance(graph, str):
-        return graph
-    if isinstance(graph, dict):
-        nodes = graph.get("nodes", [])
-        edges = graph.get("edges", [])
+    name = name.strip()
+    facts = facts or {}
+    entity_type = (entity_type or "concept").strip()
+    now = _now()
+    eid = str(uuid.uuid4())
+    c = _conn()
+    # Upsert: insert or update facts + updated_at
+    existing = c.execute("SELECT id, facts FROM kg_entities WHERE name = ?", (name,)).fetchone()
+    if existing:
+        eid = existing["id"]
+        existing_facts = json.loads(existing["facts"] or "{}")
+        existing_facts.update(facts)
+        c.execute(
+            "UPDATE kg_entities SET type=?, facts=?, updated_at=? WHERE id=?",
+            (entity_type, json.dumps(existing_facts), now, eid),
+        )
     else:
-        nodes = graph
-        edges = []
-    if limit is not None and limit > 0:
-        nodes = list(nodes)[:limit]
-        edges = list(edges)[:limit]
-    node_lines = []
-    for item in nodes:
-        if isinstance(item, dict):
-            node_lines.append(f"- {item.get('id', '?')}: {item.get('thought') or item.get('text') or item.get('content') or ''}")
-        else:
-            node_lines.append(f"- {str(item)}")
-    edge_lines = [f"- {edge.get('from')} -> {edge.get('to')} ({edge.get('relation', 'related')})" for edge in edges]
-    return "\n".join(["Nodes:", *node_lines, "Edges:", *edge_lines]).strip()
+        c.execute(
+            "INSERT INTO kg_entities (id, name, type, facts, created_at, updated_at) VALUES (?,?,?,?,?,?)",
+            (eid, name, entity_type, json.dumps(facts), now, now),
+        )
+
+    if relations:
+        for rel in relations:
+            to_name = (rel.get("to") or "").strip()
+            relation = (rel.get("relation") or "related_to").strip()
+            weight = float(rel.get("weight", 1.0))
+            if to_name:
+                kg_relate(name, relation, to_name, weight)
+
+    c.commit()
+    return eid
+
+
+def kg_relate(
+    from_entity: str,
+    relation: str,
+    to_entity: str,
+    weight: float = 1.0,
+) -> None:
+    """Add a directed relation between two entities (idempotent)."""
+    if not from_entity or not to_entity:
+        return
+    now = _now()
+    c = _conn()
+    # Avoid exact duplicates
+    existing = c.execute(
+        "SELECT id FROM kg_relations WHERE from_entity=? AND relation=? AND to_entity=?",
+        (from_entity, relation, to_entity),
+    ).fetchone()
+    if not existing:
+        c.execute(
+            "INSERT INTO kg_relations (from_entity, relation, to_entity, weight, created_at) VALUES (?,?,?,?,?)",
+            (from_entity, relation, to_entity, weight, now),
+        )
+        c.commit()
+
+
+def kg_get(name: str) -> dict | None:
+    """Return full entity with outgoing and incoming relations, or None."""
+    if not name:
+        return None
+    c = _conn()
+    row = c.execute("SELECT * FROM kg_entities WHERE name = ?", (name.strip(),)).fetchone()
+    if not row:
+        return None
+    entity = dict(row)
+    entity["facts"] = json.loads(entity.get("facts") or "{}")
+    outgoing = c.execute(
+        "SELECT relation, to_entity, weight FROM kg_relations WHERE from_entity=?", (name,)
+    ).fetchall()
+    incoming = c.execute(
+        "SELECT relation, from_entity, weight FROM kg_relations WHERE to_entity=?", (name,)
+    ).fetchall()
+    entity["relations"] = [
+        {"direction": "out", "relation": r["relation"], "entity": r["to_entity"], "weight": r["weight"]}
+        for r in outgoing
+    ] + [
+        {"direction": "in", "relation": r["relation"], "entity": r["from_entity"], "weight": r["weight"]}
+        for r in incoming
+    ]
+    return entity
+
+
+def kg_query(query: str, limit: int = 10) -> list[dict]:
+    """Fuzzy search over entity names and facts text. Returns matched entities with relations."""
+    if not query:
+        return []
+    q = f"%{query.strip()}%"
+    c = _conn()
+    rows = c.execute(
+        "SELECT * FROM kg_entities WHERE name LIKE ? OR facts LIKE ? ORDER BY updated_at DESC LIMIT ?",
+        (q, q, limit),
+    ).fetchall()
+    results = []
+    for row in rows:
+        entity = dict(row)
+        entity["facts"] = json.loads(entity.get("facts") or "{}")
+        outgoing = c.execute(
+            "SELECT relation, to_entity, weight FROM kg_relations WHERE from_entity=?",
+            (entity["name"],),
+        ).fetchall()
+        entity["relations"] = [
+            {"relation": r["relation"], "entity": r["to_entity"], "weight": r["weight"]}
+            for r in outgoing
+        ]
+        results.append(entity)
+    return results
+
+
+def kg_list_entities(entity_type: str | None = None, limit: int = 100) -> list[dict]:
+    """List entities, optionally filtered by type."""
+    c = _conn()
+    if entity_type:
+        rows = c.execute(
+            "SELECT id, name, type, updated_at FROM kg_entities WHERE type=? ORDER BY updated_at DESC LIMIT ?",
+            (entity_type, limit),
+        ).fetchall()
+    else:
+        rows = c.execute(
+            "SELECT id, name, type, updated_at FROM kg_entities ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def kg_delete(name: str) -> bool:
+    """Delete an entity and all its relations."""
+    if not name:
+        return False
+    c = _conn()
+    result = c.execute("DELETE FROM kg_entities WHERE name=?", (name.strip(),))
+    if result.rowcount > 0:
+        c.execute(
+            "DELETE FROM kg_relations WHERE from_entity=? OR to_entity=?", (name, name)
+        )
+        c.commit()
+        return True
+    return False
+
+
+def kg_graph(limit: int = 500) -> dict:
+    """Return graph payload compatible with Cytoscape / D3 style consumers."""
+    c = _conn()
+    entities = c.execute(
+        "SELECT id, name, type, updated_at FROM kg_entities ORDER BY updated_at DESC LIMIT ?",
+        (max(1, min(int(limit), 5000)),),
+    ).fetchall()
+    relations = c.execute(
+        "SELECT id, from_entity, relation, to_entity, weight, created_at "
+        "FROM kg_relations ORDER BY id DESC LIMIT ?",
+        (max(1, min(int(limit) * 3, 15000)),),
+    ).fetchall()
+
+    nodes = [
+        {
+            "data": {
+                "id": e["name"],
+                "label": e["name"],
+                "type": e["type"],
+                "updated_at": e["updated_at"],
+            }
+        }
+        for e in entities
+    ]
+    edges = [
+        {
+            "data": {
+                "id": f"rel-{r['id']}",
+                "source": r["from_entity"],
+                "target": r["to_entity"],
+                "label": r["relation"],
+                "relation": r["relation"],
+                "weight": r["weight"],
+                "created_at": r["created_at"],
+            }
+        }
+        for r in relations
+    ]
+    return {"nodes": nodes, "edges": edges, "count": {"nodes": len(nodes), "edges": len(edges)}}
+
+
+def kg_merge(primary_name: str, duplicate_name: str) -> dict:
+    """Merge duplicate_name into primary_name and rewire all relations."""
+    primary = kg_get(primary_name)
+    duplicate = kg_get(duplicate_name)
+    if not primary or not duplicate:
+        return {"merged": False, "reason": "missing_entity"}
+
+    merged_facts = dict(primary.get("facts", {}))
+    merged_facts.update(duplicate.get("facts", {}))
+    kg_store(primary_name, entity_type=primary.get("type", "concept"), facts=merged_facts, relations=[])
+
+    c = _conn()
+    c.execute("UPDATE kg_relations SET from_entity=? WHERE from_entity=?", (primary_name, duplicate_name))
+    c.execute("UPDATE kg_relations SET to_entity=? WHERE to_entity=?", (primary_name, duplicate_name))
+    c.execute(
+        "DELETE FROM kg_relations WHERE id NOT IN ("
+        "SELECT MIN(id) FROM kg_relations GROUP BY from_entity, relation, to_entity"
+        ")"
+    )
+    c.commit()
+    kg_delete(duplicate_name)
+    return {"merged": True, "primary": primary_name, "removed": duplicate_name}
+
+
+def kg_import_ontology(content: str, fmt: str = "auto", limit: int = 2000) -> dict:
+    """Import OWL/RDF style triples with rdflib fallback to a simple N-Triples parser."""
+    text = (content or "").strip()
+    if not text:
+        return {"imported_entities": 0, "imported_relations": 0}
+
+    triples: list[tuple[str, str, str]] = []
+    parsed_with_rdflib = False
+    try:
+        import rdflib  # type: ignore
+
+        graph = rdflib.Graph()
+        parse_fmt = None if fmt == "auto" else fmt
+        graph.parse(data=text, format=parse_fmt)
+        for subject, predicate, obj in graph:
+            triples.append((str(subject), str(predicate), str(obj)))
+        parsed_with_rdflib = True
+    except Exception:
+        pass
+
+    if not parsed_with_rdflib:
+        for line in text.splitlines():
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.endswith("."):
+                line = line[:-1].strip()
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            subject = parts[0].strip("<>")
+            predicate = parts[1].strip("<>")
+            obj = " ".join(parts[2:]).strip().strip('"').strip("<>")
+            triples.append((subject, predicate, obj))
+
+    entity_count = 0
+    relation_count = 0
+    seen_entities: set[str] = set()
+    for subject, predicate, obj in triples[: max(1, min(int(limit), 10000))]:
+        s_name = subject.rsplit("/", 1)[-1].rsplit("#", 1)[-1] or subject
+        o_name = obj.rsplit("/", 1)[-1].rsplit("#", 1)[-1] or obj
+        rel = predicate.rsplit("/", 1)[-1].rsplit("#", 1)[-1] or predicate
+        if s_name not in seen_entities:
+            kg_store(s_name, "concept", {}, [])
+            seen_entities.add(s_name)
+            entity_count += 1
+        if o_name not in seen_entities:
+            kg_store(o_name, "concept", {}, [])
+            seen_entities.add(o_name)
+            entity_count += 1
+        kg_relate(s_name, rel, o_name, 1.0)
+        relation_count += 1
+
+    return {
+        "imported_entities": entity_count,
+        "imported_relations": relation_count,
+        "triples_processed": min(len(triples), max(1, min(int(limit), 10000))),
+        "parser": "rdflib" if parsed_with_rdflib else "fallback",
+    }
+
+
+def kg_hybrid_search(query: str, limit: int = 10) -> dict:
+    """Combine KG query with semantic memory retrieval for hybrid recall."""
+    from .memory import get_semantic_memory_filtered
+
+    kg_results = kg_query(query, limit=limit)
+    semantic_results = get_semantic_memory_filtered(query=query, limit=limit)
+    return {
+        "query": query,
+        "kg": kg_results,
+        "semantic": semantic_results,
+        "count": {"kg": len(kg_results), "semantic": len(semantic_results)},
+    }
+
+
+def kg_to_context_string(query: str, limit: int = 5) -> str:
+    """Format the top KG matches as a [KG CONTEXT] injection string.
+
+    Returns empty string when no relevant entities are found.
+    """
+    if not query:
+        return ""
+    matches = kg_query(query, limit=limit)
+    if not matches:
+        return ""
+    lines = ["[KG CONTEXT — relevant entities from long-term memory]"]
+    for e in matches:
+        facts_str = ", ".join(f"{k}: {v}" for k, v in e.get("facts", {}).items()) if e.get("facts") else ""
+        rels = e.get("relations", [])
+        rel_str = "; ".join(f"{r['relation']} → {r['entity']}" for r in rels[:5]) if rels else ""
+        parts = [f"• [{e['type']}] {e['name']}"]
+        if facts_str:
+            parts.append(f"  facts: {facts_str[:200]}")
+        if rel_str:
+            parts.append(f"  links: {rel_str}")
+        lines.extend(parts)
+    lines.append("")
+    return "\n".join(lines)

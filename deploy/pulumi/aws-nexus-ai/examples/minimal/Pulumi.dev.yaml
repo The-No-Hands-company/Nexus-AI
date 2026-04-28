@@ -1,0 +1,7 @@
+config:
+  aws:region: us-east-1
+  nexus-ai-aws-baseline:projectName: nexus-ai
+  nexus-ai-aws-baseline:environment: dev
+  nexus-ai-aws-baseline:vpcCidr: 10.70.0.0/16
+  nexus-ai-aws-baseline:allowedIngressCidrs:
+    - 0.0.0.0/0

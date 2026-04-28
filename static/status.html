@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nexus AI Status</title>
+  <style>
+    :root {
+      --bg: #0b1220;
+      --card: #101a2e;
+      --text: #e6edf8;
+      --muted: #a2afc6;
+      --ok: #21c179;
+      --warn: #f2a93b;
+      --bad: #ef5b6c;
+      --line: #22314f;
+    }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      background: radial-gradient(circle at 10% 10%, #12203b 0%, var(--bg) 45%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 28px 18px 56px;
+    }
+    .title {
+      font-size: 2rem;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+    }
+    .subtitle {
+      color: var(--muted);
+      margin-bottom: 26px;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .card {
+      background: linear-gradient(180deg, #13213d, var(--card));
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 14px;
+    }
+    .label { color: var(--muted); font-size: 0.84rem; }
+    .value { font-size: 1.2rem; margin-top: 4px; }
+    .dot {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      margin-right: 6px;
+      vertical-align: middle;
+    }
+    .ok { background: var(--ok); }
+    .warn { background: var(--warn); }
+    .bad { background: var(--bad); }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      overflow: hidden;
+      border-radius: 12px;
+      border: 1px solid var(--line);
+      background: var(--card);
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      font-size: 0.92rem;
+    }
+    th { color: var(--muted); font-weight: 600; }
+    tr:last-child td { border-bottom: 0; }
+    .foot {
+      margin-top: 14px;
+      color: var(--muted);
+      font-size: 0.84rem;
+    }
+    a { color: #7dc1ff; }
+  </style>
+</head>
+<body>
+  <main class="wrap">
+    <h1 class="title">Nexus AI Service Status</h1>
+    <p class="subtitle">Live operational view from local health endpoints.</p>
+
+    <section class="grid">
+      <div class="card">
+        <div class="label">Overall</div>
+        <div id="overall" class="value">Checking...</div>
+      </div>
+      <div class="card">
+        <div class="label">Uptime Target</div>
+        <div class="value">99.9% monthly</div>
+      </div>
+      <div class="card">
+        <div class="label">API Health</div>
+        <div id="api" class="value">Checking...</div>
+      </div>
+      <div class="card">
+        <div class="label">Provider Health</div>
+        <div id="providers" class="value">Checking...</div>
+      </div>
+      <div class="card">
+        <div class="label">Last Updated</div>
+        <div id="updated" class="value">-</div>
+      </div>
+    </section>
+
+    <table>
+      <thead>
+        <tr>
+          <th>Component</th>
+          <th>Status</th>
+          <th>Detail</th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+
+    <p class="foot">This page is local-first. For public hosted status products, wire this signal into an external status provider. Interpret yellow as degraded service and red as incident-level impact.</p>
+  </main>
+
+  <script>
+    function stateBadge(level, text) {
+      const klass = level === 'ok' ? 'ok' : (level === 'warn' ? 'warn' : 'bad');
+      return `<span class="dot ${klass}"></span>${text}`;
+    }
+
+    function setValue(id, level, text) {
+      const el = document.getElementById(id);
+      el.innerHTML = stateBadge(level, text);
+    }
+
+    function appendRow(name, level, detail) {
+      const tbody = document.getElementById('rows');
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${name}</td><td>${stateBadge(level, level.toUpperCase())}</td><td>${detail}</td>`;
+      tbody.appendChild(tr);
+    }
+
+    async function fetchJson(path) {
+      const res = await fetch(path, { headers: { Accept: 'application/json' } });
+      if (!res.ok) throw new Error(`${path} -> ${res.status}`);
+      return await res.json();
+    }
+
+    async function loadStatus() {
+      const now = new Date().toLocaleString();
+      document.getElementById('updated').textContent = now;
+      document.getElementById('rows').innerHTML = '';
+
+      let okCount = 0;
+      let total = 0;
+
+      try {
+        total += 1;
+        const health = await fetchJson('/health');
+        const healthy = !!(health.ok ?? true);
+        if (healthy) okCount += 1;
+        setValue('api', healthy ? 'ok' : 'warn', healthy ? 'Healthy' : 'Degraded');
+        appendRow('Core API', healthy ? 'ok' : 'warn', JSON.stringify(health).slice(0, 180));
+      } catch (e) {
+        total += 1;
+        setValue('api', 'bad', 'Unavailable');
+        appendRow('Core API', 'bad', String(e));
+      }
+
+      try {
+        total += 1;
+        const providers = await fetchJson('/providers/status');
+        const avail = Array.isArray(providers.available) ? providers.available.length : 0;
+        const level = avail > 0 ? 'ok' : 'warn';
+        if (level === 'ok') okCount += 1;
+        setValue('providers', level, `${avail} available`);
+        appendRow('Providers', level, JSON.stringify(providers).slice(0, 180));
+      } catch (e) {
+        total += 1;
+        setValue('providers', 'warn', 'Unknown');
+        appendRow('Providers', 'warn', String(e));
+      }
+
+      const overall = okCount === total ? 'ok' : (okCount > 0 ? 'warn' : 'bad');
+      const overallText = overall === 'ok' ? 'Operational' : (overall === 'warn' ? 'Partial Outage' : 'Major Outage');
+      setValue('overall', overall, overallText);
+    }
+
+    loadStatus();
+    setInterval(loadStatus, 30000);
+  </script>
+</body>
+</html>

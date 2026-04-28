@@ -1,0 +1,117 @@
+name: Nexus-AI CI
+
+on:
+  push:
+    paths:
+      - '**.py'
+      - 'static/**'
+      - 'requirements.txt'
+      - 'requirements.rag.txt'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/red-team-suite.yml'
+      - '.github/workflows/chaos-fault-injection.yml'
+  pull_request:
+    paths:
+      - '**.py'
+      - 'static/**'
+      - 'requirements.txt'
+      - 'requirements.rag.txt'
+      - '.github/workflows/ci.yml'
+      - '.github/workflows/red-team-suite.yml'
+      - '.github/workflows/chaos-fault-injection.yml'
+
+jobs:
+  red_team_gate:
+    runs-on: ubuntu-latest
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run red-team gate tests
+        run: python -m pytest tests/test_red_team_pipeline.py -q
+
+  chaos_gate:
+    runs-on: ubuntu-latest
+    env:
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+      NEXUS_CHAOS_MODE: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run chaos gate tests
+        run: python -m pytest tests/test_chaos_fault_injection.py -q
+
+  test:
+    runs-on: ubuntu-latest
+    needs: [red_team_gate, chaos_gate]
+    env:
+      # Prevent third-party globally-installed pytest plugins from polluting logs.
+      PYTEST_DISABLE_PLUGIN_AUTOLOAD: '1'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Check v1 OpenAPI compatibility
+        run: PYTHONPATH=. python scripts/verify_openapi_contract.py
+
+      - name: Run unit tests
+        run: python -m unittest tests.test_v1_contracts
+
+      - name: Run pytest contracts
+        run: python -m pytest tests/test_v1_contracts.py -q
+
+      - name: Run frontend UI contracts
+        run: python -m pytest tests/test_v1_contracts.py -k "frontend_operator_panels or frontend_chat_streaming" -q
+
+  protected_branch_policy:
+    if: ${{ github.event_name == 'pull_request' }}
+    needs: [red_team_gate, chaos_gate, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce required status checks
+        run: |
+          echo "red_team_gate=${{ needs.red_team_gate.result }}"
+          echo "chaos_gate=${{ needs.chaos_gate.result }}"
+          echo "test=${{ needs.test.result }}"
+          if [[ "${{ needs.red_team_gate.result }}" != "success" || "${{ needs.chaos_gate.result }}" != "success" || "${{ needs.test.result }}" != "success" ]]; then
+            echo "Protected branch policy failed: required checks did not pass."
+            exit 1
+          fi
+          echo "Protected branch policy passed."

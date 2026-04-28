@@ -1,0 +1,21 @@
+{
+  "suite": "smoke",
+  "targets": [
+    "tests/test_sdk_packaging.py",
+    "tests/test_governance_hardening.py"
+  ],
+  "ok": true,
+  "command": [
+    "/run/media/zajferx/Data/dev/The-No-hands-Company/projects/Nexus-Systems/apps/Nexus-AI/.venv/bin/python",
+    "-m",
+    "pytest",
+    "tests/test_sdk_packaging.py",
+    "tests/test_governance_hardening.py",
+    "-q",
+    "--maxfail=1"
+  ],
+  "returncode": 0,
+  "duration_s": 10.01,
+  "stdout": "..................................................                       [100%]\n=============================== warnings summary ===============================\n.venv/lib64/python3.14/site-packages/fastapi/routing.py:233: 1894 warnings\n  /run/media/zajferx/Data/dev/The-No-hands-Company/projects/Nexus-Systems/apps/Nexus-AI/.venv/lib64/python3.14/site-packages/fastapi/routing.py:233: DeprecationWarning: 'asyncio.iscoroutinefunction' is deprecated and slated for removal in Python 3.16; use inspect.iscoroutinefunction() instead\n    is_coroutine = asyncio.iscoroutinefunction(dependant.call)\n\n-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html\n50 passed, 1894 warnings in 8.31s\n",
+  "stderr": ""
+}

@@ -1,0 +1,49 @@
+name: Feature Hardening
+
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: "Hardening suite to run"
+        required: true
+        default: "smoke"
+        type: choice
+        options:
+          - smoke
+          - full
+
+jobs:
+  hardening:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run hardening suite
+        run: |
+          SUITE="${{ github.event.inputs.suite }}"
+          if [ -z "$SUITE" ]; then
+            SUITE="smoke"
+          fi
+          python scripts/run_feature_hardening_suite.py --suite "$SUITE" --report test-results/feature-hardening-report.json
+
+      - name: Upload hardening report
+        uses: actions/upload-artifact@v4
+        with:
+          name: feature-hardening-report
+          path: test-results/feature-hardening-report.json

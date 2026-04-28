@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nexus-ai
+  namespace: nexus-ai
+  labels:
+    app: nexus-ai
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nexus-ai
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: nexus-ai
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: nexus-ai
+          image: ghcr.io/the-no-hands-company/nexus-ai:latest
+          imagePullPolicy: Always
+          command: ["gunicorn", "main:app", "-c", "gunicorn.conf.py"]
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: nexus-ai-config
+            - secretRef:
+                name: nexus-ai-secrets
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "2"
+              memory: "2Gi"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: nexus-ai-pvc

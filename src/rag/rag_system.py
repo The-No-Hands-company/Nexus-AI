@@ -1,169 +1,359 @@
+"""
+VersaAI RAG System — unified facade for document ingestion, retrieval, and Q&A.
+
+This is the primary public interface for the RAG subsystem.  It wires together:
+- DocumentChunker  → splits raw text into overlapping chunks
+- EmbeddingModel   → embeds chunks and queries (Ollama / sentence-transformers)
+- VectorStore      → stores and searches embeddings (ChromaDB / FAISS / memory)
+
+Usage:
+    >>> from rag.rag_system import RAGSystem
+    >>> rag = RAGSystem()                               # auto-configures
+    >>> rag.ingest("VersaAI documentation goes here...", metadata={"source": "docs"})
+    >>> results = rag.query("How does the agent system work?", top_k=5)
+    >>> for r in results:
+    ...     print(r["score"], r["document"][:80])
+"""
+
 from __future__ import annotations
 
-import copy
-import hashlib
-import math
+import logging
+import os
 import time
-import uuid
-from dataclasses import dataclass
-from typing import Any
+import hashlib
+import copy
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
+import numpy as np
 
-def _tokenize(text: str) -> list[str]:
-    return [tok for tok in (text or "").lower().split() if tok]
+from .chunker import DocumentChunker, ChunkerConfig, Chunk
+from .embeddings import EmbeddingModel, EmbeddingConfig
+from .vector_store import VectorStore, VectorStoreConfig, VectorStoreType
 
-
-def _hash_to_unit_interval(value: str) -> float:
-    digest = hashlib.sha1(value.encode("utf-8")).hexdigest()
-    return int(digest[:8], 16) / float(0xFFFFFFFF)
-
-
-class _EmbeddingModel:
-    """Deterministic lightweight embedding used for tests and local fallback."""
-
-    dimension = 16
-
-    def embed_batch(self, inputs: list[str]) -> list[list[float]]:
-        vectors: list[list[float]] = []
-        for text in inputs:
-            base = str(text or "")
-            row: list[float] = []
-            for idx in range(self.dimension):
-                unit = _hash_to_unit_interval(f"{base}::{idx}")
-                row.append(round((unit * 2.0) - 1.0, 6))
-            vectors.append(row)
-        return vectors
-
-
-@dataclass
-class _Doc:
-    id: str
-    document: str
-    metadata: dict[str, Any]
-    created_at: float
-
-
-class _VectorStore:
-    def __init__(self, parent: "RAGSystem") -> None:
-        self._parent = parent
-
-    def get_all_documents(self) -> list[dict[str, Any]]:
-        return [
-            {"id": doc.id, "document": doc.document, "metadata": dict(doc.metadata)}
-            for doc in self._parent._docs
-        ]
-
-    def add_documents(self, documents: list[str], metadata: list[dict[str, Any]], ids: list[str]) -> None:
-        for idx, text in enumerate(documents):
-            meta = dict(metadata[idx] if idx < len(metadata) else {})
-            doc_id = ids[idx] if idx < len(ids) else f"doc-{uuid.uuid4().hex[:10]}"
-            self._parent._docs.append(_Doc(id=doc_id, document=str(text or ""), metadata=meta, created_at=time.time()))
-
-    def delete(self, ids: list[str]) -> None:
-        id_set = set(ids or [])
-        self._parent._docs = [doc for doc in self._parent._docs if doc.id not in id_set]
-
-    def persist(self) -> None:
-        return None
+logger = logging.getLogger(__name__)
 
 
 class RAGSystem:
-    def __init__(self) -> None:
-        self._docs: list[_Doc] = []
-        self._snapshots: dict[str, list[_Doc]] = {}
-        self._embedding_model = _EmbeddingModel()
-        self.vector_store = _VectorStore(self)
-        self._queries = 0
+    """
+    End-to-end Retrieval-Augmented Generation system.
+
+    Lifecycle:
+        1. ``ingest(text)``   — chunk → embed → store
+        2. ``query(question)`` — embed question → search store → return docs
+
+    The system is lazily initialized: the embedding model and vector store
+    are created on first use to avoid startup cost when RAG is not needed.
+    """
+
+    def __init__(
+        self,
+        embedding_config: Optional[EmbeddingConfig] = None,
+        vector_store_config: Optional[VectorStoreConfig] = None,
+        chunker_config: Optional[ChunkerConfig] = None,
+    ):
+        self._emb_cfg = embedding_config
+        self._vs_cfg = vector_store_config
+        self._chunk_cfg = chunker_config
+
+        self._embedding_model: Optional[EmbeddingModel] = None
+        self._vector_store: Optional[VectorStore] = None
+        self._chunker: Optional[DocumentChunker] = None
+
+        self._total_ingested: int = 0
+        self._total_queries: int = 0
+        self._corpus_version: int = 0
+
+        self._query_cache: Dict[str, List[Dict[str, Any]]] = {}
+        self._cache_hits: int = 0
+        self._cache_misses: int = 0
+        self._snapshots: Dict[str, Dict[str, Any]] = {}
+
+    # ------------------------------------------------------------------
+    # Lazy component init
+    # ------------------------------------------------------------------
 
     @property
-    def embedding_model(self) -> _EmbeddingModel:
+    def embedding_model(self) -> EmbeddingModel:
+        if self._embedding_model is None:
+            cfg = self._emb_cfg or EmbeddingConfig()
+            self._embedding_model = EmbeddingModel(cfg)
+            logger.info("RAGSystem: embedding model ready (%s)", self._embedding_model.backend_name)
         return self._embedding_model
 
-    def ingest(self, text: str, metadata: dict[str, Any] | None = None, doc_id_prefix: str | None = None) -> int:
-        body = str(text or "").strip()
-        if not body:
-            return 0
-
-        meta = dict(metadata or {})
-        if bool(meta.get("incremental")) and meta.get("source"):
-            source = str(meta.get("source"))
-            self._docs = [doc for doc in self._docs if str(doc.metadata.get("source", "")) != source]
-
-        doc_id = f"{doc_id_prefix or 'doc'}-{uuid.uuid4().hex[:10]}"
-        self._docs.append(_Doc(id=doc_id, document=body, metadata=meta, created_at=time.time()))
-        return 1
-
-    def _passes_filter(self, metadata: dict[str, Any], filt: dict[str, Any] | None) -> bool:
-        if not filt:
-            return True
-        for key, expected in filt.items():
-            actual = metadata.get(key)
-            if isinstance(expected, dict):
-                if "$eq" in expected and actual != expected.get("$eq"):
-                    return False
-                if "$contains" in expected:
-                    needle = expected.get("$contains")
-                    if isinstance(actual, list):
-                        if needle not in actual:
-                            return False
-                    elif isinstance(actual, str):
-                        if str(needle) not in actual:
-                            return False
-                    else:
-                        return False
+    @property
+    def vector_store(self) -> VectorStore:
+        if self._vector_store is None:
+            if self._vs_cfg:
+                cfg = self._vs_cfg
             else:
-                if actual != expected:
-                    return False
-        return True
+                persist_root = Path(os.getenv("RAG_PERSIST_DIR", "./rag_data")).expanduser()
+                # Build config with defaults
+                cfg = VectorStoreConfig(
+                    store_type=VectorStoreType.CHROMADB,
+                    persist_directory=persist_root,
+                    embedding_dimension=self.embedding_model.dimension,
+                    collection_name="nexus_documents",
+                )
+            try:
+                self._vector_store = VectorStore(cfg, embedding_model=self.embedding_model)
+            except (ImportError, Exception) as exc:
+                if cfg.store_type != VectorStoreType.MEMORY:
+                    logger.warning(
+                        "RAGSystem: %s backend failed (%s), falling back to in-memory",
+                        cfg.store_type.value, exc,
+                    )
+                    cfg = VectorStoreConfig(
+                        store_type=VectorStoreType.MEMORY,
+                        embedding_dimension=self.embedding_model.dimension,
+                        collection_name="versaai_documents",
+                    )
+                    self._vector_store = VectorStore(cfg, embedding_model=self.embedding_model)
+                else:
+                    raise
+            logger.info("RAGSystem: vector store ready (%s)", self._vector_store)
+        return self._vector_store
+
+    @property
+    def chunker(self) -> DocumentChunker:
+        if self._chunker is None:
+            self._chunker = DocumentChunker(self._chunk_cfg or ChunkerConfig())
+        return self._chunker
+
+    # ------------------------------------------------------------------
+    # Ingest
+    # ------------------------------------------------------------------
+
+    def ingest(
+        self,
+        text: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        doc_id_prefix: Optional[str] = None,
+    ) -> int:
+        """
+        Ingest a document: chunk → embed → store.
+
+        Args:
+            text: Raw document text.
+            metadata: Optional metadata dict propagated to every chunk.
+            doc_id_prefix: Optional prefix for chunk IDs.
+
+        Returns:
+            Number of chunks stored.
+        """
+        t0 = time.perf_counter()
+        meta = dict(metadata or {})
+        chunks = self.chunker.split(text, metadata=meta)
+        if not chunks:
+            # Ensure very short documents are still retrievable.
+            normalized = (text or "").strip()
+            if not normalized:
+                return 0
+            chunks = [
+                Chunk(
+                    text=normalized,
+                    index=0,
+                    start_char=0,
+                    end_char=len(normalized),
+                    metadata={**meta, "chunk_index": 0, "chunk_size": len(normalized)},
+                )
+            ]
+
+        source = str(meta.get("source") or doc_id_prefix or "").strip()
+        incremental = bool(meta.get("incremental", False))
+
+        # Deduplicate overlap-heavy chunks before embedding/indexing.
+        deduped_chunks = []
+        seen_hashes = set()
+        for c in chunks:
+            normalized = " ".join(c.text.split())
+            if not normalized:
+                continue
+            digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+            if digest in seen_hashes:
+                continue
+            seen_hashes.add(digest)
+            deduped_chunks.append(c)
+
+        if incremental and source:
+            existing = self.vector_store.get_all_documents()
+            ids_to_delete = [
+                doc.get("id", "")
+                for doc in existing
+                if isinstance(doc.get("metadata"), dict)
+                and str(doc["metadata"].get("source", "")).strip() == source
+            ]
+            ids_to_delete = [doc_id for doc_id in ids_to_delete if doc_id]
+            if ids_to_delete:
+                self.vector_store.delete(ids_to_delete)
+
+        texts = [c.text for c in deduped_chunks]
+        metas = [c.metadata for c in deduped_chunks]
+
+        prefix = doc_id_prefix or f"doc{self._total_ingested}"
+        ids = [f"{prefix}_chunk_{i}" for i in range(len(texts))]
+
+        self.vector_store.add_documents(documents=texts, metadata=metas, ids=ids)
+        self._total_ingested += len(texts)
+        self._corpus_version += 1
+        self._query_cache.clear()
+
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            "Ingested %d chunks in %.2fs (total: %d)",
+            len(texts), elapsed, self._total_ingested,
+        )
+        return len(texts)
+
+    def ingest_documents(
+        self,
+        documents: List[Dict[str, Any]],
+        text_key: str = "text",
+    ) -> int:
+        """Ingest a list of document dicts; each is chunked and stored."""
+        total = 0
+        for i, doc in enumerate(documents):
+            text = doc.get(text_key, "")
+            meta = {k: v for k, v in doc.items() if k != text_key}
+            total += self.ingest(text, metadata=meta, doc_id_prefix=f"batch{i}")
+        return total
+
+    # ------------------------------------------------------------------
+    # Query
+    # ------------------------------------------------------------------
 
     def query(
         self,
         question: str,
-        top_k: int | None = None,
-        filter_metadata: dict[str, Any] | None = None,
-    ) -> list[dict[str, Any]]:
-        self._queries += 1
-        q = str(question or "").strip()
-        tokens = _tokenize(q)
-        ranked: list[dict[str, Any]] = []
+        top_k: Optional[int] = None,
+        filter_metadata: Optional[Dict[str, Any]] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieve the most relevant chunks for a question.
 
-        for doc in self._docs:
-            if not self._passes_filter(doc.metadata, filter_metadata):
-                continue
-            text_lower = doc.document.lower()
-            overlap = sum(1 for token in tokens if token in text_lower)
-            lexical = (overlap / max(1, len(tokens))) if tokens else 0.0
-            recency_boost = min(0.1, max(0.0, 1.0 / (1.0 + math.log1p(max(1.0, time.time() - doc.created_at)))))
-            score = round(min(1.0, 0.45 + (lexical * 0.5) + recency_boost), 4)
-            if lexical > 0 or not tokens:
-                ranked.append(
-                    {
-                        "id": doc.id,
-                        "document": doc.document,
-                        "metadata": dict(doc.metadata),
-                        "score": score,
-                    }
-                )
+        Returns:
+            List of dicts with keys: id, document, score, metadata
+        """
+        if top_k is None:
+            try:
+                k = settings.rag.top_k
+            except Exception:
+                k = 5
+        else:
+            k = top_k
+        t0 = time.perf_counter()
 
-        ranked.sort(key=lambda item: float(item.get("score", 0.0)), reverse=True)
-        limit = max(1, int(top_k or 5))
-        return ranked[:limit]
+        cache_key = self._build_query_cache_key(question, k, filter_metadata)
+        if cache_key in self._query_cache:
+            self._cache_hits += 1
+            self._total_queries += 1
+            return copy.deepcopy(self._query_cache[cache_key])
 
-    def stats(self) -> dict[str, Any]:
+        self._cache_misses += 1
+
+        results = self.vector_store.search(question, k=k, filter_metadata=filter_metadata)
+        self._total_queries += 1
+        self._query_cache[cache_key] = copy.deepcopy(results)
+
+        elapsed = time.perf_counter() - t0
+        logger.info(
+            "Query returned %d results in %.3fs (q=%d total)",
+            len(results), elapsed, self._total_queries,
+        )
+        return results
+
+    # ------------------------------------------------------------------
+    # Corpus access
+    # ------------------------------------------------------------------
+
+    def get_all_documents(self) -> List[Dict[str, Any]]:
+        """Return every stored document (for BM25 / sparse retrieval)."""
+        return self.vector_store.get_all_documents()
+
+    # ------------------------------------------------------------------
+    # Stats
+    # ------------------------------------------------------------------
+
+    def stats(self) -> Dict[str, Any]:
         return {
-            "status": "ok",
-            "documents": len(self._docs),
-            "queries": self._queries,
-            "snapshots": len(self._snapshots),
+            "total_ingested": self._total_ingested,
+            "total_queries": self._total_queries,
+            "corpus_version": self._corpus_version,
+            "cache_hits": self._cache_hits,
+            "cache_misses": self._cache_misses,
+            "snapshots": sorted(self._snapshots.keys()),
+            "store_count": self.vector_store.count() if self._vector_store else 0,
+            "embedding_backend": (
+                self._embedding_model.backend_name if self._embedding_model else "not initialized"
+            ),
+            "vector_store": repr(self._vector_store) if self._vector_store else "not initialized",
         }
 
-    def create_snapshot(self, label: str | None = None) -> dict[str, Any]:
-        snapshot_id = (label or f"snap-{int(time.time())}").strip()
-        self._snapshots[snapshot_id] = copy.deepcopy(self._docs)
-        return {"snapshot_id": snapshot_id, "count": len(self._snapshots[snapshot_id])}
+    def create_snapshot(self, label: Optional[str] = None) -> Dict[str, Any]:
+        """Create a lightweight corpus snapshot for rollback."""
+        _now = datetime.now(timezone.utc)
+        snapshot_id = label or f"snapshot_{_now.strftime('%Y%m%d%H%M%S')}"
+        docs = self.vector_store.get_all_documents()
+        self._snapshots[snapshot_id] = {
+            "created_at": _now.isoformat(),
+            "corpus_version": self._corpus_version,
+            "documents": docs,
+        }
+        return {"snapshot_id": snapshot_id, "documents": len(docs), "corpus_version": self._corpus_version}
 
-    def rollback_snapshot(self, snapshot_id: str) -> dict[str, Any]:
-        if snapshot_id not in self._snapshots:
-            raise KeyError(snapshot_id)
-        self._docs = copy.deepcopy(self._snapshots[snapshot_id])
-        return {"rolled_back_to": snapshot_id, "count": len(self._docs)}
+    def rollback_snapshot(self, snapshot_id: str) -> Dict[str, Any]:
+        """Rollback vector store contents to a prior snapshot."""
+        snapshot = self._snapshots.get(snapshot_id)
+        if not snapshot:
+            raise KeyError(f"Unknown snapshot: {snapshot_id}")
+
+        existing_ids = [doc.get("id") for doc in self.vector_store.get_all_documents() if doc.get("id")]
+        if existing_ids:
+            self.vector_store.delete(existing_ids)
+
+        docs = snapshot.get("documents", [])
+        if docs:
+            self.vector_store.add_documents(
+                documents=[d.get("document", "") for d in docs],
+                metadata=[d.get("metadata", {}) for d in docs],
+                ids=[d.get("id", f"restored_{i}") for i, d in enumerate(docs)],
+            )
+
+        self._corpus_version += 1
+        self._query_cache.clear()
+        return {
+            "rolled_back_to": snapshot_id,
+            "restored_documents": len(docs),
+            "corpus_version": self._corpus_version,
+        }
+
+    def _build_query_cache_key(
+        self,
+        question: str,
+        top_k: int,
+        filter_metadata: Optional[Dict[str, Any]],
+    ) -> str:
+        payload = {
+            "q": question,
+            "k": top_k,
+            "filter": filter_metadata or {},
+            "corpus_version": self._corpus_version,
+        }
+        return hashlib.sha1(repr(payload).encode("utf-8")).hexdigest()
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def close(self):
+        if self._embedding_model:
+            self._embedding_model.close()
+            self._embedding_model = None
+        self._vector_store = None
+
+    def __repr__(self) -> str:
+        return (
+            f"RAGSystem(ingested={self._total_ingested}, "
+            f"queries={self._total_queries})"
+        )

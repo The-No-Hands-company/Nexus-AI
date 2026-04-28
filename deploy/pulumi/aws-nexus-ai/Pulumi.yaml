@@ -1,0 +1,4 @@
+name: nexus-ai-aws-baseline
+description: Nexus AI AWS baseline network stack
+runtime:
+  name: python
