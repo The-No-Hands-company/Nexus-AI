@@ -1,149 +1,91 @@
-"""src/scheduler.py — Autonomous background job scheduler for Nexus AI.
-
-Supports simple interval schedules (30s, 5m, 2h, 1d) and basic cron expressions
-(5 fields: min hour dom mon dow, with */N, specific values, and '*' wildcards).
-
-Jobs are stored in-memory (lost on restart). Each job runs the agent task string
-via a provided callable — callers inject the run function to avoid circular imports.
-"""
+from __future__ import annotations
 
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable
 
 
-# ── Job model ─────────────────────────────────────────────────────────────────
-
-@dataclass
-class JobLog:
-    run_at: str
-    status: str          # "ok" | "error"
-    summary: str         # first 300 chars of agent output / error message
-
-
-@dataclass
-class ScheduledJob:
-    id: str
-    name: str
-    task: str            # natural-language task string sent to the agent
-    schedule: str        # "5m" | "1h" | "30s" | "1d" or basic cron "*/5 * * * *"
-    status: str          # "active" | "paused" | "cancelled"
-    created_at: str
-    interval_secs: Optional[int] = None   # resolved seconds between runs
-    next_run: Optional[str] = None
-    last_run: Optional[str] = None
-    run_count: int = 0
-    logs: List[JobLog] = field(default_factory=list)
-    max_retries: int = 0          # 0 = no automatic retry on error
-    retry_count: int = 0          # how many retries have been attempted so far
-    retry_backoff_secs: int = 60  # seconds to wait before first retry (doubles each attempt)
-
-
-# ── Registry ──────────────────────────────────────────────────────────────────
-
-_jobs: Dict[str, ScheduledJob] = {}
 _lock = threading.Lock()
-_thread: Optional[threading.Thread] = None
-_running = False
-_run_fn: Optional[Callable[[str], str]] = None   # injected by routes.py
+_jobs: dict[str, "Job"] = {}
+_run_function: Callable[[str], Any] | None = None
 
 
-def set_run_function(fn: Callable[[str], str]) -> None:
-    """Inject the function used to execute a scheduled task (avoids circular imports)."""
-    global _run_fn
-    _run_fn = fn
+class Job:
+    """Scheduler job with attribute and dict-style access."""
 
-
-# ── Schedule parsing ──────────────────────────────────────────────────────────
-
-def _parse_interval_secs(schedule: str) -> Optional[int]:
-    """Parse '30s', '5m', '2h', '1d' → seconds.  Returns None if not an interval."""
-    s = schedule.strip().lower()
-    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
-    for suffix, mult in multipliers.items():
-        if s.endswith(suffix) and s[:-1].isdigit():
-            return int(s[:-1]) * mult
-    return None
-
-
-def _cron_matches(cron_expr: str, dt: datetime) -> bool:
-    """Return True if *dt* matches the 5-field cron expression.
-
-    Supports: '*', '*/N' (step), comma-separated values, single integers.
-    """
-    try:
-        parts = cron_expr.strip().split()
-        if len(parts) != 5:
-            return False
-        minute, hour, dom, month, dow = parts
-
-        def field_ok(spec: str, value: int) -> bool:
-            if spec == "*":
-                return True
-            if spec.startswith("*/"):
-                step = int(spec[2:])
-                return value % step == 0
-            # Comma-separated list
-            return value in {int(x) for x in spec.split(",")}
-
-        return (
-            field_ok(minute, dt.minute)
-            and field_ok(hour, dt.hour)
-            and field_ok(dom, dt.day)
-            and field_ok(month, dt.month)
-            and field_ok(dow, dt.weekday())
-        )
-    except Exception:
-        return False
-
-
-def _schedule_is_cron(schedule: str) -> bool:
-    return len(schedule.strip().split()) == 5
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
-
-def schedule_job(name: str, task: str, schedule: str,
-                 max_retries: int = 0, retry_backoff_secs: int = 60) -> ScheduledJob:
-    """Create and register a new scheduled job.  Starts the runner if not running."""
-    interval = _parse_interval_secs(schedule)
-    if interval is None and not _schedule_is_cron(schedule):
-        raise ValueError(
-            f"Invalid schedule '{schedule}'. "
-            "Use an interval like '5m', '1h', '30s', '1d' or a 5-field cron expression."
-        )
-
-    now = datetime.now(timezone.utc)
-    job = ScheduledJob(
-        id=str(uuid.uuid4())[:8],
-        name=name,
-        task=task,
-        schedule=schedule,
-        status="active",
-        created_at=now.isoformat(),
-        interval_secs=interval,
-        next_run=_compute_next_run(schedule, interval, now),
-        max_retries=max(0, int(max_retries)),
-        retry_backoff_secs=max(1, int(retry_backoff_secs)),
+    __slots__ = (
+        "id", "name", "task", "schedule", "metadata",
+        "max_retries", "retry_backoff_secs", "status",
+        "created_at", "updated_at", "last_result", "next_run", "run_count",
     )
+
+    def __init__(self, data: dict[str, Any]) -> None:
+        for k in self.__slots__:
+            setattr(self, k, data.get(k))
+
+    def __getitem__(self, key: str) -> Any:
+        return getattr(self, key)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        setattr(self, key, value)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {k: getattr(self, k) for k in self.__slots__}
+
+
+def set_run_function(fn: Callable[[str], Any]) -> None:
+    global _run_function
+    _run_function = fn
+
+
+def _persist(job: Job) -> None:
+    try:
+        from .db import upsert_scheduled_job
+        upsert_scheduled_job(job.to_dict())
+    except Exception:
+        pass
+
+
+def schedule_job(
+    name: str,
+    task: str,
+    schedule: str,
+    metadata: dict[str, Any] | None = None,
+    max_retries: int = 0,
+    retry_backoff_secs: int = 60,
+) -> Job:
+    job_id = uuid.uuid4().hex
+    data = {
+        "id": job_id,
+        "name": name,
+        "task": task,
+        "schedule": schedule,
+        "metadata": metadata or {},
+        "max_retries": max_retries,
+        "retry_backoff_secs": retry_backoff_secs,
+        "status": "scheduled",
+        "created_at": time.time(),
+        "updated_at": time.time(),
+        "last_result": None,
+        "next_run": None,
+        "run_count": 0,
+    }
+    job = Job(data)
     with _lock:
-        _jobs[job.id] = job
-    _persist_job(job)
-    _ensure_runner()
+        _jobs[job_id] = job
+    _persist(job)
     return job
 
 
-def list_jobs() -> List[ScheduledJob]:
+def get_job(job_id: str) -> Job | None:
+    with _lock:
+        return _jobs.get(str(job_id))
+
+
+def list_jobs() -> list[Job]:
     with _lock:
         return list(_jobs.values())
-
-
-def get_job(job_id: str) -> Optional[ScheduledJob]:
-    with _lock:
-        return _jobs.get(job_id)
 
 
 def cancel_job(job_id: str) -> bool:
@@ -152,250 +94,72 @@ def cancel_job(job_id: str) -> bool:
         if not job:
             return False
         job.status = "cancelled"
-    _persist_job(job)
-    return True
-
-
-def run_job_now(job_id: str) -> str:
-    """Immediately execute a scheduled job outside its normal interval."""
-    with _lock:
-        job = _jobs.get(job_id)
-    if not job:
-        raise ValueError(f"Job not found: {job_id}")
-    if job.status == "cancelled":
-        raise ValueError("Cannot run a cancelled job")
-    if not _run_fn:
-        raise RuntimeError("No run function registered")
-    result = _run_fn(job.task)
-    with _lock:
-        job.run_count += 1
-        job.last_run = datetime.utcnow().isoformat() + "Z"
-        log_entry = JobLog(run_at=job.last_run, status="ok",
-                           summary=str(result)[:300])
-        job.logs.append(log_entry)
-        job.history = getattr(job, "history", [])
-        job.history.append({"run_at": log_entry.run_at, "status": "ok",
-                             "summary": log_entry.summary, "trigger": "webhook"})
-    _persist_job(job)
-    return result or "ok"
-
-
-def pause_job(job_id: str) -> bool:
-    with _lock:
-        job = _jobs.get(job_id)
-        if not job:
-            return False
-        job.status = "paused"
-    _persist_job(job)
-    return True
-
-
-def resume_job(job_id: str) -> bool:
-    with _lock:
-        job = _jobs.get(job_id)
-        if not job:
-            return False
-        job.status = "active"
-    _persist_job(job)
+        job.updated_at = time.time()
+    _persist(job)
     return True
 
 
 def delete_job(job_id: str) -> bool:
     with _lock:
-        if job_id in _jobs:
-            del _jobs[job_id]
-        else:
-            return False
-    _delete_job_from_db(job_id)
-    return True
-
-
-# ── Runner internals ──────────────────────────────────────────────────────────
-
-def _compute_next_run(schedule: str, interval_secs: Optional[int], after: datetime) -> str:
-    import datetime as _dt
-    if interval_secs:
-        return (after + _dt.timedelta(seconds=interval_secs)).isoformat()
-    # For cron: scan the next 60 minutes at 1-minute resolution
-    t = after.replace(second=0, microsecond=0)
-    for _ in range(1441):
-        t = t + _dt.timedelta(minutes=1)
-        if _cron_matches(schedule, t):
-            return t.isoformat()
-    return after.isoformat()   # fallback (shouldn't happen with valid cron)
-
-
-def _run_job(job: ScheduledJob) -> None:
-    """Execute a single job invocation in the current thread."""
-    run_at = datetime.now(timezone.utc).isoformat()
+        job = _jobs.pop(job_id, None)
+    if job is None:
+        return False
     try:
-        if _run_fn:
-            result = _run_fn(job.task)
-            summary = str(result)[:300]
-            log_status = "ok"
-        else:
-            summary = "No run function injected — task queued but not executed."
-            log_status = "error"
-    except Exception as exc:
-        summary = f"Error: {exc}"
-        log_status = "error"
-
-    with _lock:
-        job.last_run = run_at
-        job.run_count += 1
-        job.logs.append(JobLog(run_at=run_at, status=log_status, summary=summary))
-        # Keep last 50 log entries
-        if len(job.logs) > 50:
-            job.logs = job.logs[-50:]
-        # Compute next run
-        now = datetime.now(timezone.utc)
-        job.next_run = _compute_next_run(job.schedule, job.interval_secs, now)
-        if log_status == "error":
-            if job.max_retries > 0 and job.retry_count < job.max_retries:
-                # Schedule a retry with exponential backoff
-                import datetime as _dt
-                backoff = job.retry_backoff_secs * (2 ** job.retry_count)
-                job.retry_count += 1
-                retry_at = (datetime.now(timezone.utc)
-                            + _dt.timedelta(seconds=backoff)).isoformat()
-                job.next_run = retry_at
-                job.status = "active"  # keep active so scheduler will retry
-                job.logs[-1] = JobLog(
-                    run_at=run_at,
-                    status="retry",
-                    summary=f"[retry {job.retry_count}/{job.max_retries} in {backoff}s] {summary}",
-                )
-            else:
-                job.status = "error"
-                job.retry_count = 0  # reset for future manual resume
-    _persist_job(job)
-
-
-def _scheduler_loop() -> None:
-    global _running
-    while _running:
-        now = datetime.now(timezone.utc)
-        with _lock:
-            due = [
-                j for j in _jobs.values()
-                if j.status == "active" and j.next_run and j.next_run <= now.isoformat()
-            ]
-        for job in due:
-            # Run in a daemon thread so the scheduler loop doesn't block
-            t = threading.Thread(target=_run_job, args=(job,), daemon=True)
-            t.start()
-        time.sleep(10)  # check every 10 seconds
-
-
-def _ensure_runner() -> None:
-    global _thread, _running
-    if _running and _thread and _thread.is_alive():
-        return
-    _running = True
-    _thread = threading.Thread(target=_scheduler_loop, daemon=True, name="nexus-scheduler")
-    _thread.start()
-
-
-def stop_runner() -> None:
-    global _running
-    _running = False
-
-
-# ── DB persistence helpers ───────────────────────────────────────────────────
-
-def _persist_job(job: ScheduledJob) -> None:
-    """Write job state to SQLite (fire-and-forget, suppresses errors)."""
-    try:
-        from src.db import upsert_scheduled_job
-        upsert_scheduled_job({
-            "id": job.id,
-            "name": job.name,
-            "task": job.task,
-            "schedule": job.schedule,
-            "status": job.status,
-            "created_at": job.created_at,
-            "interval_secs": job.interval_secs,
-            "next_run": job.next_run,
-            "last_run": job.last_run,
-            "run_count": job.run_count,
-            "logs": [{"run_at": l.run_at, "status": l.status, "summary": l.summary}
-                     for l in job.logs],
-            "max_retries": job.max_retries,
-            "retry_count": job.retry_count,
-            "retry_backoff_secs": job.retry_backoff_secs,
-        })
-    except Exception:
-        pass  # never crash the scheduler over a persistence failure
-
-
-def _delete_job_from_db(job_id: str) -> None:
-    try:
-        from src.db import delete_scheduled_job
+        from .db import delete_scheduled_job
         delete_scheduled_job(job_id)
     except Exception:
         pass
+    return True
 
 
-def restore_from_db() -> None:
-    """Reload persisted jobs from SQLite into the in-memory registry.
+def job_to_dict(job: Job) -> dict[str, Any]:
+    return job.to_dict()
 
-    Call once at app startup.  Jobs in status 'paused' or 'active' are loaded
-    as-is.  Jobs in status 'cancelled' or 'error' are loaded but won't be
-    dispatched by the loop (status guard in _scheduler_loop).  Deleted jobs
-    are not present in the table and will not appear.
-    """
+
+def restore_from_db() -> list[Job]:
     try:
-        from src.db import load_scheduled_jobs
+        from .db import load_scheduled_jobs
         rows = load_scheduled_jobs()
     except Exception:
-        return
-
+        return []
+    restored: list[Job] = []
     with _lock:
         for row in rows:
-            if row["id"] in _jobs:
-                continue  # already in memory (e.g. created during this process)
-            job = ScheduledJob(
-                id=row["id"],
-                name=row["name"],
-                task=row["task"],
-                schedule=row["schedule"],
-                status=row["status"],
-                created_at=row["created_at"],
-                interval_secs=row.get("interval_secs"),
-                next_run=row.get("next_run"),
-                last_run=row.get("last_run"),
-                run_count=row.get("run_count", 0),
-                logs=[
-                    JobLog(run_at=l["run_at"], status=l["status"], summary=l["summary"])
-                    for l in (row.get("logs") or [])
-                    if isinstance(l, dict)
-                ],
-                max_retries=row.get("max_retries", 0),
-                retry_count=row.get("retry_count", 0),
-                retry_backoff_secs=row.get("retry_backoff_secs", 60),
-            )
-            _jobs[job.id] = job
-
-    if any(j.status == "active" for j in _jobs.values()):
-        _ensure_runner()
+            job = Job(row)
+            if job.id:
+                _jobs[job.id] = job
+                restored.append(job)
+    return restored
 
 
-# ── Serialisation helpers ─────────────────────────────────────────────────────
+def run_job_now(job_id: str) -> dict[str, Any]:
+    with _lock:
+        job = _jobs.get(job_id)
+    if job is None:
+        raise KeyError(job_id)
+    if _run_function is None:
+        result = ""
+    else:
+        result = _run_function(job.task)
+    job.status = "done"
+    job.updated_at = time.time()
+    job.last_result = result
+    _persist(job)
+    return job.to_dict()
 
-def job_to_dict(job: ScheduledJob) -> Dict[str, Any]:
-    return {
-        "id": job.id,
-        "name": job.name,
-        "task": job.task,
-        "schedule": job.schedule,
-        "status": job.status,
-        "created_at": job.created_at,
-        "next_run": job.next_run,
-        "last_run": job.last_run,
-        "run_count": job.run_count,
-        "logs": [{"run_at": l.run_at, "status": l.status, "summary": l.summary}
-                 for l in job.logs[-10:]],  # last 10 in summary view
-        "max_retries": job.max_retries,
-        "retry_count": job.retry_count,
-        "retry_backoff_secs": job.retry_backoff_secs,
-    }
+
+def _background_runner(job_id: str) -> None:
+    try:
+        run_job_now(job_id)
+    except Exception as exc:
+        with _lock:
+            job = _jobs.get(job_id)
+        if job is not None:
+            job.status = "failed"
+            job.last_result = str(exc)
+            job.updated_at = time.time()
+            _persist(job)
+
+
+def schedule_background_run(job_id: str) -> None:
+    threading.Thread(target=_background_runner, args=(job_id,), daemon=True).start()
