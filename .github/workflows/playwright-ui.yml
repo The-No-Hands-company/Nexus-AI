@@ -2,11 +2,15 @@ name: Playwright UI
 
 on:
   pull_request:
+    branches:
+      - main
     paths:
       - 'static/**'
       - 'tests/playwright/**'
       - '.github/workflows/playwright-ui.yml'
   push:
+    branches:
+      - main
     paths:
       - 'static/**'
       - 'tests/playwright/**'
