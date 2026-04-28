@@ -1292,6 +1292,162 @@ class TestHITLApprovals(unittest.TestCase):
         self.assertTrue(any(item.get("id") == approval_id for item in listed.json().get("items", [])))
 
 
+class TestTurnBudgetControls(unittest.TestCase):
+    def test_admin_turn_budget_summary_counts_downgrades(self):
+        from src.agent import activity_log
+
+        original_log = list(activity_log)
+        try:
+            activity_log[:] = [
+                {
+                    "ts": 100.0,
+                    "action": "turn_budget",
+                    "pressure": "none",
+                    "complexity": "high",
+                    "model_family": "balanced",
+                    "disable_mcts": False,
+                    "disable_ensemble": False,
+                    "tool_budget_mode": "adaptive",
+                },
+                {
+                    "ts": 101.0,
+                    "action": "turn_budget",
+                    "pressure": "soft",
+                    "complexity": "high",
+                    "model_family": "compact",
+                    "disable_mcts": True,
+                    "disable_ensemble": False,
+                    "tool_budget_mode": "adaptive",
+                },
+                {
+                    "ts": 102.0,
+                    "action": "turn_budget",
+                    "pressure": "hard",
+                    "complexity": "low",
+                    "model_family": "compact",
+                    "disable_mcts": True,
+                    "disable_ensemble": True,
+                    "tool_budget_mode": "minimal",
+                },
+            ]
+
+            response = client.get("/admin/turn-budget-summary?limit=10")
+            self.assertEqual(response.status_code, 200)
+            payload = response.json()
+            self.assertEqual(payload["total_turns"], 3)
+            self.assertEqual(payload["pressured_turns"], 2)
+            self.assertEqual(payload["disable_mcts_count"], 2)
+            self.assertEqual(payload["disable_ensemble_count"], 1)
+            self.assertEqual(payload["pressure_counts"]["hard"], 1)
+            self.assertEqual(payload["pressure_counts"]["soft"], 1)
+            self.assertEqual(payload["model_family_counts"]["compact"], 2)
+            self.assertAlmostEqual(payload["downgrade_rate"], 2 / 3, places=4)
+        finally:
+            activity_log[:] = original_log
+
+    def test_turn_budget_policy_uses_model_family_defaults(self):
+        from src.agent import _build_turn_budget_policy, _config as agent_config
+
+        task = (
+            "Design a federated rollback architecture with staged failover, audit evidence, "
+            "policy controls, and latency-aware routing across regions."
+        )
+        old_model = agent_config.get("model", "")
+        old_provider = agent_config.get("provider", "auto")
+        try:
+            agent_config["provider"] = "github_models"
+            agent_config["model"] = "gpt-4o-mini"
+            with patch("src.agent._score_complexity", return_value="high"):
+                compact_policy = _build_turn_budget_policy(task, model_budget=20000, input_tokens=10000)
+
+            agent_config["model"] = "claude-3.7-sonnet"
+            with patch("src.agent._score_complexity", return_value="high"):
+                reasoning_policy = _build_turn_budget_policy(task, model_budget=20000, input_tokens=10000)
+        finally:
+            agent_config["model"] = old_model
+            agent_config["provider"] = old_provider
+
+        self.assertEqual(compact_policy["model_family"], "compact")
+        self.assertEqual(compact_policy["pressure"], "hard")
+        self.assertEqual(reasoning_policy["model_family"], "reasoning")
+        self.assertEqual(reasoning_policy["pressure"], "none")
+        self.assertLess(compact_policy["input_budget"], reasoning_policy["input_budget"])
+
+    def _run_turn_budget_stream(self, task: str, token_estimate: int, model_name: str = "gpt-4o-mini", complexity_label: str = "high"):
+        from src.agent import stream_agent_task, _config as agent_config
+
+        captured = {}
+        old_model = agent_config.get("model", "")
+        old_provider = agent_config.get("provider", "auto")
+        old_ensemble = bool(agent_config.get("ensemble_mode", True))
+        try:
+            agent_config["provider"] = "github_models"
+            agent_config["model"] = model_name
+            agent_config["ensemble_mode"] = True
+
+            def _mock_call(messages, task_text, routing_hints=None):
+                captured.update(routing_hints or {})
+                return ({"action": "respond", "content": "budget ok", "confidence": 0.99}, "mock-provider", {})
+
+            mcts_payload = {
+                "best_plan": ["collect evidence", "compare options", "deliver final architecture"],
+                "best_score": 0.93,
+                "providers": ["mock-planner"],
+                "complexity_profile": {"label": "high"},
+            }
+
+            with patch("src.agent.call_llm_smart", side_effect=_mock_call), \
+                 patch("src.agent.get_memory_context", return_value=""), \
+                 patch("src.agent.kg_to_context_string", return_value=""), \
+                  patch("src.agent._score_complexity", return_value=complexity_label), \
+                 patch("src.agent._messages_token_estimate", return_value=token_estimate), \
+                 patch("src.agent.CONTEXT_WINDOW.get_model_context_budget", return_value=10000), \
+                 patch("src.agent._auto_mcts_guidance", return_value=mcts_payload):
+                events = list(stream_agent_task(task, [], sid=f"turn-budget-{token_estimate}"))
+        finally:
+            agent_config["model"] = old_model
+            agent_config["provider"] = old_provider
+            agent_config["ensemble_mode"] = old_ensemble
+
+        return events, captured
+
+    def test_turn_budget_soft_pressure_disables_mcts_but_not_ensemble(self):
+        task = (
+            "Design a zero-downtime control-plane migration with rollback orchestration, "
+            "federation trust repair, staged traffic shifting, and audit checkpoints."
+        )
+        events, captured = self._run_turn_budget_stream(task, token_estimate=4300, model_name="gpt-4o-mini", complexity_label="high")
+
+        self.assertTrue(any(event.get("type") == "turn_budget" and event.get("pressure") == "soft" for event in events))
+        self.assertFalse(any(event.get("type") == "mcts_plan" for event in events))
+        self.assertTrue(captured.get("disable_mcts"))
+        self.assertFalse(captured.get("disable_ensemble"))
+
+    def test_turn_budget_hard_pressure_keeps_ensemble_for_high_complexity(self):
+        task = (
+            "Architect a cross-region incident response system with failure-domain isolation, "
+            "governance checkpoints, evidence retention, and provider fallback arbitration."
+        )
+        events, captured = self._run_turn_budget_stream(task, token_estimate=5000, model_name="gpt-4o-mini", complexity_label="high")
+
+        self.assertTrue(any(event.get("type") == "turn_budget" and event.get("pressure") == "hard" for event in events))
+        self.assertFalse(any(event.get("type") == "mcts_plan" for event in events))
+        self.assertTrue(captured.get("disable_mcts"))
+        self.assertFalse(captured.get("disable_ensemble"))
+
+    def test_turn_budget_hard_pressure_disables_ensemble_for_low_complexity(self):
+        events, captured = self._run_turn_budget_stream(
+            "Summarize this config file.",
+            token_estimate=2600,
+            model_name="gpt-4o-mini",
+            complexity_label="low",
+        )
+
+        self.assertTrue(any(event.get("type") == "turn_budget" and event.get("pressure") == "hard" for event in events))
+        self.assertTrue(captured.get("disable_mcts"))
+        self.assertTrue(captured.get("disable_ensemble"))
+
+
 class TestStrictNoGuessMode(unittest.TestCase):
     def tearDown(self):
         client.post(
@@ -4150,6 +4306,48 @@ class TestSprintH(unittest.TestCase):
             res = tool_write_file("hello.txt", "new content", d)
             self.assertNotIn("❌", res)
             self.assertTrue(os.path.exists(os.path.join(d, "hello.txt")))
+
+    def test_tool_clone_repo_redacts_token_on_git_fallback_error(self):
+        """tool_clone_repo must not leak credentials when git fallback fails."""
+        from src.agent import tool_clone_repo
+
+        token = "ghp_" + ("z" * 37)
+
+        class _Resp:
+            status_code = 404
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {}
+
+        with tempfile.TemporaryDirectory() as d, \
+             patch("requests.get", return_value=_Resp()), \
+             patch("src.agent.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=1,
+                stdout="",
+                stderr=f"fatal: could not read from https://{token}@github.com/example/private-repo",
+            )
+
+            res = tool_clone_repo("https://github.com/example/private-repo.git", token, d)
+
+        self.assertIn("Both API fetch and git clone failed", res)
+        self.assertNotIn(token, res)
+        self.assertIn("[REDACTED]", res)
+
+    def test_tool_run_command_masks_token_in_output(self):
+        """tool_run_command should redact GitHub tokens from command output."""
+        from src.agent import tool_run_command
+
+        token = "ghp_" + ("b" * 37)
+        with patch("src.agent.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout=f"token={token}\n", stderr="")
+            out = tool_run_command("echo token", "/tmp")
+
+        self.assertNotIn(token, out)
+        self.assertIn("[GITHUB_TOKEN_REDACTED]", out)
 
     def test_file_diff_event_emitted_on_overwrite(self):
         """stream_agent_task emits a file_diff event when overwriting a file."""

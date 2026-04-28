@@ -8,3 +8,8 @@
 !/docs/**
 !/src/
 !/src/**
+
+# Generated Python cache artifacts should never be committed.
+src/**/__pycache__/
+src/**/*.pyc
+src/**/*.pyo
