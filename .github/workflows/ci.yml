@@ -2,6 +2,8 @@ name: Nexus-AI CI
 
 on:
   push:
+    branches:
+      - main
     paths:
       - '**.py'
       - 'static/**'
@@ -11,6 +13,8 @@ on:
       - '.github/workflows/red-team-suite.yml'
       - '.github/workflows/chaos-fault-injection.yml'
   pull_request:
+    branches:
+      - main
     paths:
       - '**.py'
       - 'static/**'

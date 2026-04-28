@@ -3,7 +3,6 @@ name: Supply Chain SBOM and Signing
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
     tags: [ "v*" ]
 
 permissions:

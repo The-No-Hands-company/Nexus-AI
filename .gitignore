@@ -4,6 +4,9 @@
 !/README.md
 !/package.json
 !/tsconfig.json
+!/.github/
+!/.github/workflows/
+!/.github/workflows/**
 !/docs/
 !/docs/**
 !/src/
