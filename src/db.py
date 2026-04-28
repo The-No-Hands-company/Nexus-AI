@@ -3170,6 +3170,209 @@ def get_adapter_proof_report(report_id: str) -> dict | None:
     return None
 
 
+def _eval_jobs_key() -> str:
+    return "eval.jobs.v1"
+
+
+def save_eval_job_record(job: dict) -> dict:
+    prune_eval_job_records(max_rows=5000)
+    rows = _load_json_pref(_eval_jobs_key(), [])
+    item = dict(job or {})
+    item.setdefault("task_id", f"eval_{uuid.uuid4().hex[:12]}")
+    item.setdefault("created_at", _time.time())
+    item.setdefault("status", "done")
+    item.setdefault("provider", "ollama")
+    item.setdefault("model", "")
+    item.setdefault("suite", "")
+    item.setdefault("score", 0.0)
+    item.setdefault("regression", False)
+    item["task_id"] = str(item.get("task_id") or "").strip() or f"eval_{uuid.uuid4().hex[:12]}"
+    rows = [
+        row for row in rows
+        if not (
+            isinstance(row, dict)
+            and str(row.get("task_id") or "") == item["task_id"]
+        )
+    ]
+    rows.append(item)
+    _save_json_pref(_eval_jobs_key(), rows[-5000:])
+    return item
+
+
+def list_eval_job_records(model: str = "", suite: str = "", limit: int = 1000) -> list[dict]:
+    prune_eval_job_records(max_rows=5000)
+    rows = _load_json_pref(_eval_jobs_key(), [])
+    if not isinstance(rows, list):
+        return []
+    model_q = str(model or "").strip()
+    suite_q = str(suite or "").strip()
+    filtered: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if model_q and str(row.get("model") or "") != model_q:
+            continue
+        if suite_q and str(row.get("suite") or "") != suite_q:
+            continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: float(row.get("created_at") or 0.0), reverse=True)
+    safe_limit = max(1, min(int(limit or 1000), 5000))
+    return filtered[:safe_limit]
+
+
+def _creative_jobs_key() -> str:
+    return "creative.jobs.v1"
+
+
+def _coerce_timestamp(value: Any, fallback: float = 0.0) -> float:
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value or "").strip()
+    if not text:
+        return fallback
+    try:
+        return float(text)
+    except Exception:
+        pass
+    try:
+        normalized = text.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized).timestamp()
+    except Exception:
+        return fallback
+
+
+def _retention_days_from_env(name: str, default_days: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return max(1, int(default_days))
+    try:
+        return max(1, min(int(raw), 3650))
+    except Exception:
+        return max(1, int(default_days))
+
+
+def _prune_time_window(rows: list[dict], created_key: str, max_age_days: int, now_ts: float | None = None) -> list[dict]:
+    if max_age_days <= 0:
+        return rows
+    ts_now = float(now_ts or _time.time())
+    cutoff = ts_now - (float(max_age_days) * 86400.0)
+    kept: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        created_at = _coerce_timestamp(row.get(created_key), fallback=0.0)
+        # Migration-compatible behavior: retain rows with missing/unparseable timestamps
+        # until they get rewritten by newer code paths.
+        if created_at <= 0.0 or created_at >= cutoff:
+            kept.append(row)
+    return kept
+
+
+def prune_eval_job_records(retention_days: int | None = None, max_rows: int = 5000) -> dict:
+    rows = _load_json_pref(_eval_jobs_key(), [])
+    if not isinstance(rows, list):
+        rows = []
+    before = len(rows)
+    days = retention_days if retention_days is not None else _retention_days_from_env("EVAL_JOB_RETENTION_DAYS", 180)
+    pruned = _prune_time_window(rows, created_key="created_at", max_age_days=int(days))
+    pruned.sort(key=lambda row: _coerce_timestamp(row.get("created_at"), fallback=0.0), reverse=True)
+    safe_max = max(100, min(int(max_rows or 5000), 50000))
+    final_rows = pruned[:safe_max]
+    _save_json_pref(_eval_jobs_key(), final_rows)
+    return {
+        "store": "eval_jobs",
+        "before": before,
+        "after": len(final_rows),
+        "removed": max(0, before - len(final_rows)),
+        "retention_days": int(days),
+        "max_rows": safe_max,
+    }
+
+
+def prune_creative_jobs(retention_days: int | None = None, max_rows: int = 5000) -> dict:
+    rows = _load_json_pref(_creative_jobs_key(), [])
+    if not isinstance(rows, list):
+        rows = []
+    before = len(rows)
+    days = retention_days if retention_days is not None else _retention_days_from_env("CREATIVE_JOB_RETENTION_DAYS", 60)
+    pruned = _prune_time_window(rows, created_key="created_at", max_age_days=int(days))
+    pruned.sort(key=lambda row: _coerce_timestamp(row.get("created_at"), fallback=0.0), reverse=True)
+    safe_max = max(100, min(int(max_rows or 5000), 50000))
+    final_rows = pruned[:safe_max]
+    _save_json_pref(_creative_jobs_key(), final_rows)
+    return {
+        "store": "creative_jobs",
+        "before": before,
+        "after": len(final_rows),
+        "removed": max(0, before - len(final_rows)),
+        "retention_days": int(days),
+        "max_rows": safe_max,
+    }
+
+
+def run_eval_creative_retention_cleanup(
+    eval_retention_days: int | None = None,
+    creative_retention_days: int | None = None,
+    max_rows: int = 5000,
+) -> dict:
+    eval_result = prune_eval_job_records(retention_days=eval_retention_days, max_rows=max_rows)
+    creative_result = prune_creative_jobs(retention_days=creative_retention_days, max_rows=max_rows)
+    return {
+        "ok": True,
+        "eval_jobs": eval_result,
+        "creative_jobs": creative_result,
+    }
+
+
+def save_creative_job(job: dict) -> dict:
+    prune_creative_jobs(max_rows=5000)
+    rows = _load_json_pref(_creative_jobs_key(), [])
+    item = dict(job or {})
+    item.setdefault("job_id", f"creative_{uuid.uuid4().hex[:12]}")
+    item.setdefault("created_at", _time.time())
+    item.setdefault("updated_at", item.get("created_at"))
+    item.setdefault("status", "queued")
+    item["job_id"] = str(item.get("job_id") or "").strip() or f"creative_{uuid.uuid4().hex[:12]}"
+    rows = [
+        row for row in rows
+        if not (
+            isinstance(row, dict)
+            and str(row.get("job_id") or "") == item["job_id"]
+        )
+    ]
+    rows.append(item)
+    _save_json_pref(_creative_jobs_key(), rows[-5000:])
+    return item
+
+
+def get_creative_job(job_id: str) -> dict | None:
+    needle = str(job_id or "").strip()
+    if not needle:
+        return None
+    for row in list_creative_jobs(limit=5000):
+        if str(row.get("job_id") or "") == needle:
+            return row
+    return None
+
+
+def list_creative_jobs(kind: str = "", limit: int = 200) -> list[dict]:
+    prune_creative_jobs(max_rows=5000)
+    rows = _load_json_pref(_creative_jobs_key(), [])
+    if not isinstance(rows, list):
+        return []
+    kind_q = str(kind or "").strip().lower()
+    filtered: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if kind_q and str(row.get("kind") or "").lower() != kind_q:
+            continue
+        filtered.append(row)
+    filtered.sort(key=lambda row: float(row.get("created_at") or 0.0), reverse=True)
+    safe_limit = max(1, min(int(limit or 200), 5000))
+    return filtered[:safe_limit]
+
+
 def save_validation_report(report: dict) -> dict:
     rows = _load_json_pref(_validation_reports_key(), [])
     item = dict(report or {})

@@ -1,675 +1,409 @@
-"""
-Phase 1 reasoning helpers — Tree-of-Thought, Graph-of-Thought, self-critique,
-cross-model consensus, MCTS planning, Socratic reasoning, step-by-step verification.
-"""
+from __future__ import annotations
+
 import json
-import math
-import random
+from typing import Any
 
 
-def build_tot_prompt(query: str, mode: str = "tree") -> str:
-    """Build a Tree-of-Thought reasoning prompt."""
-    question = "Question: " + query
-    steps = (
-        "Think step by step, exploring multiple reasoning branches.\n"
-        "For each branch, note: assumption, reasoning, and conclusion.\n"
-        "Then choose the best path and explain why."
+def _json_or_none(raw: str) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def build_tot_prompt(task: str, candidates: int = 3) -> str:
+    return (
+        f"Tree-of-Thought planner. Generate exactly {candidates} candidate solution paths for: {task}\n"
+        "Return strict JSON with steps."
     )
-    json_fmt = (
-        'Reply ONLY with valid JSON: '
-        '{"action":"think","thought":"<your reasoning>",'
-        '"steps":["<step1>","<step2>",...],"best_path":"<why this path>"}'
-    )
-    return question + "\n\n" + steps + "\n\n" + json_fmt
+
+
+def parse_tot_response(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is not None:
+        return parsed
+    return {"steps": [response], "confidence": 0.5}
 
 
 def build_critique_prompt(answer: str, question: str) -> str:
-    """Build a self-critique prompt."""
     return (
-        "You are reviewing your own answer for quality and accuracy.\n\n"
-        "Original question: " + question + "\n\n"
-        "Your answer:\n" + answer + "\n\n"
-        "Critique: Identify weaknesses, gaps, and suggest improvements.\n"
-        "Then provide a revised, better answer.\n\n"
-        'Reply ONLY with valid JSON: '
-        '{"critique":"<your critique>","revised":"<improved answer>","confidence":0.85}'
+        "You are a self-critique assistant. Review the answer against the question, identify gaps, "
+        "and return JSON with critique, revised, confidence.\n\n"
+        f"Question: {question}\n"
+        f"Answer: {answer}"
     )
 
 
-def build_consensus_prompt(task: str, n_models: int = 3) -> str:
-    """Build a cross-model consensus prompt."""
-    return (
-        "You are running a cross-model consensus check.\n"
-        "Run this task with " + str(n_models) + " different reasoning approaches:\n\n"
-        + task + "\n\n"
-        "Approach 1: <your first approach and result>\n"
-        "Approach 2: <a different approach>\n"
-        "Approach 3: <yet another angle>\n\n"
-        "Then reconcile into the most reliable consensus answer.\n\n"
-        'Reply ONLY with valid JSON: '
-        '{"approach1":"<result1>","approach2":"<result2>","approach3":"<result3>",'
-        '"consensus":"<final reconciled answer>","confidence":0.9}'
-    )
-
-
-def parse_tot_response(response: str) -> dict:
-    """Parse a Tree-of-Thought LLM response."""
-    try:
-        data = json.loads(response)
-        thought = data.get("thought", "")
-        steps = data.get("steps", [])
-        best_path = data.get("best_path", "")
-        reasoning = thought
-        if steps:
-            reasoning += "\n\nSteps:\n" + "\n".join("  %d. %s" % (i + 1, s) for i, s in enumerate(steps))
-        if best_path:
-            reasoning += "\n\nBest path: " + best_path
-        return {"reasoning": reasoning, "data": data}
-    except Exception:
-        return {"reasoning": response, "data": {}}
-
-
-def parse_critique_response(response: str) -> dict:
-    """Parse a self-critique LLM response."""
-    try:
-        return json.loads(response)
-    except Exception:
-        return {"critique": response, "revised": response, "confidence": 0.5}
-
-
-def build_got_prompt(query: str) -> str:
-    """Build a Graph-of-Thought reasoning prompt.
-
-    Unlike Tree-of-Thought (which only branches), GoT allows thoughts to
-    merge back and cross-reference, enabling richer synthesis.
-    """
-    return (
-        "You are performing Graph-of-Thought reasoning.\n\n"
-        "Question: " + query + "\n\n"
-        "Build a directed reasoning graph:\n"
-        "  - NODES: individual atomic thoughts / sub-conclusions\n"
-        "  - EDGES: which node's insight feeds into which\n"
-        "  - MERGES: where multiple branches converge\n"
-        "  - CONCLUSION: the final synthesised answer after traversing the graph\n\n"
-        'Reply ONLY with valid JSON:\n'
-        '{"nodes": [{"id": "n1", "thought": "..."}], '
-        '"edges": [{"from": "n1", "to": "n2", "relation": "supports"}], '
-        '"merges": [{"inputs": ["n2", "n3"], "output": "n4", "synthesis": "..."}], '
-        '"conclusion": "<final answer>", "confidence": 0.9}'
-    )
-
-
-def parse_got_response(response: str) -> dict:
-    """Parse a Graph-of-Thought LLM response.
-
-    Returns a dict with at minimum:
-        nodes, edges, merges, conclusion, confidence, reasoning (human-readable)
-    """
-    try:
-        data = json.loads(response)
-        nodes = data.get("nodes", [])
-        edges = data.get("edges", [])
-        merges = data.get("merges", [])
-        conclusion = data.get("conclusion", "")
-
-        lines = []
-        if nodes:
-            lines.append("**Thought nodes:**")
-            for n in nodes:
-                lines.append(f"  [{n.get('id','?')}] {n.get('thought','')}")
-        if edges:
-            lines.append("\n**Reasoning edges:**")
-            for e in edges:
-                lines.append(
-                    f"  {e.get('from','?')} → {e.get('to','?')}"
-                    + (f" ({e.get('relation','')})" if e.get("relation") else "")
-                )
-        if merges:
-            lines.append("\n**Merge points:**")
-            for m in merges:
-                inputs = ", ".join(m.get("inputs", []))
-                lines.append(f"  [{inputs}] → [{m.get('output','?')}]: {m.get('synthesis','')}")
-        if conclusion:
-            lines.append(f"\n**Conclusion:** {conclusion}")
-
-        reasoning = "\n".join(lines) if lines else str(data)
-        return {"nodes": nodes, "edges": edges, "merges": merges,
-                "conclusion": conclusion, "confidence": data.get("confidence", 0.8),
-                "reasoning": reasoning, "data": data}
-    except Exception:
-        return {"nodes": [], "edges": [], "merges": [], "conclusion": response,
-                "confidence": 0.5, "reasoning": response, "data": {}}
-
-
-def parse_consensus_response(response: str) -> dict:
-    """Parse a cross-model consensus LLM response (from build_consensus_prompt)."""
-    try:
-        data = json.loads(response)
+def parse_critique_response(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is not None:
         return {
-            "approach1":  data.get("approach1", ""),
-            "approach2":  data.get("approach2", ""),
-            "approach3":  data.get("approach3", ""),
-            "consensus":  data.get("consensus", ""),
-            "confidence": float(data.get("confidence", 0.8)),
+            "critique": str(parsed.get("critique", "")),
+            "revised": str(parsed.get("revised", parsed.get("answer", ""))),
+            "confidence": float(parsed.get("confidence", 0.5)),
         }
-    except Exception:
-        return {
-            "approach1": "", "approach2": "", "approach3": "",
-            "consensus": response, "confidence": 0.5,
-        }
+    return {"critique": response, "revised": response, "confidence": 0.5}
 
 
-# ── Multi-agent debate helpers ─────────────────────────────────────────────
-
-def build_debate_position_prompt(claim: str, role: str, prior_round: str = "") -> str:
-    """Build a debate round prompt for 'proponent' or 'critic' role.
-
-    ``role`` must be ``"proponent"`` or ``"critic"``.
-    ``prior_round`` is the opponent's previous argument (empty for round 1).
-    """
-    if role == "proponent":
-        persona = (
-            "You are the PROPONENT.  Your job is to argue strongly in FAVOUR of "
-            "the following claim, presenting the best possible evidence and reasoning."
-        )
-        stance = "Argue FOR"
-    else:
-        persona = (
-            "You are the CRITIC.  Your job is to argue strongly AGAINST the "
-            "following claim, identifying weaknesses, counter-evidence, and risks."
-        )
-        stance = "Argue AGAINST"
-
-    prior_section = (
-        f"\n\nOpponent's previous argument:\n{prior_round}\n\nRespond directly to the "
-        "opponent's points and advance your own position.\n"
-        if prior_round else ""
-    )
-
+def build_got_prompt(task: str) -> str:
     return (
-        persona + "\n\n"
-        "Claim: " + claim + "\n"
-        + prior_section
-        + f"\n{stance} the claim above.\n\n"
-        'Reply ONLY with valid JSON:\n'
-        '{"argument": "<your argument>", "key_points": ["<point1>", "<point2>"], '
-        '"confidence": 0.8}'
+        "Graph-of-Thought reasoning agent. Respond in JSON with nodes, edges, merges, conclusion, confidence.\n"
+        f"Task: {task}"
     )
 
 
-def build_debate_verdict_prompt(claim: str, rounds: list) -> str:
-    """Build a final verdict prompt that synthesises the full debate transcript."""
-    transcript_parts = []
-    for i, r in enumerate(rounds, 1):
-        transcript_parts.append(f"Round {i} — Proponent: {r.get('proponent', '')}")
-        transcript_parts.append(f"Round {i} — Critic: {r.get('critic', '')}")
-    transcript = "\n\n".join(transcript_parts)
+def parse_got_response(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is not None:
+        nodes = list(parsed.get("nodes", []))
+        edges = list(parsed.get("edges", []))
+        merges = list(parsed.get("merges", []))
+        reasoning = json.dumps({"nodes": nodes, "edges": edges, "merges": merges}, ensure_ascii=False)
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "merges": merges,
+            "conclusion": str(parsed.get("conclusion", "")),
+            "confidence": float(parsed.get("confidence", 0.5)),
+            "reasoning": reasoning,
+        }
+    return {
+        "nodes": [],
+        "edges": [],
+        "merges": [],
+        "conclusion": response,
+        "confidence": 0.5,
+        "reasoning": response,
+    }
 
+
+def parse_consensus_response(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is not None:
+        return {
+            "approach1": parsed.get("approach1", ""),
+            "approach2": parsed.get("approach2", ""),
+            "approach3": parsed.get("approach3", ""),
+            "consensus": str(parsed.get("consensus", "")),
+            "confidence": float(parsed.get("confidence", 0.5)),
+        }
+    return {"approach1": "", "approach2": "", "approach3": "", "consensus": response, "confidence": 0.5}
+
+
+def build_verification_prompt(claim: str, steps: list[str] | None = None, domain: str = "general") -> str:
+    steps_blob = ""
+    if steps:
+        steps_blob = "\nProof steps: " + json.dumps(steps, ensure_ascii=False)
     return (
-        "You are an impartial judge evaluating the following debate.\n\n"
-        "Claim: " + claim + "\n\n"
-        "Complete debate transcript:\n" + transcript + "\n\n"
-        "Weigh the arguments on both sides. "
-        "Provide a verdict, overall confidence, and a nuanced synthesis.\n\n"
-        'Reply ONLY with valid JSON:\n'
-        '{"verdict": "supported|refuted|inconclusive", "synthesis": "<balanced summary>", '
-        '"strongest_proponent_point": "<best argument for>", '
-        '"strongest_critic_point": "<best argument against>", '
-        '"confidence": 0.75}'
+        f"You are a formal verification agent. Verify the following claim in the domain of {domain} "
+        "and return strict JSON.\n"
+        "JSON schema: {\"steps\": [{\"step\": int, \"valid\": bool, \"issue\": string}], "
+        "\"overall\": \"valid|invalid|uncertain\", \"confidence\": number, "
+        "\"corrected_claim\": string, \"explanation\": string}\n"
+        f"Claim: {claim}{steps_blob}"
     )
 
 
-def parse_debate_turn(response: str) -> dict:
-    """Parse a single debate turn response."""
-    try:
-        data = json.loads(response)
-        return {
-            "argument":    data.get("argument", response),
-            "key_points":  data.get("key_points", []),
-            "confidence":  float(data.get("confidence", 0.5)),
-        }
-    except Exception:
-        return {"argument": response, "key_points": [], "confidence": 0.5}
+def parse_verification_response(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is not None:
+        return parsed
+    return {"overall": "unknown", "confidence": 0.5, "explanation": response, "steps": []}
 
 
-def parse_debate_verdict(response: str) -> dict:
-    """Parse the final judge verdict response."""
-    try:
-        data = json.loads(response)
-        return {
-            "verdict":                    data.get("verdict", "inconclusive"),
-            "synthesis":                  data.get("synthesis", response),
-            "strongest_proponent_point":  data.get("strongest_proponent_point", ""),
-            "strongest_critic_point":     data.get("strongest_critic_point", ""),
-            "confidence":                 float(data.get("confidence", 0.5)),
-        }
-    except Exception:
-        return {
-            "verdict":                    "inconclusive",
-            "synthesis":                  response,
-            "strongest_proponent_point":  "",
-            "strongest_critic_point":     "",
-            "confidence":                 0.5,
-        }
+def build_reflection_prompt(answer: str, task: str, tool_trace: list | None = None) -> str:
+    trace_blob = ""
+    if tool_trace:
+        trace_blob = "\nTool trace: " + json.dumps(list(tool_trace), ensure_ascii=False)
+    return f"Reflect on whether this answer fully solves the task.\nTask: {task}\nAnswer: {answer}{trace_blob}"
 
 
-# ── Hypothesis testing helpers ──────────────────────────────────────────────
+def parse_reflection_response(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is not None:
+        return parsed
+    return {"reflection": response, "confidence": 0.5}
 
-def build_hypothesis_generation_prompt(observation: str, num_hypotheses: int = 4) -> str:
-    """Build a prompt that generates multiple competing hypotheses for an observation."""
+
+def build_socratic_prompt(topic: str, depth: int = 3) -> str:
     return (
-        "You are a scientific thinker.  Given the observation below, generate "
-        f"{num_hypotheses} distinct, competing hypotheses that could explain it.\n\n"
-        "Observation: " + observation + "\n\n"
-        "For each hypothesis, provide: a concise statement, the reasoning that "
-        "supports it, and an initial plausibility score (0-1).\n\n"
-        'Reply ONLY with valid JSON:\n'
-        '{"hypotheses": ['
-        '{"id": 1, "statement": "...", "initial_reasoning": "...", "plausibility": 0.7}, '
-        '{"id": 2, "statement": "...", "initial_reasoning": "...", "plausibility": 0.5}'
-        ']}'
+        f"Socratic reasoning agent. Decompose the following topic into a recursive "
+        f"question hierarchy (depth={depth}) and return strict JSON.\n"
+        "JSON schema: {\"root_question\": string, \"sub_questions\": "
+        "[{\"question\": string, \"sub_questions\": [...]}]}\n"
+        f"Topic: {topic}"
     )
 
 
-def build_hypothesis_test_prompt(hypothesis: str, observation: str) -> str:
-    """Build a prompt that rigorously tests a single hypothesis against evidence."""
-    return (
-        "You are a rigorous scientist testing a hypothesis.\n\n"
-        "Observation: " + observation + "\n"
-        "Hypothesis: " + hypothesis + "\n\n"
-        "1. List evidence that SUPPORTS this hypothesis.\n"
-        "2. List evidence that CONTRADICTS this hypothesis.\n"
-        "3. Identify assumptions required for this hypothesis to hold.\n"
-        "4. Provide a final verdict: accept / reject / uncertain.\n"
-        "5. Provide a revised confidence score (0-1).\n\n"
-        'Reply ONLY with valid JSON:\n'
-        '{"evidence_for": ["<ev1>", "<ev2>"], '
-        '"evidence_against": ["<ev1>", "<ev2>"], '
-        '"assumptions": ["<a1>", "<a2>"], '
-        '"verdict": "accept", '
-        '"confidence": 0.8, '
-        '"explanation": "<brief explanation>"}'
-    )
-
-
-def build_hypothesis_conclusion_prompt(observation: str, results: list) -> str:
-    """Build a prompt that draws a final conclusion from all tested hypotheses."""
-    summaries = []
-    for r in results:
-        summaries.append(
-            f"  H{r.get('id', '?')}: {r.get('statement', '')} → "
-            f"{r.get('verdict', '?')} (confidence {r.get('confidence', 0):.2f})"
-        )
-    summary_text = "\n".join(summaries)
-
-    return (
-        "You are drawing a final scientific conclusion.\n\n"
-        "Observation: " + observation + "\n\n"
-        "Tested hypotheses and results:\n" + summary_text + "\n\n"
-        "Based on the evidence, state the most supported conclusion, "
-        "note any remaining uncertainty, and suggest next investigative steps.\n\n"
-        'Reply ONLY with valid JSON:\n'
-        '{"conclusion": "<final conclusion>", '
-        '"best_hypothesis_id": 1, '
-        '"uncertainty": "<remaining uncertainty>", '
-        '"next_steps": ["<step1>", "<step2>"], '
-        '"overall_confidence": 0.75}'
-    )
-
-
-def parse_hypothesis_generation(response: str) -> list:
-    """Parse the hypothesis generation LLM response."""
-    try:
-        data = json.loads(response)
-        hyps = data.get("hypotheses", [])
-        out = []
-        for h in hyps:
-            out.append({
-                "id":                int(h.get("id", 0)),
-                "statement":         str(h.get("statement", "")),
-                "initial_reasoning": str(h.get("initial_reasoning", "")),
-                "plausibility":      float(h.get("plausibility", 0.5)),
-            })
-        return out
-    except Exception:
-        return [{"id": 1, "statement": response, "initial_reasoning": "", "plausibility": 0.5}]
-
-
-def parse_hypothesis_test(response: str) -> dict:
-    """Parse a single hypothesis test response."""
-    try:
-        data = json.loads(response)
+def parse_socratic_response(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if isinstance(parsed, dict):
         return {
-            "evidence_for":     data.get("evidence_for", []),
-            "evidence_against": data.get("evidence_against", []),
-            "assumptions":      data.get("assumptions", []),
-            "verdict":          data.get("verdict", "uncertain"),
-            "confidence":       float(data.get("confidence", 0.5)),
-            "explanation":      data.get("explanation", ""),
+            "root_question": str(parsed.get("root_question", "")),
+            "sub_questions": list(parsed.get("sub_questions", [])),
         }
-    except Exception:
-        return {
-            "evidence_for": [], "evidence_against": [], "assumptions": [],
-            "verdict": "uncertain", "confidence": 0.5, "explanation": response,
-        }
+    return {"root_question": str(response), "sub_questions": []}
 
 
-def parse_hypothesis_conclusion(response: str) -> dict:
-    """Parse the final hypothesis conclusion response."""
-    try:
-        data = json.loads(response)
-        return {
-            "conclusion":         data.get("conclusion", response),
-            "best_hypothesis_id": int(data.get("best_hypothesis_id", 0)),
-            "uncertainty":        data.get("uncertainty", ""),
-            "next_steps":         data.get("next_steps", []),
-            "overall_confidence": float(data.get("overall_confidence", 0.5)),
-        }
-    except Exception:
-        return {
-            "conclusion":         response,
-            "best_hypothesis_id": 0,
-            "uncertainty":        "",
-            "next_steps":         [],
-            "overall_confidence": 0.5,
-        }
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Monte Carlo Tree Search (MCTS) for planning
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_mcts_expand_prompt(goal: str, path: list, depth: int) -> str:
-    """Ask the LLM to generate N candidate next steps from the current plan path."""
-    path_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(path)) if path else "  (start)"
+def build_socratic_answer_prompt(topic: str, question_tree: dict[str, Any]) -> str:
+    tree_blob = json.dumps(question_tree, ensure_ascii=False)
     return (
-        f"You are a planning agent using Monte Carlo Tree Search.\n\n"
-        f"Goal: {goal}\n\n"
-        f"Current plan path (depth {depth}):\n{path_str}\n\n"
-        f"Generate exactly 3 distinct candidate NEXT STEPS to advance toward the goal.\n"
-        f"Each step should be concrete and actionable.\n\n"
-        f"Respond ONLY in this JSON format:\n"
-        f'{{"steps": ["step A", "step B", "step C"]}}'
+        "Answer the following question hierarchy with a concise synthesis.\n"
+        f"Topic: {topic}\nQuestion tree: {tree_blob}"
     )
 
 
-def build_mcts_score_prompt(goal: str, plan: list) -> str:
-    """Ask the LLM to score a complete plan for goal achievement."""
-    plan_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(plan))
+def build_mcts_steps_prompt(goal: str, branching: int) -> str:
     return (
-        f"Score this plan for achieving the following goal.\n\n"
-        f"Goal: {goal}\n\n"
-        f"Plan:\n{plan_str}\n\n"
-        f"Respond ONLY in this JSON format:\n"
-        f'{{"score": 0.0, "rationale": "brief reason"}}\n\n'
-        f"score must be between 0.0 (plan fails) and 1.0 (plan perfectly achieves goal)."
+        f"Monte Carlo Tree Search planner. Generate exactly {branching} concrete action steps "
+        f"as a JSON object with a 'steps' key containing a list of strings.\n"
+        f"Goal: {goal}"
     )
 
 
-class _MCTSNode:
-    """Minimal MCTS node for planning."""
-    __slots__ = ("step", "parent", "children", "visits", "value", "depth")
-
-    def __init__(self, step: str, parent=None, depth: int = 0):
-        self.step = step
-        self.parent = parent
-        self.children: list = []
-        self.visits: int = 0
-        self.value: float = 0.0
-        self.depth = depth
-
-    def ucb1(self, exploration: float = 1.41) -> float:
-        if self.visits == 0:
-            return float("inf")
-        parent_visits = self.parent.visits if self.parent else self.visits
-        return self.value / self.visits + exploration * math.sqrt(
-            math.log(parent_visits + 1) / self.visits
-        )
-
-    def best_child(self) -> "_MCTSNode":
-        return max(self.children, key=lambda c: c.ucb1())
-
-    def path(self) -> list:
-        steps = []
-        node = self
-        while node.parent is not None:
-            steps.append(node.step)
-            node = node.parent
-        steps.reverse()
-        return steps
+def build_mcts_score_prompt(goal: str, steps: list[str]) -> str:
+    steps_blob = json.dumps(steps, ensure_ascii=False)
+    return (
+        "Score this plan on a 0.0–1.0 scale for feasibility and completeness.\n"
+        "Return JSON: {\"score\": number, \"rationale\": string}\n"
+        f"Goal: {goal}\nPlan: {steps_blob}"
+    )
 
 
 def run_mcts_planning(
     goal: str,
-    llm_fn,               # callable(prompt: str) -> str
-    iterations: int = 8,
-    max_depth: int = 4,
+    llm_fn: Any = None,
+    iterations: int = 3,
+    max_depth: int = 2,
     branching: int = 3,
-) -> dict:
-    """Run MCTS to find an optimal plan for ``goal``.
+) -> dict[str, Any]:
+    """LLM-backed MCTS-inspired planner.
 
-    Args:
-        goal:       The planning goal.
-        llm_fn:     A function that calls an LLM and returns the response string.
-        iterations: Number of MCTS simulation iterations.
-        max_depth:  Maximum plan depth (number of steps).
-        branching:  Number of children to expand per node.
-
-    Returns:
-        dict with keys: best_plan (list[str]), best_score (float), tree_size (int),
-        all_plans (list[dict]) sorted best-first.
+    When *llm_fn* is provided it is used to generate and score candidate plans.
+    Falls back to a deterministic split when no LLM callback is available.
     """
-    root = _MCTSNode("(root)", parent=None, depth=0)
-    all_plans: list = []
+    if llm_fn is None:
+        # Deterministic fallback (no LLM available)
+        steps = [
+            segment.strip()
+            for segment in str(goal).replace(" and ", ",").split(",")
+            if segment.strip()
+        ]
+        steps = steps or [goal]
+        plan = steps[: max(1, min(max_depth, len(steps)))]
+        return {
+            "best_plan": plan,
+            "best_score": 0.5,
+            "best_rationale": "deterministic fallback",
+            "tree_size": len(plan),
+            "iterations": iterations,
+            "all_plans": [plan],
+        }
 
-    def _expand(node: _MCTSNode) -> list:
-        prompt = build_mcts_expand_prompt(goal, node.path(), node.depth)
-        raw = llm_fn(prompt)
-        try:
-            data = json.loads(raw) if raw.strip().startswith("{") else {}
-            steps = data.get("steps", [raw])
-        except Exception:
-            steps = [raw]
-        children = []
-        for step in steps[:branching]:
-            child = _MCTSNode(str(step).strip(), parent=node, depth=node.depth + 1)
-            node.children.append(child)
-            children.append(child)
-        return children
+    all_plans: list[dict[str, Any]] = []
+    best_score = -1.0
+    best_plan: list[str] = []
+    best_rationale = ""
 
-    def _simulate(node: _MCTSNode) -> float:
-        plan = node.path()
-        if not plan:
-            return 0.0
-        prompt = build_mcts_score_prompt(goal, plan)
-        raw = llm_fn(prompt)
-        try:
-            data = json.loads(raw) if raw.strip().startswith("{") else {}
-            score = float(data.get("score", 0.5))
-            all_plans.append({"plan": plan, "score": round(score, 4),
-                               "rationale": data.get("rationale", "")})
-            return score
-        except Exception:
-            return 0.5
+    for _ in range(max(1, iterations)):
+        # --- expansion: ask the LLM to generate candidate steps ---
+        steps_raw = llm_fn(build_mcts_steps_prompt(goal, branching))
+        steps_parsed = _json_or_none(steps_raw) if isinstance(steps_raw, str) else steps_raw
+        if isinstance(steps_parsed, dict):
+            candidate_steps = [str(s) for s in steps_parsed.get("steps", [])]
+        else:
+            candidate_steps = [str(steps_raw)] if steps_raw else [goal]
 
-    def _backpropagate(node: _MCTSNode, score: float) -> None:
-        n = node
-        while n is not None:
-            n.visits += 1
-            n.value += score
-            n = n.parent
+        candidate_steps = candidate_steps[:max_depth] or [goal]
 
-    for _ in range(iterations):
-        # Selection
-        node = root
-        while node.children and node.depth < max_depth:
-            node = node.best_child()
-        # Expansion
-        if node.depth < max_depth:
-            children = _expand(node)
-            if children:
-                node = random.choice(children)
-        # Simulation + backprop
-        score = _simulate(node)
-        _backpropagate(node, score)
+        # --- evaluation: score this plan ---
+        score_raw = llm_fn(build_mcts_score_prompt(goal, candidate_steps))
+        score_parsed = _json_or_none(score_raw) if isinstance(score_raw, str) else score_raw
+        if isinstance(score_parsed, dict):
+            score = float(score_parsed.get("score", 0.5))
+            rationale = str(score_parsed.get("rationale", ""))
+        else:
+            score = 0.5
+            rationale = str(score_raw)
 
-    all_plans.sort(key=lambda p: p["score"], reverse=True)
-    best = all_plans[0] if all_plans else {"plan": [], "score": 0.0, "rationale": ""}
+        all_plans.append({"steps": candidate_steps, "score": score, "rationale": rationale})
 
-    def _count_nodes(n: _MCTSNode) -> int:
-        return 1 + sum(_count_nodes(c) for c in n.children)
+        if score > best_score:
+            best_score = score
+            best_plan = candidate_steps
+            best_rationale = rationale
 
     return {
-        "best_plan": best["plan"],
-        "best_score": best["score"],
-        "best_rationale": best["rationale"],
-        "tree_size": _count_nodes(root),
+        "best_plan": best_plan,
+        "best_score": best_score,
+        "best_rationale": best_rationale,
+        "tree_size": len(all_plans),
         "iterations": iterations,
-        "all_plans": all_plans[:10],
+        "all_plans": all_plans,
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Socratic reasoning mode (question-driven decomposition)
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_socratic_prompt(topic: str, depth: int = 3) -> str:
-    """Build a Socratic questioning prompt to decompose a topic into sub-questions."""
-    return (
-        f"You are a Socratic reasoning agent. Your task is to decompose the following topic "
-        f"or question into a hierarchy of sub-questions that, when answered, will fully resolve "
-        f"the original topic.\n\n"
-        f"Topic: {topic}\n\n"
-        f"Generate a Socratic question tree up to depth {depth}. "
-        f"Each question should probe a fundamental assumption or sub-problem.\n\n"
-        f"Respond ONLY in this JSON format:\n"
-        f'{{"root_question": "...", "sub_questions": [{{"question": "...", '
-        f'"sub_questions": [{{"question": "...", "sub_questions": []}}]}}]}}'
-    )
-
-
-def parse_socratic_response(response: str) -> dict:
-    """Parse Socratic question tree from LLM response."""
+def _clamp01(value: Any, default: float = 0.5) -> float:
     try:
-        data = json.loads(response)
-        return {
-            "root_question": data.get("root_question", response[:200]),
-            "sub_questions": data.get("sub_questions", []),
-        }
+        v = float(value)
     except Exception:
-        return {"root_question": response[:200], "sub_questions": []}
+        return default
+    return max(0.0, min(1.0, v))
 
 
-def build_socratic_answer_prompt(topic: str, question_tree: dict) -> str:
-    """Build prompt to answer a Socratic question tree bottom-up."""
-    def _flatten(node: dict, depth: int = 0) -> list:
-        indent = "  " * depth
-        lines = [f"{indent}Q: {node.get('root_question') or node.get('question', '')}"]
-        for sub in node.get("sub_questions", []):
-            lines.extend(_flatten(sub, depth + 1))
-        return lines
-
-    flat = "\n".join(_flatten(question_tree))
+def build_debate_position_prompt(claim: str, role: str, prior_round: str = "") -> str:
+    side = "PROPONENT"
+    direction = "FOR"
+    if str(role).strip().lower() == "critic":
+        side = "CRITIC"
+        direction = "AGAINST"
+    opponent = f"\nOpponent prior argument: {prior_round}" if prior_round else ""
     return (
-        f"Answer the following question hierarchy bottom-up (answer leaf questions first, "
-        f"then synthesise upward).\n\n"
-        f"Original topic: {topic}\n\n"
-        f"Question tree:\n{flat}\n\n"
-        f"Provide a structured answer that synthesises all levels into a final conclusion."
+        f"You are the {side}. Argue {direction} this claim and respond as strict JSON.\n"
+        "JSON schema: {\"argument\": string, \"key_points\": [string], \"confidence\": number}\n"
+        f"Claim: {claim}{opponent}"
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Step-by-step verification (formal proof checking for math/code)
-# ─────────────────────────────────────────────────────────────────────────────
+def parse_debate_turn(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is not None:
+        return {
+            "argument": str(parsed.get("argument", "")),
+            "key_points": [str(x) for x in list(parsed.get("key_points", []))],
+            "confidence": _clamp01(parsed.get("confidence", 0.5)),
+        }
+    return {"argument": str(response), "key_points": [], "confidence": 0.5}
 
-def build_verification_prompt(claim: str, steps: list, domain: str = "general") -> str:
-    """Build a verification prompt for step-by-step formal checking.
 
-    Args:
-        claim:  The conclusion or answer to be verified.
-        steps:  List of reasoning/derivation steps that led to the claim.
-        domain: One of "math", "code", "logic", "general".
-    """
-    steps_str = "\n".join(f"  {i+1}. {s}" for i, s in enumerate(steps)) if steps else "  (no steps provided)"
-    domain_hint = {
-        "math":    "Check each step for arithmetic, algebraic, and logical validity.",
-        "code":    "Check each step for correctness, edge cases, and runtime errors.",
-        "logic":   "Check each step for logical validity and sound inference.",
-        "general": "Check each step for correctness, consistency, and completeness.",
-    }.get(domain, "Check each step for correctness.")
-
+def build_debate_verdict_prompt(claim: str, transcript: list[dict[str, Any]]) -> str:
+    rounds_blob = json.dumps(transcript, ensure_ascii=False)
     return (
-        f"You are a formal verification agent. {domain_hint}\n\n"
-        f"Claim to verify: {claim}\n\n"
-        f"Derivation steps:\n{steps_str}\n\n"
-        f"For each step, identify:\n"
-        f"  - Is it VALID, INVALID, or UNCERTAIN?\n"
-        f"  - If invalid/uncertain, explain the issue.\n\n"
-        f"Then give an overall verdict.\n\n"
-        f"Respond ONLY in this JSON format:\n"
-        f'{{"steps": [{{"step": 1, "valid": true, "issue": ""}}], '
-        f'"overall": "valid|invalid|uncertain", "confidence": 0.0-1.0, '
-        f'"corrected_claim": "...", "explanation": "..."}}'
+        "You are an impartial judge. Evaluate the debate and return strict JSON.\n"
+        "JSON schema: "
+        "{\"verdict\": \"supported|refuted|inconclusive\", \"synthesis\": string, "
+        "\"strongest_proponent_point\": string, \"strongest_critic_point\": string, "
+        "\"confidence\": number}\n"
+        f"Claim: {claim}\nTranscript: {rounds_blob}"
     )
 
 
-def parse_verification_response(response: str) -> dict:
-    """Parse step-by-step verification result from LLM response."""
-    try:
-        data = json.loads(response)
+def parse_debate_verdict(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is None:
         return {
-            "steps":            data.get("steps", []),
-            "overall":          data.get("overall", "uncertain"),
-            "confidence":       float(data.get("confidence", 0.5)),
-            "corrected_claim":  data.get("corrected_claim", ""),
-            "explanation":      data.get("explanation", response[:300]),
+            "verdict": "inconclusive",
+            "synthesis": str(response),
+            "strongest_proponent_point": "",
+            "strongest_critic_point": "",
+            "confidence": 0.5,
         }
-    except Exception:
-        overall = "valid" if "valid" in response.lower() else "uncertain"
-        return {
-            "steps": [], "overall": overall, "confidence": 0.5,
-            "corrected_claim": "", "explanation": response[:300],
-        }
+    verdict = str(parsed.get("verdict", "inconclusive")).strip().lower()
+    if verdict not in {"supported", "refuted", "inconclusive"}:
+        verdict = "inconclusive"
+    return {
+        "verdict": verdict,
+        "synthesis": str(parsed.get("synthesis", "")),
+        "strongest_proponent_point": str(parsed.get("strongest_proponent_point", "")),
+        "strongest_critic_point": str(parsed.get("strongest_critic_point", "")),
+        "confidence": _clamp01(parsed.get("confidence", 0.5)),
+    }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Reflection / retrospective loop
-# ─────────────────────────────────────────────────────────────────────────────
-
-def build_reflection_prompt(task: str, result: str, tool_trace: list) -> str:
-    """Build a post-task reflection prompt to extract learning signals."""
-    trace_str = "\n".join(
-        f"  [{t.get('action','?')}] {str(t.get('result',''))[:120]}"
-        for t in (tool_trace or [])[:10]
-    ) or "  (no tools used)"
+def build_hypothesis_generation_prompt(observation: str, max_hypotheses: int = 4) -> str:
+    cap = max(1, min(int(max_hypotheses), 8))
     return (
-        f"You are a retrospective analysis agent. Review this completed task and extract "
-        f"learning signals for future improvement.\n\n"
-        f"Task: {task}\n\n"
-        f"Tool trace:\n{trace_str}\n\n"
-        f"Final result (excerpt): {str(result)[:500]}\n\n"
-        f"Respond ONLY in this JSON format:\n"
-        f'{{"quality_score": 0.0-1.0, "what_worked": ["..."], "what_failed": ["..."], '
-        f'"lessons": ["..."], "suggested_improvements": ["..."], "summary": "..."}}'
+        "Generate candidate hypotheses as strict JSON.\n"
+        "JSON schema: {\"hypotheses\": [{\"id\": int, \"statement\": string, "
+        "\"initial_reasoning\": string, \"plausibility\": number}]}\n"
+        f"Observation: {observation}\nMaximum hypotheses: {cap}"
     )
 
 
-def parse_reflection_response(response: str) -> dict:
-    """Parse reflection/retrospective response."""
-    try:
-        data = json.loads(response)
+def parse_hypothesis_generation(response: str) -> list[dict[str, Any]]:
+    parsed = _json_or_none(response)
+    if parsed is None:
+        return [{
+            "id": 1,
+            "statement": str(response),
+            "initial_reasoning": "",
+            "plausibility": 0.5,
+        }]
+
+    raw_hypotheses = list(parsed.get("hypotheses", []))
+    result: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_hypotheses, start=1):
+        if not isinstance(item, dict):
+            continue
+        result.append(
+            {
+                "id": int(item.get("id", idx)),
+                "statement": str(item.get("statement", "")),
+                "initial_reasoning": str(item.get("initial_reasoning", "")),
+                "plausibility": _clamp01(item.get("plausibility", 0.5)),
+            }
+        )
+    if not result:
+        return [{"id": 1, "statement": str(response), "initial_reasoning": "", "plausibility": 0.5}]
+    return result
+
+
+def build_hypothesis_test_prompt(statement: str, observation: str) -> str:
+    return (
+        "Test this hypothesis against the observation and return strict JSON.\n"
+        "JSON schema: {\"evidence_for\": [string], \"evidence_against\": [string], "
+        "\"assumptions\": [string], \"verdict\": string, \"confidence\": number, "
+        "\"explanation\": string}\n"
+        f"Observation: {observation}\nHypothesis: {statement}"
+    )
+
+
+def parse_hypothesis_test(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is None:
         return {
-            "quality_score":           float(data.get("quality_score", 0.7)),
-            "what_worked":             data.get("what_worked", []),
-            "what_failed":             data.get("what_failed", []),
-            "lessons":                 data.get("lessons", []),
-            "suggested_improvements":  data.get("suggested_improvements", []),
-            "summary":                 data.get("summary", response[:200]),
+            "evidence_for": [],
+            "evidence_against": [],
+            "assumptions": [],
+            "verdict": "inconclusive",
+            "confidence": 0.5,
+            "explanation": str(response),
         }
-    except Exception:
+    return {
+        "evidence_for": [str(x) for x in list(parsed.get("evidence_for", []))],
+        "evidence_against": [str(x) for x in list(parsed.get("evidence_against", []))],
+        "assumptions": [str(x) for x in list(parsed.get("assumptions", []))],
+        "verdict": str(parsed.get("verdict", "inconclusive")),
+        "confidence": _clamp01(parsed.get("confidence", 0.5)),
+        "explanation": str(parsed.get("explanation", "")),
+    }
+
+
+def build_hypothesis_conclusion_prompt(observation: str, tested: list[dict[str, Any]]) -> str:
+    tested_blob = json.dumps(tested, ensure_ascii=False)
+    return (
+        "Synthesize tested hypotheses and return strict JSON.\n"
+        "JSON schema: {\"conclusion\": string, \"best_hypothesis_id\": int, "
+        "\"uncertainty\": string, \"next_steps\": [string], \"overall_confidence\": number}\n"
+        f"Observation: {observation}\nTested hypotheses: {tested_blob}"
+    )
+
+
+def parse_hypothesis_conclusion(response: str) -> dict[str, Any]:
+    parsed = _json_or_none(response)
+    if parsed is None:
         return {
-            "quality_score": 0.7, "what_worked": [], "what_failed": [],
-            "lessons": [], "suggested_improvements": [],
-            "summary": response[:200],
+            "conclusion": str(response),
+            "best_hypothesis_id": 0,
+            "uncertainty": "unknown",
+            "next_steps": [],
+            "overall_confidence": 0.5,
         }
+    return {
+        "conclusion": str(parsed.get("conclusion", "")),
+        "best_hypothesis_id": int(parsed.get("best_hypothesis_id", 0) or 0),
+        "uncertainty": str(parsed.get("uncertainty", "")),
+        "next_steps": [str(x) for x in list(parsed.get("next_steps", []))],
+        "overall_confidence": _clamp01(parsed.get("overall_confidence", 0.5)),
+    }

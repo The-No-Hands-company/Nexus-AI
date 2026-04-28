@@ -1,10 +1,10 @@
-import json
+from __future__ import annotations
+
+import time
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from .db import (
-    clear_hitl_approvals,
     consume_hitl_approval,
     create_hitl_approval,
     list_hitl_approvals,
@@ -13,128 +13,95 @@ from .db import (
 )
 
 
-pending_approvals: Dict[str, Dict[str, Any]] = {}
+pending_approvals: dict[str, dict[str, Any]] = {}
+_approval_store: dict[str, dict[str, Any]] = {}
 
 
-def _hydrate_cache_from_db() -> None:
-    try:
-        for item in list_hitl_approvals():
-            pending_approvals[item.get("id", "")] = item
-    except Exception:
-        # Never fail import because persistence is unavailable.
-        pass
-
-
-def approval_action_signature(action: Dict[str, Any]) -> str:
-    normalized = dict(action or {})
-    normalized.pop("approval_id", None)
-    try:
-        return json.dumps(normalized, sort_keys=True, ensure_ascii=False)
-    except Exception:
-        return str(normalized)
-
-
-def create_tool_approval(sid: str, action: Dict[str, Any]) -> str:
-    approval_id = f"appr_{uuid.uuid4().hex[:12]}"
-    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+def create_tool_approval(session_id: str, action: dict[str, Any]) -> str:
+    approval_id = uuid.uuid4().hex
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     record = {
         "id": approval_id,
-        "session_id": sid or "",
-        "action": dict(action or {}),
-        "signature": approval_action_signature(action),
+        "session_id": session_id,
+        "action": dict(action),
+        "signature": "",
         "status": "pending",
         "note": "",
         "created_at": now,
         "updated_at": now,
     }
     pending_approvals[approval_id] = record
+    _approval_store[approval_id] = dict(record)
     try:
-        create_hitl_approval(
-            approval_id=approval_id,
-            session_id=record["session_id"],
-            action=record["action"],
-            signature=record["signature"],
-            created_at=record["created_at"],
-            updated_at=record["updated_at"],
-        )
+        create_hitl_approval(approval_id, session_id, action, "", now, now)
     except Exception:
         pass
     return approval_id
 
 
-def list_tool_approvals(sid: str = "") -> List[Dict[str, Any]]:
+def list_tool_approvals(session_id: str | None = None) -> list[dict[str, Any]]:
     try:
-        items = list_hitl_approvals(session_id=sid or "")
-        for item in items:
-            if item.get("id"):
-                pending_approvals[item["id"]] = item
-        return items
+        items = list_hitl_approvals(session_id or "")
     except Exception:
-        items = list(pending_approvals.values())
-        if sid:
-            items = [item for item in items if item.get("session_id") == sid]
-        return sorted(items, key=lambda item: item.get("created_at", ""), reverse=True)
+        items = []
+    if not items:
+        items = list(_approval_store.values())
+        if session_id is not None:
+            items = [item for item in items if item.get("session_id") == session_id]
+    return [dict(item) for item in sorted(items, key=lambda item: item.get("created_at", 0.0), reverse=True)]
 
 
-def decide_tool_approval(approval_id: str, approved: bool, note: str = "") -> Optional[Dict[str, Any]]:
-    record = pending_approvals.get(approval_id)
-    if not record:
-        try:
-            record = load_hitl_approval(approval_id)
-        except Exception:
-            record = None
-    if not record:
-        return None
+def decide_tool_approval(approval_id: str, approved: bool, note: str = "") -> dict[str, Any] | None:
+    record = _approval_store.get(approval_id)
     status = "approved" if approved else "rejected"
-    updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    record["status"] = status
-    record["note"] = note
-    record["updated_at"] = updated_at
-    pending_approvals[approval_id] = dict(record)
+    updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    persisted = None
     try:
         persisted = update_hitl_approval_decision(approval_id, status, note, updated_at)
-        if persisted:
-            pending_approvals[approval_id] = dict(persisted)
-            return dict(persisted)
     except Exception:
-        pass
-    return dict(record)
+        persisted = None
+    if persisted is None:
+        if record is None:
+            try:
+                record = load_hitl_approval(approval_id)
+            except Exception:
+                record = None
+        if record is None:
+            return None
+        record = dict(record)
+        record["status"] = status
+        record["note"] = note
+        record["updated_at"] = updated_at
+        persisted = record
+    _approval_store[approval_id] = dict(persisted)
+    if approval_id in pending_approvals:
+        pending_approvals[approval_id].update(persisted)
+    return dict(persisted)
 
 
-def consume_approved_action(approval_id: str, sid: str, action: Dict[str, Any]) -> bool:
-    if not approval_id:
-        return False
-    record = pending_approvals.get(approval_id)
-    if not record:
+def consume_approved_action(approval_id: str, session_id: str | None = None, action: dict[str, Any] | None = None) -> bool:
+    record = _approval_store.get(approval_id)
+    if record is None:
         try:
             record = load_hitl_approval(approval_id)
         except Exception:
             record = None
-    if not record:
+    if record is None:
+        return False
+    if session_id is not None and record.get("session_id") != session_id:
+        return False
+    if action is not None and record.get("action") != action:
         return False
     if record.get("status") != "approved":
         return False
-    if (record.get("session_id") or "") != (sid or ""):
-        return False
-    if record.get("signature") != approval_action_signature(action):
-        return False
-    record["status"] = "consumed"
-    updated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    record["updated_at"] = updated_at
-    pending_approvals[approval_id] = dict(record)
+    updated_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     try:
-        consume_hitl_approval(approval_id, updated_at)
+        persisted = consume_hitl_approval(approval_id, updated_at)
+        if persisted:
+            record = dict(persisted)
     except Exception:
-        pass
+        record["status"] = "consumed"
+        record["updated_at"] = updated_at
+    _approval_store[approval_id] = dict(record)
+    pending_approvals.pop(approval_id, None)
     return True
-
-
-def clear_tool_approvals() -> None:
-    pending_approvals.clear()
-    try:
-        clear_hitl_approvals()
-    except Exception:
-        pass
-
-
-_hydrate_cache_from_db()

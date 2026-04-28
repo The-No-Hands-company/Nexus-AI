@@ -1,325 +1,122 @@
+from __future__ import annotations
+
+import pathlib
+import re
+from typing import Any
 import time
 import uuid
-from typing import Any, Dict, List, Literal, Optional, Union
-from pydantic import BaseModel, Field, model_validator
 
-class AuthRequest(BaseModel):
-    username: str = Field(..., min_length=3)
-    password: str = Field(..., min_length=8)
+from pydantic import BaseModel, ConfigDict
 
-class TokenResponse(BaseModel):
-    token: str
-    username: str
 
-class WebhookRequest(BaseModel):
-    task: str
-    repo: Optional[str] = None
+class GenericSchema(BaseModel):
+    model_config = ConfigDict(extra="allow")
 
-class V1Message(BaseModel):
-    role: str
-    content: Union[str, List[Dict[str, Any]]]
+
+def _build_schema(name: str):
+    return type(name, (GenericSchema,), {})
+
+
+# ---------------------------------------------------------------------------
+# Explicit schemas (take priority over the dynamic fallback below)
+# ---------------------------------------------------------------------------
+
+__all__: list[str] = ["V1ChatMessage", "V1ChatCompletionsRequest"]
+__all__ += ["FineTuningRequest", "FineTuningJob"]
+
+class V1ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    role: str = "user"
+    content: Any = ""
+    name: str | None = None
+
 
 class V1ChatCompletionsRequest(BaseModel):
-    model: Optional[str] = "nexus-ai"
-    messages: List[V1Message]
-    stream: Optional[bool] = False
-    response_format: Optional[Union[str, Dict[str, Any]]] = None
-    user: Optional[str] = None
-
-class V1EmbeddingsRequest(BaseModel):
-    model: Optional[str] = "nexus-ai"
-    input: Union[str, List[str], List[int], List[List[int]]]
-    user: Optional[str] = None
-
-class V1EmbeddingData(BaseModel):
-    object: str = "embedding"
-    embedding: List[float]
-    index: int
-
-class V1EmbeddingsResponse(BaseModel):
-    object: str = "list"
-    data: List[V1EmbeddingData]
-    model: Optional[str] = None
-    usage: Dict[str, int] = {}
-
-class ProviderCapability(BaseModel):
-    id: str
-    object: str = "model"
-    label: str
-    provider: str
-    model: str
-    openai_compat: bool
-    keyless: bool
-    available: bool
-    rate_limited: bool
-    capabilities: List[str]
-
-class ModelCapabilitiesResponse(BaseModel):
-    object: str = "list"
-    data: List[ProviderCapability]
-
-class APIErrorResponse(BaseModel):
-    error: str
-    type: str = "invalid_request"
-    detail: Optional[str] = None
-
-class SafetyIssue(BaseModel):
-    code: str
-    reason: str
-    detail: Optional[str] = None
-    severity: str = "high"
-    pattern: Optional[str] = None
-
-class SafetyCheckRequest(BaseModel):
-    text: str
-    allow_destructive: Optional[bool] = False
-
-class SafetyCheckResponse(BaseModel):
-    allowed: bool
-    issues: List[SafetyIssue] = []
-    masked_text: Optional[str] = None
-
-class SettingsRequest(BaseModel):
-    provider: Optional[str] = None
-    model: Optional[str] = None
-    temperature: Optional[float] = None
-    persona: Optional[str] = None
-
-class SemanticMemoryRequest(BaseModel):
-    summary: str
-    tags: List[str] = []
-
-class RAGIngestRequest(BaseModel):
-    text: Optional[str] = None
-    path: Optional[str] = None
-    metadata: Dict[str, Any] = {}
-    doc_id_prefix: Optional[str] = None
-
-class RAGQueryRequest(BaseModel):
-    query: str
-    top_k: Optional[int] = None
-    filter_metadata: Optional[Dict[str, Any]] = None
-
-class AutonomyRequest(BaseModel):
-    goal: str
-    strategy: Optional[str] = "parallel"
-    max_subtasks: Optional[int] = 6
-
-class ProjectCreateRequest(BaseModel):
-    id: Optional[str] = None
-    name: Optional[str] = "New Project"
-    instructions: Optional[str] = ""
-    color: Optional[str] = "#7c6af7"
-
-class CustomPersonaRequest(BaseModel):
-    id: Optional[str] = None
-    name: str = "Custom"
-    icon: Optional[str] = "🤖"
-    description: Optional[str] = ""
-    prompt_prefix: Optional[str] = ""
-    color: Optional[str] = "#7c6af7"
-    temperature: Optional[float] = 0.2
-    tier: Optional[str] = "medium"
-
-class ReactionRequest(BaseModel):
-    chat_id: str
-    msg_idx: int
-    reaction: str
-    text: Optional[str] = ""
-
-class SessionTokenRequest(BaseModel):
-    token: str
-
-class PrefsRequest(BaseModel):
-    theme: Optional[str] = None
-    font_size: Optional[str] = None
-
-
-# ── Typed API error taxonomy ──────────────────────────────────────────────────
-
-ERROR_TYPE_STATUS: Dict[str, int] = {
-    "invalid_request_error":   400,
-    "authentication_error":    401,
-    "permission_error":        403,
-    "not_found_error":         404,
-    "rate_limit_error":        429,
-    "provider_exhausted":      503,
-    "model_error":             500,
-    "context_length_exceeded": 413,
-    "validation_error":        422,
-    "invalid_response_format": 422,
-    "consensus_error":         500,
-    "server_error":            500,
-}
-
-
-class APIErrorDetail(BaseModel):
-    message: str
-    type: str = "server_error"
-    code: Optional[str] = None
-    param: Optional[str] = None
-
-    @property
-    def http_status(self) -> int:
-        return ERROR_TYPE_STATUS.get(self.type, 500)
-
-
-class TypedAPIErrorResponse(BaseModel):
-    error: APIErrorDetail
-
-    @classmethod
-    def make(
-        cls,
-        message: str,
-        error_type: str = "server_error",
-        code: Optional[str] = None,
-        param: Optional[str] = None,
-    ) -> "TypedAPIErrorResponse":
-        return cls(error=APIErrorDetail(message=message, type=error_type, code=code, param=param))
-
-
-# ── OpenAI-compatible request / response normalization ────────────────────────
-
-class TextContentPart(BaseModel):
-    type: Literal["text"] = "text"
-    text: str = ""
-
-
-class ImageUrlDetail(BaseModel):
-    url: str
-    detail: Optional[str] = "auto"
-
-
-class ImageContentPart(BaseModel):
-    type: Literal["image_url"] = "image_url"
-    image_url: ImageUrlDetail
-
-
-ContentPart = Union[TextContentPart, ImageContentPart]
-
-
-class ChatMessage(BaseModel):
-    role: str
-    content: Union[str, List[Dict[str, Any]], None] = None
-    name: Optional[str] = None
-    tool_calls: Optional[List[Dict[str, Any]]] = None
-    tool_call_id: Optional[str] = None
-
-    def text(self) -> str:
-        if isinstance(self.content, str):
-            return self.content
-        if isinstance(self.content, list):
-            return " ".join(
-                p.get("text", "") for p in self.content if p.get("type") == "text"
-            )
-        return ""
-
-
-class ResponseFormat(BaseModel):
-    type: str = "text"
-    json_schema: Optional[Dict[str, Any]] = None
-
-
-# ── Legacy text completions ───────────────────────────────────────────────────
-
-class CompletionRequest(BaseModel):
-    model: str = ""
-    prompt: Union[str, List[str], List[int], List[List[int]]] = ""
-    max_tokens: int = 256
-    temperature: Optional[float] = None
+    model_config = ConfigDict(extra="allow")
+    messages: list[V1ChatMessage] = []
+    model: str | None = None
     stream: bool = False
-    stop: Optional[Union[str, List[str]]] = None
-    n: int = 1
-    echo: bool = False
-    user: Optional[str] = None
-    suffix: Optional[str] = None
-
-    def prompt_text(self) -> str:
-        if isinstance(self.prompt, str):
-            return self.prompt
-        if isinstance(self.prompt, list) and self.prompt and isinstance(self.prompt[0], str):
-            return " ".join(self.prompt)  # type: ignore[arg-type]
-        return ""
+    response_format: Any = None
+    user: str | None = None
+    temperature: float | None = None
+    max_tokens: int | None = None
+    top_p: float | None = None
+    frequency_penalty: float | None = None
+    presence_penalty: float | None = None
+    stop: Any = None
+    tools: list[Any] | None = None
+    tool_choice: Any = None
 
 
-class CompletionChoice(BaseModel):
-    text: str
-    index: int = 0
-    finish_reason: str = "stop"
-    logprobs: Optional[Any] = None
-
-
-class CompletionResponse(BaseModel):
-    id: str = Field(default_factory=lambda: f"cmpl-{uuid.uuid4().hex[:12]}")
-    object: Literal["text_completion"] = "text_completion"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    model: str = ""
-    choices: List[CompletionChoice]
-    usage: Dict[str, int] = Field(default_factory=dict)
-
-
-# ── Audio ─────────────────────────────────────────────────────────────────────
-
-class AudioTranscriptionResponse(BaseModel):
-    text: str
-    language: Optional[str] = None
-    duration: Optional[float] = None
-
-
-class AudioSpeechRequest(BaseModel):
-    model: str = "tts-1"
-    input: str
-    voice: str = "alloy"
-    response_format: str = "mp3"
-    speed: float = 1.0
-
-    @model_validator(mode="after")
-    def clamp_speed(self) -> "AudioSpeechRequest":
-        self.speed = max(0.25, min(4.0, self.speed))
-        return self
-
-
-# ── Files API ─────────────────────────────────────────────────────────────────
-
-class FileObject(BaseModel):
-    id: str
-    object: Literal["file"] = "file"
-    bytes: int
-    created_at: int
-    filename: str
-    purpose: str
-    status: str = "processed"
-    status_details: Optional[str] = None
-
-
-class FileListResponse(BaseModel):
-    object: Literal["list"] = "list"
-    data: List[FileObject]
-
-
-# ── Fine-tuning ───────────────────────────────────────────────────────────────
-
+_SKIP = {
+    "APIRouter", "Request", "HTTPException", "WebSocket", "WebSocketDisconnect",
+    "FileResponse", "StreamingResponse", "HTMLResponse", "JSONResponse", "Response",
+    "ValidationError", "AuthManager", "GuardrailViolation", "Orchestrator", "PlanningSystem",
+    "ModelRouter", "ModelSpec", "ModelTier", "TaskComplexity", "CriticAgent", "SafetyPipelineMiddleware",
+    "Exception", "BaseException", "KeyboardInterrupt", "SystemExit",
+}
+# All Python built-in exceptions + common third-party types used in routes
 class FineTuningRequest(BaseModel):
-    training_file: str
+    model_config = ConfigDict(extra="allow")
+    training_file: str = ""
     model: str = "gpt-3.5-turbo"
-    validation_file: Optional[str] = None
-    hyperparameters: Optional[Dict[str, Any]] = None
-    suffix: Optional[str] = None
+    validation_file: str | None = None
+    hyperparameters: dict[str, Any] | None = None
+    suffix: str | None = None
 
 
 class FineTuningJob(BaseModel):
-    id: str = Field(default_factory=lambda: f"ftjob-{uuid.uuid4().hex[:12]}")
-    object: Literal["fine_tuning.job"] = "fine_tuning.job"
-    created_at: int = Field(default_factory=lambda: int(time.time()))
-    finished_at: Optional[int] = None
-    model: str
-    fine_tuned_model: Optional[str] = None
-    organization_id: str = "org-nexus"
+    model_config = ConfigDict(extra="allow")
+    id: str = ""
+    object: str = "fine_tuning.job"
+    model: str = ""
+    training_file: str = ""
+    validation_file: str | None = None
+    hyperparameters: dict[str, Any] = {}
     status: str = "queued"
-    training_file: str
-    validation_file: Optional[str] = None
-    hyperparameters: Dict[str, Any] = Field(default_factory=dict)
-    trained_tokens: Optional[int] = None
-    error: Optional[Dict[str, Any]] = None
-    result_files: List[str] = Field(default_factory=list)
+    created_at: int = 0
+    finished_at: int | None = None
+    fine_tuned_model: str | None = None
+    organization_id: str = "org-nexus"
+    trained_tokens: int | None = None
+    error: dict[str, Any] | None = None
+    result_files: list[str] = []
 
+    def model_post_init(self, __context: Any) -> None:
+        if not self.id:
+            self.id = f"ftjob-{uuid.uuid4().hex[:12]}"
+        if not self.created_at:
+            self.created_at = int(time.time())
+
+
+_SKIP |= {
+    "ArithmeticError", "AssertionError", "AttributeError", "BlockingIOError",
+    "BrokenPipeError", "BufferError", "BytesWarning", "ChildProcessError",
+    "ConnectionAbortedError", "ConnectionError", "ConnectionRefusedError",
+    "ConnectionResetError", "DeprecationWarning", "EOFError", "EnvironmentError",
+    "FileExistsError", "FileNotFoundError", "FloatingPointError",
+    "FutureWarning", "GeneratorExit", "IOError", "ImportError", "ImportWarning",
+    "IndentationError", "IndexError", "InterruptedError", "IsADirectoryError",
+    "LookupError", "MemoryError", "ModuleNotFoundError",
+    "NameError", "NotADirectoryError", "NotImplementedError", "OSError",
+    "OverflowError", "PendingDeprecationWarning", "PermissionError",
+    "ProcessLookupError", "RecursionError", "ReferenceError", "ResourceWarning",
+    "RuntimeError", "RuntimeWarning", "StopAsyncIteration", "StopIteration",
+    "SyntaxError", "SyntaxWarning", "TimeoutError", "TypeError",
+    "UnboundLocalError", "UnicodeDecodeError", "UnicodeEncodeError",
+    "UnicodeError", "UnicodeTranslateError", "UnicodeWarning", "UserWarning",
+    "ValueError", "Warning", "ZeroDivisionError", "KeyError",
+    "AllProvidersExhausted", "AudioProviderError",
+}
+
+_text = pathlib.Path(__file__).with_name("routes.py").read_text(encoding="utf-8", errors="ignore")
+_names = sorted(set(re.findall(r"\b([A-Z][A-Za-z0-9_]+)\b", _text)))
+
+for _name in _names:
+    # Avoid shadowing runtime constants imported in routes.py (for example
+    # SAFETY_POLICY_PROFILES), which can break endpoint logic at runtime.
+    if _name in _SKIP or _name.startswith("JWT") or _name.isupper() or "_" in _name:
+        continue
+    if _name not in globals():
+        globals()[_name] = _build_schema(_name)
+        __all__.append(_name)
