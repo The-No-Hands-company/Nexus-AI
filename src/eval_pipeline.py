@@ -223,6 +223,97 @@ def run_adapter_proof_report(
         "max_regressions": int(max_regressions),
         "regression_threshold": float(regression_threshold),
         "gate_passed": bool(passes_gate),
+        "passes": bool(passes_gate),
         "suite_results": benchmark.get("suite_results", []),
+    }
+    return save_adapter_proof_report(report)
+
+
+def run_baseline_vs_adapter_eval(
+    base_model: str,
+    adapter_id: str,
+    adapter_version: str,
+    provider: str = "offline",
+    suites: list[str] | None = None,
+    n_samples: int = 20,
+    min_improvement: float = 0.0,
+    max_regressions: int = 1,
+) -> dict[str, Any]:
+    """Run baseline-vs-adapter scoring and persist a proof-style report.
+
+    This runs the same suite twice:
+    1. Baseline run (no adapter_id)
+    2. Adapter run (with adapter_id)
+
+    The resulting report is saved through save_adapter_proof_report so existing
+    adapter lifecycle endpoints can consume it.
+    """
+    suites = suites or ["code", "reasoning", "safety"]
+
+    baseline = run_eval_suite(
+        model=base_model,
+        provider=provider,
+        suites=suites,
+        n_samples=n_samples,
+        adapter_id=None,
+    )
+    adapted = run_eval_suite(
+        model=base_model,
+        provider=provider,
+        suites=suites,
+        n_samples=n_samples,
+        adapter_id=adapter_id,
+    )
+
+    baseline_by_suite = {
+        str(item.get("suite") or ""): float(item.get("score") or 0.0)
+        for item in baseline.get("results", [])
+    }
+    adapter_by_suite = {
+        str(item.get("suite") or ""): float(item.get("score") or 0.0)
+        for item in adapted.get("results", [])
+    }
+
+    suite_deltas: list[dict[str, Any]] = []
+    regressions = 0
+    for suite in suites:
+        suite_name = str(suite)
+        base_score = float(baseline_by_suite.get(suite_name, 0.0))
+        adapter_score = float(adapter_by_suite.get(suite_name, 0.0))
+        delta = round(adapter_score - base_score, 6)
+        if delta < 0:
+            regressions += 1
+        suite_deltas.append(
+            {
+                "suite": suite_name,
+                "baseline_score": base_score,
+                "adapter_score": adapter_score,
+                "delta": delta,
+            }
+        )
+
+    baseline_avg = float(baseline.get("average_score") or 0.0)
+    adapter_avg = float(adapted.get("average_score") or 0.0)
+    avg_delta = round(adapter_avg - baseline_avg, 6)
+    passes = avg_delta >= float(min_improvement) and regressions <= int(max_regressions)
+
+    report = {
+        "adapter_id": adapter_id,
+        "adapter_version": adapter_version,
+        "base_model": base_model,
+        "provider": provider,
+        "suites": suites,
+        "n_samples": int(max(1, n_samples)),
+        "baseline_average_score": baseline_avg,
+        "adapter_average_score": adapter_avg,
+        "improvement": avg_delta,
+        "regressions": regressions,
+        "min_improvement": float(min_improvement),
+        "max_regressions": int(max_regressions),
+        "gate_passed": bool(passes),
+        "passes": bool(passes),
+        "suite_results": suite_deltas,
+        "baseline": baseline,
+        "adapter": adapted,
     }
     return save_adapter_proof_report(report)

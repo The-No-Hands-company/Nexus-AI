@@ -2,6 +2,12 @@
 
 This folder is home. Treat it that way.
 
+## Engineering Standards
+
+- Follow ../docs/ENGINEERING_STANDARDS.md as the baseline for Python quality, API behavior, security, and testing.
+- Python changes must satisfy strict static analysis defaults from pyproject.toml.
+- Prefer durable fixes with typed interfaces and explicit validation over permissive runtime behavior.
+
 ## First Run
 
 If `BOOTSTRAP.md` exists, that's your birth certificate. Follow it, figure out who you are, then delete it. You won't need it again.

@@ -2924,9 +2924,15 @@ async def benchmark_eval_suite(request: Request):
             n_samples=int(body.get("n_samples") or 20),
             adapter_id=body.get("adapter_id"),
         )
+        jobs = []
+        for job in result.get("jobs") or []:
+            if isinstance(job, dict):
+                jobs.append(job)
+            else:
+                jobs.append(getattr(job, "__dict__", {"value": str(job)}))
         return {
             **{k: v for k, v in result.items() if k != "jobs"},
-            "jobs": [job.__dict__ for job in result["jobs"]],
+            "jobs": jobs,
         }
     except ValueError as exc:
         return _api_error(str(exc), "validation_error", 422)
@@ -3173,6 +3179,25 @@ def _estimate_text_tokens(text: str) -> int:
         return 0
     return len(normalized.split())
 
+
+def _resolve_provider_order_from_model(model: str) -> list[str] | None:
+    raw = str(model or "").strip()
+    if not raw:
+        return None
+    normalized = raw
+    if normalized.startswith("nexus-ai/"):
+        normalized = normalized.split("/", 1)[1].strip()
+    elif normalized == "nexus-ai":
+        normalized = "auto"
+
+    if normalized in {"", "auto"}:
+        return None
+
+    available = {str(p.get("id") or "").strip() for p in get_providers_list() if isinstance(p, dict)}
+    if normalized in available:
+        return [normalized]
+    return None
+
 @router.post("/v1/embeddings")
 async def v1_embeddings(request: Request):
     try:
@@ -3215,6 +3240,14 @@ async def v1_chat_completions(request: Request):
     messages = payload.messages
     stream = payload.stream
     model = payload.model
+    model_provider_order = _resolve_provider_order_from_model(model)
+    if str(model or "").strip() and model_provider_order is None and str(model).strip() not in {"nexus-ai", "nexus-ai/auto", "auto"}:
+        return _v1_error(
+            f"Model '{model}' not found",
+            "not_found_error",
+            404,
+            "model_not_found",
+        )
     response_format = payload.response_format
     payload_user = payload.user or ""
 
@@ -3299,7 +3332,7 @@ async def v1_chat_completions(request: Request):
             async def _vision_stream():
                 try:
                     _vr, _vp = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: call_llm_with_fallback(_raw_msgs_s, task="vision")
+                        None, lambda: call_llm_with_fallback(_raw_msgs_s, task="vision", provider_order=model_provider_order)
                     )
                     _vc = _vr.get("content", str(_vr))
                 except Exception as _exc:
@@ -3314,6 +3347,40 @@ async def v1_chat_completions(request: Request):
 
             return StreamingResponse(_vision_stream(), media_type="text/event-stream",
                                       headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+        if model_provider_order:
+            _raw_msgs_s = []
+            for _m in turns:
+                if isinstance(_m.content, list):
+                    _raw_msgs_s.append({"role": _m.role, "content": _m.content})
+                else:
+                    _raw_msgs_s.append({"role": _m.role, "content": str(_m.content)})
+            if system_parts:
+                _raw_msgs_s.insert(0, {"role": "system", "content": " ".join(system_parts)})
+
+            async def _provider_stream():
+                try:
+                    _resp, _pid = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: call_llm_with_fallback(_raw_msgs_s, task=task, provider_order=model_provider_order),
+                    )
+                    _content = _resp.get("content", str(_resp))
+                except Exception as _exc:
+                    _pid = model_provider_order[0]
+                    _content = f"Provider error: {_exc}"
+                _chunk = {
+                    "id": cid,
+                    "object": "chat.completion.chunk",
+                    "created": created,
+                    "model": model,
+                    "choices": [{"index": 0, "delta": {"content": _content}, "finish_reason": "stop"}],
+                    "_nexus": {"provider": _pid},
+                }
+                yield f"data: {json.dumps(_chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+
+            return StreamingResponse(_provider_stream(), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
         def _run():
             try:
@@ -3399,11 +3466,26 @@ async def v1_chat_completions(request: Request):
         if system_parts:
             _raw_msgs.insert(0, {"role": "system", "content": " ".join(system_parts)})
         try:
-            _vision_resp, _vision_pid = call_llm_with_fallback(_raw_msgs, task="vision")
+            _vision_resp, _vision_pid = call_llm_with_fallback(_raw_msgs, task="vision", provider_order=model_provider_order)
             output = _vision_resp.get("content", str(_vision_resp))
             _result_provider = _vision_pid
         except Exception as exc:
             return _v1_error(str(exc), "vision_error", 500, "vision_error")
+    elif model_provider_order:
+        _raw_msgs = []
+        for m in turns:
+            if isinstance(m.content, list):
+                _raw_msgs.append({"role": m.role, "content": m.content})
+            else:
+                _raw_msgs.append({"role": m.role, "content": str(m.content)})
+        if system_parts:
+            _raw_msgs.insert(0, {"role": "system", "content": " ".join(system_parts)})
+        try:
+            _direct_resp, _direct_pid = call_llm_with_fallback(_raw_msgs, task=task, provider_order=model_provider_order)
+            output = _direct_resp.get("content", str(_direct_resp))
+            _result_provider = _direct_pid
+        except Exception as exc:
+            return _v1_error(str(exc), "provider_error", 500, "provider_error")
     else:
         result = run_agent_task(task, history, [], sid=sid)
         output = result.get("result", "")
@@ -12918,14 +13000,19 @@ async def privacy_data_deletion_request(request: Request):
             resource = f"user:{subject_id}"
         else:
             from ..orgs import get_org
-            from ..db import delete_org_data as _delete_org_data
+            from ..db import db_get_org_by_name, delete_org_data as _delete_org_data
             org = get_org(subject_id)
+            if not org:
+                # Support subject_id passed as org name for compatibility with
+                # clients/tests that only keep the requested org slug.
+                org = db_get_org_by_name(subject_id)
             if not org:
                 return _api_error("org not found", "not_found", 404)
             if org.get("owner") != actor:
                 require_admin(request)
-            deleted = _delete_org_data(subject_id)
-            resource = f"org:{subject_id}"
+            org_id = str(org.get("id") or subject_id)
+            deleted = _delete_org_data(org_id)
+            resource = f"org:{org_id}"
 
         try:
             write_audit_log(

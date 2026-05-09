@@ -420,6 +420,22 @@ PROVIDERS: Dict[str, Dict] = {
                      "signup_url":"https://lmstudio.ai","limits":"Unlimited — local hardware only",
                      "free_model":None,"notes":"Enable local server in LM Studio settings (default port 1234)."},
     },
+    "apex": {
+        "label": "Apex (Local Foundation)",
+        "env_key": "",
+        "default_model": os.getenv("APEX_MODEL_NAME", "apex"),
+        "openai_compat": False,
+        "keyless": True,
+        "local": True,
+        "free_tier": {
+            "available": True,
+            "cc_required": False,
+            "signup_url": "",
+            "limits": "Unlimited — local hardware only",
+            "free_model": None,
+            "notes": "Set APEX_MODEL_DIR to your trained checkpoint directory.",
+        },
+    },
     # ── Ongoing free tier — API key required, no credit card ──────────────────
     "groq": {
         "label":"Groq","base_url":"https://api.groq.com/openai/v1",
@@ -796,7 +812,7 @@ PROVIDERS: Dict[str, Dict] = {
 
 # ── complexity + provider routing ─────────────────────────────────────────────
 PROVIDER_TIERS = {
-    "high":   ["ollama","lmstudio","claude","grok","gemini","gemma","openrouter","mistral",
+    "high":   ["ollama","apex","lmstudio","claude","grok","gemini","gemma","openrouter","mistral",
                "moonshot","sambanova","together","deepseek","dashscope",
                "hyperbolic","fireworks","chutes","kluster","nebius","upstage","ai21","openai"],
     "medium": ["groq","cerebras","cohere","github_models","nvidia","gemma","siliconflow",
@@ -814,6 +830,7 @@ PROVIDER_TIERS = {
 _PROVIDER_COST_PER_1K_TOKENS: Dict[str, float] = {
     # Always free — local / keyless
     "ollama":           0.000,
+    "apex":             0.000,
     "lmstudio":         0.000,
     "llm7":             0.000,
     # Ongoing free tier — API key required, no CC
@@ -891,14 +908,14 @@ _provider_warmup_failure_strikes: Dict[str, int] = {}
 
 # ── Mixture-of-Experts specialization routing ─────────────────────────────────
 PROVIDER_SPECIALIZATIONS: Dict[str, List[str]] = {
-    "coding":    ["ollama", "claude", "groq", "cerebras", "github_models",
+    "coding":    ["apex", "ollama", "claude", "groq", "cerebras", "github_models",
                   "deepseek", "moonshot", "fireworks", "mistral_codestral",
                   "together", "hyperbolic", "sambanova"],
-    "research":  ["gemini", "gemma", "grok", "openrouter", "claude", "mistral",
+    "research":  ["apex", "gemini", "gemma", "grok", "openrouter", "claude", "mistral",
                   "perplexity", "moonshot", "deepseek", "nebius"],
-    "creative":  ["claude", "gemini", "gemma", "mistral", "openrouter",
+    "creative":  ["apex", "claude", "gemini", "gemma", "mistral", "openrouter",
                   "together", "hyperbolic", "novita"],
-    "reasoning": ["ollama", "claude", "grok", "gemini", "gemma",
+    "reasoning": ["apex", "ollama", "claude", "grok", "gemini", "gemma",
                   "deepseek", "moonshot", "sambanova", "chutes"],
 }
 _CODING_RE   = re.compile(
@@ -1656,6 +1673,19 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
             if pid in avail and pid not in ordered: ordered.append(pid)
     for pid in PROVIDERS:
         if pid in avail and pid not in ordered: ordered.append(pid)
+
+    # Keep all configured non-rate-limited providers in the candidate list,
+    # even if transient availability state filtered them earlier. The runtime
+    # provider loop still applies temporary-unavailability checks before calls.
+    configured = [
+        pid
+        for pid, cfg in PROVIDERS.items()
+        if _has_key(cfg) and not _is_rate_limited(pid)
+    ]
+    for pid in configured:
+        if pid not in ordered:
+            ordered.append(pid)
+
     if pref != "auto" and pref in ordered:
         ordered.remove(pref); ordered.insert(0, pref)
 
@@ -1705,6 +1735,16 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
         affordable = [pid for pid in ordered if _PROVIDER_COST_PER_1K_TOKENS.get(pid, 0.0) <= max_cost]
         if affordable:
             ordered = affordable
+            # Keep explicitly configured providers in the candidate set as
+            # lower-priority fallbacks so auto mode does not collapse to llm7.
+            configured_fallbacks = [
+                pid
+                for pid, cfg in PROVIDERS.items()
+                if _has_key(cfg) and not _is_rate_limited(pid)
+            ]
+            for pid in configured_fallbacks:
+                if pid not in ordered:
+                    ordered.append(pid)
 
     # Mixture-of-Experts: boost specialist providers to front when task type detected
     if pref == "auto" and resource_hint != "constrained":
@@ -1728,6 +1768,11 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
         best_model = get_best_ollama_model(otype)
         # Temporarily override Ollama default_model for this call cycle
         PROVIDERS["ollama"]["_selected_model"] = best_model
+
+    # Final auto-mode safeguard: keep llm7 as last-resort fallback regardless
+    # of subsequent routing boosts/overrides.
+    if pref == "auto" and "llm7" in ordered and len(ordered) > 1:
+        ordered = [p for p in ordered if p != "llm7"] + ["llm7"]
 
     return ordered
 
@@ -3209,6 +3254,64 @@ def _call_claude_api(messages):
     return _parse_json(" ".join(text_parts))
 
 
+_APEX_CACHE: Dict[str, Any] = {}
+
+
+def _call_apex_local(messages: List[Dict], system_prompt: str | None = None) -> Dict[str, Any]:
+    model_dir = str(os.getenv("APEX_MODEL_DIR", "/tmp/apex_foundation/latest/model")).strip()
+    if not model_dir:
+        raise ValueError("APEX_MODEL_DIR is not configured")
+
+    try:
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+    except Exception as exc:
+        raise RuntimeError("Apex local runtime requires transformers and torch") from exc
+
+    cache_key = model_dir
+    tokenizer = _APEX_CACHE.get(f"{cache_key}:tokenizer")
+    model = _APEX_CACHE.get(f"{cache_key}:model")
+    if tokenizer is None or model is None:
+        tokenizer = AutoTokenizer.from_pretrained(model_dir, use_fast=True)
+        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        model = AutoModelForCausalLM.from_pretrained(model_dir)
+        _APEX_CACHE[f"{cache_key}:tokenizer"] = tokenizer
+        _APEX_CACHE[f"{cache_key}:model"] = model
+
+    prompt_parts: List[str] = []
+    if system_prompt:
+        prompt_parts.append(f"<system>\n{system_prompt}")
+    for msg in messages:
+        role = str(msg.get("role") or "user").strip().lower()
+        content = msg.get("content")
+        if isinstance(content, list):
+            content = " ".join(
+                str(part.get("text") or "") for part in content if isinstance(part, dict)
+            )
+        text = str(content or "").strip()
+        if not text:
+            continue
+        prompt_parts.append(f"<{role}>\n{text}")
+    prompt_parts.append("<assistant>\n")
+    prompt = "\n\n".join(prompt_parts)
+
+    encoded = tokenizer(prompt, return_tensors="pt")
+    with torch.no_grad():
+        output = model.generate(
+            **encoded,
+            max_new_tokens=int(os.getenv("APEX_MAX_NEW_TOKENS", "256")),
+            do_sample=True,
+            temperature=float(os.getenv("APEX_TEMPERATURE", "0.7")),
+            top_p=float(os.getenv("APEX_TOP_P", "0.95")),
+            eos_token_id=tokenizer.eos_token_id,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+
+    generated = tokenizer.decode(output[0][encoded["input_ids"].shape[-1]:], skip_special_tokens=True).strip()
+    return _parse_json(generated)
+
+
 def _call_single(
     pid: str,
     messages: List[Dict],
@@ -3221,6 +3324,7 @@ def _call_single(
         return _call_openai(cfg, messages, tools=tools, system_prompt=system_prompt)
     # Non-OpenAI-compat providers don't support the tools= path yet — fall back
     # to the legacy JSON-text call (tools param is silently ignored).
+    if pid == "apex":   return _call_apex_local(messages, system_prompt=system_prompt)
     if pid == "grok":   return _call_grok(messages)
     if pid == "claude": return _call_claude_api(messages)
     raise ValueError(f"No caller: {pid}")
@@ -5514,6 +5618,7 @@ def warmup_agent(
 # ── UI helpers ────────────────────────────────────────────────────────────────
 # ── provider capability matrix ───────────────────────────────────────────────
 PROVIDER_CAPABILITIES: Dict[str, Dict[str, bool]] = {
+    "apex":           {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": False},
     "ollama":         {"vision": True,  "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
     "llm7":           {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
     "groq":           {"vision": False, "json_mode": True,  "tools": True,  "reasoning": True,  "streaming": True},
@@ -5542,6 +5647,7 @@ for _provider_id in PROVIDERS:
 
 # ── provider benchmark baselines (latency_ms, quality_score 0-100) ─────────────
 _PROVIDER_BENCHMARKS: Dict[str, Dict[str, Any]] = {
+    "apex":          {"latency_ms": 900,  "quality": 78, "tier": "high",   "cost_tier": "free"},
     "ollama":        {"latency_ms": 500,  "quality": 75, "tier": "high",   "cost_tier": "free"},
     "llm7":          {"latency_ms": 2000, "quality": 60, "tier": "low",    "cost_tier": "free"},
     "groq":          {"latency_ms": 800,  "quality": 72, "tier": "medium", "cost_tier": "paid"},
@@ -5565,12 +5671,12 @@ for _provider_id in PROVIDERS:
 
 # ── per-persona provider overrides ────────────────────────────────────────────
 _PERSONA_PROVIDER_OVERRIDES: Dict[str, List[str]] = {
-    "general":   ["ollama", "claude", "gemini", "grok", "openrouter"],
-    "coder":     ["ollama", "claude", "groq", "cerebras", "github_models"],
-    "researcher": ["gemini", "grok", "openrouter", "claude", "mistral"],
-    "creative":  ["claude", "gemini", "mistral", "openrouter"],
-    "architect": ["claude", "grok", "gemini", "openrouter"],
-    "nexus_prime_alpha": ["ollama", "llm7", "groq", "cerebras", "claude"],
+    "general":   ["apex", "ollama", "claude", "gemini", "grok", "openrouter"],
+    "coder":     ["apex", "ollama", "claude", "groq", "cerebras", "github_models"],
+    "researcher": ["apex", "gemini", "grok", "openrouter", "claude", "mistral"],
+    "creative":  ["apex", "claude", "gemini", "mistral", "openrouter"],
+    "architect": ["apex", "claude", "grok", "gemini", "openrouter"],
+    "nexus_prime_alpha": ["apex", "ollama", "llm7", "groq", "cerebras", "claude"],
 }
 
 def get_provider_health() -> Dict[str, Any]:

@@ -9,6 +9,7 @@ from __future__ import annotations
 # Static provider metadata (latency in seconds, cost per 1k tokens, tools)
 # ---------------------------------------------------------------------------
 _PROVIDER_META: dict[str, dict] = {
+    "apex":    {"avg_latency": 1.2,  "cost_per_1k": 0.0,   "supports_tools": True},
     "groq":    {"avg_latency": 0.5,  "cost_per_1k": 0.01,  "supports_tools": True},
     "openai":  {"avg_latency": 1.0,  "cost_per_1k": 0.15,  "supports_tools": True},
     "anthropic": {"avg_latency": 1.2, "cost_per_1k": 0.15, "supports_tools": True},
@@ -20,6 +21,7 @@ _PROVIDER_META: dict[str, dict] = {
 
 # Default fallback chain per provider (excludes the provider itself)
 _FALLBACK_CHAINS: dict[str, list[str]] = {
+    "apex":     ["ollama", "groq", "mistral", "openai"],
     "groq":     ["mistral", "together", "openai", "ollama"],
     "openai":   ["anthropic", "groq", "mistral", "ollama"],
     "anthropic": ["openai", "groq", "mistral", "ollama"],
