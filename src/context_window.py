@@ -16,7 +16,8 @@ class ContextWindowManager:
         self.config = config or ContextWindowConfig()
 
     def _token_count(self, message: dict) -> int:
-        return max(1, len(str(message.get("content", ""))) // 4)
+        # Use the same heuristic as _estimate_tokens: ~3.5 chars/token for English
+        return max(1, len(str(message.get("content", ""))) * 2 // 7)
 
     def token_breakdown(self, history: list[dict]) -> list[dict]:
         return [

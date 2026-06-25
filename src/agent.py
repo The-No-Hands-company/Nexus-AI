@@ -3053,6 +3053,7 @@ def _build_openai_request(
     model: str,
     tools: List[Dict] | None = None,
     system_prompt: str | None = None,
+    max_tokens: int = 4096,
 ) -> tuple[str, Dict[str, str], bytes]:
     import json as _json
     _use_tools = bool(tools)
@@ -3064,7 +3065,7 @@ def _build_openai_request(
         "model": model,
         "messages": [{"role": "system", "content": _sys_prompt}] + messages,
         "temperature": _config["temperature"],
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
     }
     if _use_tools:
         body["tools"] = tools
@@ -3166,6 +3167,7 @@ def _call_openai(
     messages: List[Dict],
     tools: List[Dict] | None = None,
     system_prompt: str | None = None,
+    max_tokens: int = 4096,
 ) -> Dict[str, Any]:
     secret_name = _provider_secret_name(cfg)
     ctx = inject_request_credentials([secret_name]) if secret_name else nullcontext({})
@@ -3177,7 +3179,7 @@ def _call_openai(
         model = _effective_model_for_provider(str(cfg.get("id") or ""), cfg)
     is_local = cfg.get("local") and cfg.get("keyless")
 
-    url, headers, payload = _build_openai_request(cfg, messages, api_key, model, tools, system_prompt)
+    url, headers, payload = _build_openai_request(cfg, messages, api_key, model, tools, system_prompt, max_tokens)
 
     try:
         data = _do_openai_http_call(url, headers, payload)
@@ -3207,7 +3209,7 @@ def _call_grok(messages):
         "model": _config["model"] or "grok-3",
         "messages": [{"role":"system","content":get_provider_system_prompt()}]+messages,
         "temperature": _config["temperature"] or get_active_persona()["temperature"],
-        "max_tokens": 4096,
+        "max_tokens": max_tokens,
     }
     payload = _json.dumps(body, ensure_ascii=False).encode("utf-8")
     resp = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, data=payload, timeout=90)
@@ -3343,11 +3345,12 @@ def _call_single(
     messages: List[Dict],
     tools: List[Dict] | None = None,
     system_prompt: str | None = None,
+    max_tokens: int = 4096,
 ) -> Dict[str, Any]:
     cfg = dict(PROVIDERS[pid])
     cfg["id"] = pid
     if cfg["openai_compat"]:
-        return _call_openai(cfg, messages, tools=tools, system_prompt=system_prompt)
+        return _call_openai(cfg, messages, tools=tools, system_prompt=system_prompt, max_tokens=max_tokens)
     # Non-OpenAI-compat providers don't support the tools= path yet — fall back
     # to the legacy JSON-text call (tools param is silently ignored).
     if pid == "apex":   return _call_apex_local(messages, system_prompt=system_prompt)
@@ -3435,7 +3438,31 @@ def call_llm_with_fallback(
     except Exception:
         tracer = None
 
+    # ── Response caching: avoid re-calling LLM for identical requests ────────
+    import hashlib as _hl
+    _cache_key = _hl.sha256(
+        (str(task or "") + str(messages[-1].get("content","") if messages else "")).encode()
+    ).hexdigest()[:32]
+    try:
+        from .redis_state import cache_get
+        _cached = cache_get(_cache_key)
+        if _cached is not None:
+            return _cached, "cache"
+    except Exception:
+        pass
+
     resources = get_system_resources()
+    
+    # Adaptive token budget: use task complexity to set max_tokens
+    _adaptive_tokens = 4096
+    try:
+        from .token_optimizer import recommend_response_tokens, estimate_task_tokens
+        _tt = estimate_task_tokens(effective_task)
+        _complexity = _build_complexity_profile(effective_task).get("label", "standard")
+        _adaptive_tokens = recommend_response_tokens(_tt, _complexity)
+    except Exception:
+        pass
+    
     attempts: List[Dict[str, Any]] = []
     _set_last_provider_attempts([])
     effective_task = task or (messages[-1].get("content","") if messages else "")
@@ -3524,6 +3551,12 @@ def call_llm_with_fallback(
             if isinstance(result, dict):
                 result = _attach_provider_diagnostics(result, attempts)
             _recent_provider_hint[hint_key] = pid
+            # Cache successful response for identical future requests
+            try:
+                from .redis_state import cache_set
+                cache_set(_cache_key, result, ttl=300)
+            except Exception:
+                pass
             return result, pid
         except CircuitBreakerOpen as e:
             last_err = e
@@ -4027,9 +4060,6 @@ Original prompt: {clean_task}"""
                 logger.warning("agent.py:3906: warmup_agent failed", exc_info=True)
 
     # Accumulated reasoning trace — populated by think/think_deep steps
-    _trace_steps: List[Dict[str, Any]] = []
-    _tool_attempts: Dict[str, int] = {}
-
     _trace_steps: List[Dict[str, Any]] = []
     _tool_attempts: Dict[str, int] = {}
 
