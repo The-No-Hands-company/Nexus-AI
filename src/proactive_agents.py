@@ -340,7 +340,7 @@ def _run_proactive_agent_job(job_id: str) -> None:
                         for e in cal_result.events[:5]
                     ]
                     context_parts.append(
-                        f"Upcoming calendar events:\n" + "\n".join(event_lines)
+                        "Upcoming calendar events:\n" + "\n".join(event_lines)
                     )
                 else:
                     context_parts.append(f"Calendar: {cal_result.error or 'No upcoming events found.'}")
@@ -359,7 +359,7 @@ def _run_proactive_agent_job(job_id: str) -> None:
                         for m in email_result.messages[:5]
                     ]
                     context_parts.append(
-                        f"Recent unread emails:\n" + "\n".join(msg_lines)
+                        "Recent unread emails:\n" + "\n".join(msg_lines)
                     )
                 else:
                     context_parts.append(f"Email: {email_result.error or 'No unread emails found.'}")
