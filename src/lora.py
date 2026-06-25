@@ -18,7 +18,6 @@ import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +399,7 @@ def export_feedback_dataset(
     import json as _json
     import tempfile
 
-    from src.db import load_chats, _load_json_pref
+    from src.db import load_chats
 
     # Collect positive-feedback messages from stored chats
     chats = load_chats()

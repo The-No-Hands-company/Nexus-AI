@@ -10,10 +10,8 @@ This module is a STUB — most functions raise NotImplementedError.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
 
 from .db import load_pref, save_pref
 from .redis_state import redis_get, redis_set, redis_incr, redis_expire, redis_keys, redis_delete

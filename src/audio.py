@@ -42,6 +42,7 @@ def _transcribe_faster_whisper(audio_bytes: bytes, language: str | None) -> dict
     try:
         from faster_whisper import WhisperModel  # type: ignore
     except Exception:
+        logger.debug("audio.py:44: faster_whisper import failed, backend unavailable")
         return None
 
     try:
@@ -77,8 +78,9 @@ def _transcribe_faster_whisper(audio_bytes: bytes, language: str | None) -> dict
             try:
                 os.unlink(tmp_path)
             except Exception:
-                pass
+                logger.warning("audio.py:80: except Exception:", exc_info=True)
     except Exception:
+        logger.warning("audio.py:82: faster_whisper transcription failed", exc_info=True)
         return None
 
 
@@ -109,6 +111,7 @@ def _transcribe_groq(audio_bytes: bytes, mime_type: str, language: str | None) -
             "backend": "groq_whisper",
         }
     except Exception:
+        logger.warning("audio.py:113: groq transcription failed", exc_info=True)
         return None
 
 
@@ -139,6 +142,7 @@ def _transcribe_openai(audio_bytes: bytes, mime_type: str, language: str | None)
             "backend": "openai_whisper",
         }
     except Exception:
+        logger.warning("audio.py:144: openai transcription failed", exc_info=True)
         return None
 
 
@@ -199,8 +203,9 @@ def _synthesize_piper(text: str) -> bytes | None:
             try:
                 os.unlink(output_path)
             except Exception:
-                pass
+                logger.warning("audio.py:205: except Exception:", exc_info=True)
     except Exception:
+        logger.warning("audio.py:207: piper synthesis failed", exc_info=True)
         return None
 
 
@@ -214,6 +219,7 @@ def _synthesize_espeak(text: str) -> bytes | None:
         )
         return result.stdout
     except Exception:
+        logger.warning("audio.py:221: espeak synthesis failed", exc_info=True)
         return None
 
 
@@ -232,6 +238,7 @@ def _synthesize_openai(text: str, voice: str, speed: float, format: str) -> byte
         resp.raise_for_status()
         return resp.content
     except Exception:
+        logger.warning("audio.py:240: openai TTS failed", exc_info=True)
         return None
 
 
@@ -405,12 +412,12 @@ def _heuristic_audio_analysis(transcript_text: str, segments: list[dict[str, Any
 def _extract_voice_features(audio_bytes: bytes) -> tuple[list[float], str]:
     try:
         import librosa  # type: ignore
-        import numpy as np  # type: ignore
         y, sr = librosa.load(io.BytesIO(audio_bytes), sr=16000)
         mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
         vector = mfcc.mean(axis=1).astype(float).tolist()
         return vector, "librosa_mfcc"
     except Exception:
+        logger.warning("audio.py:420: librosa feature extraction failed, falling back to byte fingerprint", exc_info=True)
         if not audio_bytes:
             return [], "byte_fingerprint"
         sample = audio_bytes[: min(len(audio_bytes), 65536)]
@@ -478,9 +485,9 @@ def diarize_audio(audio_bytes: bytes, num_speakers: int | None = None) -> dict:
                 try:
                     os.unlink(tmp_path)
                 except Exception:
-                    pass
+                    logger.warning("audio.py:488: except Exception:", exc_info=True)
         except ImportError:
-            pass
+            logger.warning("audio.py:490: except ImportError:", exc_info=True)
         except Exception as exc:
             logger.warning("pyannote diarization failed: %s", exc)
 
@@ -652,6 +659,7 @@ Return only JSON."""
             response_text = response_text.split("```", 1)[1].split("```", 1)[0]
         analyses_dict = json.loads(response_text)
     except Exception:
+        logger.warning("audio.py:662: LLM analysis fallback to heuristic", exc_info=True)
         analyses_dict = heuristic_payload
         provider = "heuristic"
 
@@ -824,6 +832,7 @@ def stream_transcribe_chunk(
     try:
         final_result = transcribe_audio(combined_audio, language=language)
     except Exception:
+        logger.warning("audio.py:835: stream final transcription failed", exc_info=True)
         final_result = {
             "text": session["partial"],
             "language": language or "unknown",

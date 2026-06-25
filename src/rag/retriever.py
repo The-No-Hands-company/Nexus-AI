@@ -11,7 +11,7 @@ Features:
 - Contextual compression
 """
 
-from typing import List, Dict, Any, Optional, Tuple, Union
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 import numpy as np

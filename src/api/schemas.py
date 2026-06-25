@@ -23,6 +23,7 @@ def _build_schema(name: str):
 
 __all__: list[str] = ["V1ChatMessage", "V1ChatCompletionsRequest"]
 __all__ += ["FineTuningRequest", "FineTuningJob"]
+__all__ += ["V1EmbeddingsRequest", "CompletionRequest", "CompletionChoice", "CompletionResponse"]
 
 class V1ChatMessage(BaseModel):
     model_config = ConfigDict(extra="allow")
@@ -46,6 +47,56 @@ class V1ChatCompletionsRequest(BaseModel):
     stop: Any = None
     tools: list[Any] | None = None
     tool_choice: Any = None
+
+
+class V1EmbeddingsRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    input: Any = ""
+    model: str | None = None
+    user: str | None = None
+
+
+class CompletionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    model: str | None = None
+    prompt: Any = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_p: float | None = None
+    n: int | None = None
+    stream: bool = False
+    logprobs: int | None = None
+    echo: bool | None = None
+    stop: Any = None
+    presence_penalty: float | None = None
+    frequency_penalty: float | None = None
+    best_of: int | None = None
+    user: str | None = None
+    suffix: str | None = None
+
+    def prompt_text(self) -> str:
+        if isinstance(self.prompt, str):
+            return self.prompt
+        if isinstance(self.prompt, list):
+            return " ".join(str(p) for p in self.prompt)
+        return str(self.prompt or "")
+
+
+class CompletionChoice(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    text: str = ""
+    index: int = 0
+    finish_reason: str | None = None
+    logprobs: Any = None
+
+
+class CompletionResponse(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: str = ""
+    object: str = "text_completion"
+    created: int = 0
+    model: str | None = None
+    choices: list[CompletionChoice] = []
 
 
 _SKIP = {

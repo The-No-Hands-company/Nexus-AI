@@ -406,7 +406,7 @@ def list_department_quotas() -> list[dict[str, Any]]:
 
 
 def record_department_usage(department: str, tokens: int, cost_usd: float = 0.0) -> dict[str, Any]:
-    from .db import db_add_department_usage, db_get_department_quota
+    from .db import db_add_department_usage
     db_add_department_usage(department, tokens, cost_usd)
     quota = get_department_quota(department) or {}
     usage = (quota.get("usage") or {})

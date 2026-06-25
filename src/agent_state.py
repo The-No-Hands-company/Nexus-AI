@@ -304,7 +304,7 @@ def list_active_agents(username: str | None = None) -> list[dict]:
                     "updated_at": data.get("updated_at"),
                 })
             except Exception:
-                continue
+                logger.warning("agent_state.py:307: except Exception:", exc_info=True)
         return result
     except Exception as exc:
         logger.debug("list_active_agents: %s", exc)

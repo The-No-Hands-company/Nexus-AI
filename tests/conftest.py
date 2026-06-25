@@ -28,3 +28,13 @@ warnings.filterwarnings(
 # Prevent noisy debug-level close-session logs from writing during interpreter teardown.
 for logger_name in ("httpcore", "httpx", "huggingface_hub", "huggingface_hub.utils._http"):
     logging.getLogger(logger_name).setLevel(logging.WARNING)
+
+
+import pytest
+from fastapi.testclient import TestClient
+from src.app import app
+
+
+@pytest.fixture
+def client():
+    return TestClient(app)

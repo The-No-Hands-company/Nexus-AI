@@ -1,6 +1,5 @@
 import logging
 import os
-import asyncio
 import signal
 import threading
 import time
@@ -248,9 +247,31 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         _logger.warning("copyright_registry_load_failed error=%s", exc)
 
+    # Start background task queue worker
+    try:
+        from .task_queue import set_task_runner, start_worker, stop_worker
+
+        def _run_task(task_id: str, description: str, cancel_event: threading.Event) -> str:
+            try:
+                from .agent import run_task_description
+                return run_task_description(task_id, description, cancel_event)
+            except Exception as exc:
+                _logger.error("task_runner_failed task_id=%s error=%s", task_id, exc)
+                raise
+
+        set_task_runner(_run_task)
+        start_worker()
+        _logger.info("task_queue_worker_started")
+    except Exception as exc:
+        _logger.warning("task_queue_worker_start_failed error=%s", exc)
+
     yield
 
-    # Graceful shutdown: wait briefly for in-flight requests to finish.
+    # Graceful shutdown
+    try:
+        stop_worker()
+    except Exception:
+        pass
     timeout_s = float(os.getenv("GRACEFUL_SHUTDOWN_TIMEOUT", "20"))
     deadline = time.time() + timeout_s
     while _inflight_count() > 0 and time.time() < deadline:
@@ -353,11 +374,10 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
-    if _OBS_AVAILABLE:
-        app.add_middleware(BackpressureMiddleware)  # type: ignore[arg-type]
-        app.add_middleware(PerPrincipalConcurrencyMiddleware)  # type: ignore[arg-type]
-        app.add_middleware(IpRateLimitMiddleware)   # type: ignore[arg-type]
-        app.add_middleware(RequestIdMiddleware)     # type: ignore[arg-type]
+    app.add_middleware(BackpressureMiddleware)  # type: ignore[arg-type]
+    app.add_middleware(PerPrincipalConcurrencyMiddleware)  # type: ignore[arg-type]
+    app.add_middleware(IpRateLimitMiddleware)   # type: ignore[arg-type]
+    app.add_middleware(RequestIdMiddleware)     # type: ignore[arg-type]
 
     # Opt-in request/response body audit logging (gated by AUDIT_BODY_LOG=true)
     if os.getenv("AUDIT_BODY_LOG", "").lower() == "true":

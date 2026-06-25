@@ -75,6 +75,18 @@ _DEFAULT_BENCHMARK_CORPUS: tuple[str, ...] = (
 )
 
 
+def ml_injection_score(text: str) -> float:
+    """Heuristic ML injection score (0-1). Higher = more likely injection."""
+    if not text:
+        return 0.0
+    tokens_lower = text.lower().split()
+    injection_indicators = {"ignore", "disregard", "forget", "override", "instruction",
+                            "system", "prompt", "previous", "pretend", "act as",
+                            "you are", "you're", "new role", "character"}
+    matches = sum(1 for token in tokens_lower if token in injection_indicators)
+    return min(1.0, matches * 0.2)
+
+
 def benchmark_injection_detection(corpus: Iterable[str] | None = None) -> dict:
     samples = tuple(str(item or "") for item in (corpus or _DEFAULT_BENCHMARK_CORPUS))
     total = len(samples)

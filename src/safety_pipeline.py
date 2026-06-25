@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .safety import check_text_against_guardrail, scrub_pii, _scrub_text_str
+from .safety import check_text_against_guardrail, _scrub_text_str
 from .safety_types import SafetyAction, SafetyDecision, SafetyIssue
 
 

@@ -9,7 +9,7 @@ The Planner Agent creates optimal execution plans for complex queries:
 - Adaptive re-planning based on intermediate results
 """
 
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional
 from dataclasses import dataclass, field
 from enum import Enum
 from datetime import datetime
@@ -422,7 +422,7 @@ Create an optimal plan (max {self.max_plan_steps} steps):
 """
         
         if decomposition_result:
-            prompt += f"\nQuery has been decomposed into sub-queries. Plan accordingly.\n"
+            prompt += "\nQuery has been decomposed into sub-queries. Plan accordingly.\n"
         
         if context:
             prompt += f"\nAdditional context: {json.dumps(context, indent=2)}\n"

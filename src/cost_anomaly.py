@@ -22,9 +22,7 @@ import logging
 import math
 import os
 import threading
-import time
-from datetime import datetime, timezone, timedelta
-from typing import Any
+from datetime import datetime, timezone
 
 logger = logging.getLogger("nexus.cost_anomaly")
 

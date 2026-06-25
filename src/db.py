@@ -10,10 +10,13 @@ import threading
 import sqlite3
 import contextlib
 import hashlib
-from typing import List, Dict, Optional, Any, Set
+from typing import Any
 from datetime import datetime, timezone
 from pathlib import Path
 from abc import ABC, abstractmethod
+import logging
+
+logger = logging.getLogger(__name__)
 
 # ── INTERFACE ────────────────────────────────────────────────────────────────
 
@@ -545,7 +548,7 @@ class SQLiteBackend(DatabaseBackend):
                 c.execute(col_sql)
                 c.commit()
             except Exception:
-                pass
+                logger.warning("db.py:547: failed to add column in SQLite migration", exc_info=True)
 
     def save_chat(self, cid: str, title: str, created_at: str, updated_at: str, messages: list):
         self._conn().execute(
@@ -906,7 +909,7 @@ class PostgresBackend(DatabaseBackend):
             try:
                 conn.close()
             except Exception:
-                pass
+                logger.warning("db.py:909: failed to close database connection", exc_info=True)
 
     @contextlib.contextmanager
     def _db(self):
@@ -1100,7 +1103,7 @@ class PostgresBackend(DatabaseBackend):
                 try:
                     cur.execute(col_sql)
                 except Exception:
-                    pass
+                    logger.warning("db.py:1102: failed to add column in PostgreSQL migration", exc_info=True)
         conn.commit()
         # New tables: orgs, feature_flags, audit_log, MFA, login_attempts
         with conn.cursor() as cur:
@@ -1716,7 +1719,7 @@ def pin_chat(cid: str, pinned: bool = True):
             _sql_execute("UPDATE chats SET pinned=%s WHERE id=%s", (flag, cid))
     except Exception:
         # Backward compatibility with older schemas that do not have pinned column.
-        pass
+        logger.warning("db.py:1717: failed to pin chat (missing pinned column?)", exc_info=True)
 
 
 def get_pinned_chats() -> list[str]:
@@ -3233,7 +3236,7 @@ def _coerce_timestamp(value: Any, fallback: float = 0.0) -> float:
     try:
         return float(text)
     except Exception:
-        pass
+        logger.warning("db.py:3235: failed to parse float from text", exc_info=True)
     try:
         normalized = text.replace("Z", "+00:00")
         return datetime.fromisoformat(normalized).timestamp()
@@ -3759,7 +3762,6 @@ def list_synthetic_batches(limit: int = 100) -> list[dict]:
 # Audit log
 # ─────────────────────────────────────────────────────────────────────────────
 
-import time as _time_module
 
 
 def write_audit_entry(
@@ -4038,7 +4040,8 @@ def db_create_org(
     plan: str = "free",
     metadata: str = "{}",
 ) -> dict:
-    import uuid as _uuid, time as _t
+    import uuid as _uuid
+    import time as _t
     org_id = "org-" + _uuid.uuid4().hex[:12]
     now = _t.time()
     if isinstance(_backend, SQLiteBackend):
@@ -4250,37 +4253,37 @@ def delete_user_data(username: str) -> dict[str, int]:
             n = _sql_execute(f"DELETE FROM {table} WHERE username={ph}", (username,))
             results[table] = n
         except Exception:
-            pass
+            logger.warning("db.py:4252: failed to delete rows from %s for user %s", table, username, exc_info=True)
     # Chats have username column (added via online_ddl migration)
     try:
         n = _sql_execute(f"DELETE FROM chats WHERE username={ph}", (username,))
         results["chats"] = n
     except Exception:
-        pass
+        logger.warning("db.py:4258: failed to delete chats for user %s", username, exc_info=True)
     # API key audit rows
     try:
         n = _sql_execute(f"DELETE FROM api_key_audit WHERE username={ph}", (username,))
         results["api_key_audit"] = n
     except Exception:
-        pass
+        logger.warning("db.py:4264: failed to delete api_key_audit for user %s", username, exc_info=True)
     # Usage log rows
     try:
         n = _sql_execute(f"DELETE FROM usage_log WHERE username={ph}", (username,))
         results["usage_log"] = n
     except Exception:
-        pass
+        logger.warning("db.py:4270: failed to delete usage_log for user %s", username, exc_info=True)
     # Memory table (SQLite memory store)
     try:
         n = _sql_execute(f"DELETE FROM memory WHERE username={ph}", (username,))
         results["memory_table"] = n
     except Exception:
-        pass
+        logger.warning("db.py:4276: failed to delete memory for user %s", username, exc_info=True)
     # Delete the user account itself
     try:
         n = _sql_execute(f"DELETE FROM users WHERE username={ph}", (username,))
         results["users"] = n
     except Exception:
-        pass
+        logger.warning("db.py:4282: failed to delete user %s", username, exc_info=True)
 
     # ── 2. Vector store (ChromaDB semantic memory) ─────────────────────────
     try:
@@ -4293,7 +4296,7 @@ def delete_user_data(username: str) -> dict[str, int]:
                 coll.delete(ids=existing["ids"])
                 results["chroma_memory"] = len(existing["ids"])
     except Exception:
-        pass
+        logger.warning("db.py:4295: failed to delete chroma memory for user %s", username, exc_info=True)
 
     # ── 3. Memory JSON meta store (flat file per-entry metadata) ──────────
     try:
@@ -4307,11 +4310,10 @@ def delete_user_data(username: str) -> dict[str, int]:
         _save_meta(meta)
         results["memory_meta"] = before - len(entries)
     except Exception:
-        pass
+        logger.warning("db.py:4309: failed to delete memory meta for user %s", username, exc_info=True)
 
     # ── 4. RAG corpus: delete documents ingested by this user ─────────────
     try:
-        from .rag.vector_store import VectorStoreManager
         from .rag.rag_system import get_rag_system
         rag = get_rag_system()
         vs = rag.vector_store if hasattr(rag, "vector_store") else None
@@ -4325,7 +4327,7 @@ def delete_user_data(username: str) -> dict[str, int]:
                 vs.delete(user_doc_ids)
                 results["rag_corpus"] = len(user_doc_ids)
     except Exception:
-        pass
+        logger.warning("db.py:4327: failed to delete RAG corpus for user %s", username, exc_info=True)
 
     return results
 
@@ -4343,7 +4345,7 @@ def export_org_data(org_id: str) -> dict:
     for uname in member_usernames:
         rows = _sql_fetchall(
             f"SELECT * FROM usage_log WHERE task_type LIKE {ph} LIMIT 1000",
-            (f"%",),
+            ("%",),
         )
         usage_rows.extend(rows)
     # Collect chats belonging to members
@@ -4382,17 +4384,17 @@ def delete_org_data(org_id: str) -> dict[str, int]:
             n = _sql_execute(f"DELETE FROM chats WHERE username={ph}", (uname,))
             results[f"chats:{uname}"] = n
         except Exception:
-            pass
+            logger.warning("db.py:4384: failed to delete chats for org member %s", uname, exc_info=True)
         try:
             n = _sql_execute(f"DELETE FROM usage_log WHERE username={ph}", (uname,))
             results[f"usage_log:{uname}"] = n
         except Exception:
-            pass
+            logger.warning("db.py:4389: failed to delete usage_log for org member %s", uname, exc_info=True)
         try:
             n = _sql_execute(f"DELETE FROM memory WHERE username={ph}", (uname,))
             results[f"memory:{uname}"] = n
         except Exception:
-            pass
+            logger.warning("db.py:4394: failed to delete memory for org member %s", uname, exc_info=True)
 
     # Delete org-level records
     for table, col in [
@@ -4405,7 +4407,7 @@ def delete_org_data(org_id: str) -> dict[str, int]:
             n = _sql_execute(f"DELETE FROM {table} WHERE {col}={ph}", (org_id,))
             results[table] = n
         except Exception:
-            pass
+            logger.warning("db.py:4407: failed to delete %s for org %s", table, org_id, exc_info=True)
 
     # Purge vector store entries tagged to this org
     try:
@@ -4417,7 +4419,7 @@ def delete_org_data(org_id: str) -> dict[str, int]:
                 coll.delete(ids=existing["ids"])
                 results["chroma_memory"] = len(existing["ids"])
     except Exception:
-        pass
+        logger.warning("db.py:4419: failed to purge chroma memory for org %s", org_id, exc_info=True)
 
     # Purge RAG corpus documents tagged to this org
     try:
@@ -4434,7 +4436,7 @@ def delete_org_data(org_id: str) -> dict[str, int]:
                 vs.delete(org_doc_ids)
                 results["rag_corpus"] = len(org_doc_ids)
     except Exception:
-        pass
+        logger.warning("db.py:4436: failed to purge RAG corpus for org %s", org_id, exc_info=True)
 
     return results
 
@@ -4559,7 +4561,8 @@ def save_webauthn_credential(
     sign_count: int,
     device_name: str = "",
 ) -> str:
-    import uuid as _uuid, time as _t
+    import uuid as _uuid
+    import time as _t
     rec_id = "wau-" + _uuid.uuid4().hex[:12]
     now = _t.time()
     if isinstance(_backend, SQLiteBackend):
@@ -4683,9 +4686,9 @@ class AsyncPgPool:
                 command_timeout=30,
             )
         except ImportError:
-            pass  # asyncpg not installed — fall back to sync pool
+            logger.debug("db.py:4685: asyncpg not installed — fall back to sync pool")
         except Exception:
-            pass  # connection failed — fall back gracefully
+            logger.warning("db.py:4687: asyncpg connection failed — fall back gracefully", exc_info=True)
 
     async def query(self, sql: str, *args) -> list[dict]:
         if self._pool is None:
@@ -4821,10 +4824,10 @@ def tag_memory_with_org(entry_id: str, org_id: str) -> bool:
     ph = "?" if isinstance(_backend, SQLiteBackend) else "%s"
     try:
         _sql_execute(
-            f"ALTER TABLE memory ADD COLUMN org_id TEXT NOT NULL DEFAULT ''"
+            "ALTER TABLE memory ADD COLUMN org_id TEXT NOT NULL DEFAULT ''"
         )
     except Exception:
-        pass  # column already exists or not supported
+        logger.warning("db.py:4826: failed to add org_id column to memory — column may already exist", exc_info=True)
     try:
         _sql_execute(
             f"UPDATE memory SET org_id={ph} WHERE id={ph}",
@@ -4934,6 +4937,7 @@ def load_marketplace_agents(source: str | None = None, org_id: str | None = None
         try:
             rec = json.loads(raw_agent)
         except Exception:
+            logger.warning("db.py:4936: failed to parse marketplace agent JSON for %s", aid, exc_info=True)
             continue
         if source is not None and rec.get("source") != source:
             continue
@@ -5016,7 +5020,7 @@ def list_marketplace_agent_versions(agent_id: str) -> list[dict]:
             versions.append(entry)
             versions.sort(key=lambda v: v.get("version", 0), reverse=True)
         except Exception:
-            pass
+            logger.warning("db.py:5018: failed to process blueprint version entry", exc_info=True)
     return versions
 
 
@@ -5035,7 +5039,7 @@ def save_architecture_blueprint(name: str, snapshot: dict, notes: str = "") -> d
         try:
             current_version = json.loads(raw_current).get("version", 0)
         except Exception:
-            pass
+            logger.warning("db.py:5037: failed to parse current blueprint version", exc_info=True)
     new_version = current_version + 1
     record = {
         "name":       name,
@@ -5107,6 +5111,7 @@ def list_architecture_blueprints(name: str = "", limit: int = 50) -> list[dict]:
                     "saved_at": rec.get("saved_at", 0),
                 })
             except Exception:
+                logger.warning("db.py:5109: failed to parse architecture blueprint %s", _last_name, exc_info=True)
                 continue
 
     results.sort(key=lambda r: r.get("saved_at", 0), reverse=True)

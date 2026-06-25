@@ -1,10 +1,10 @@
-# VersaAI RAG System
+# Nexus AI RAG System
 
-Production-grade Retrieval-Augmented Generation (RAG) system for VersaAI.
+Production-grade Retrieval-Augmented Generation (RAG) system for Nexus AI.
 
 ## 🎯 Overview
 
-The VersaAI RAG system is a comprehensive, modular RAG implementation designed for production use. It provides intelligent document retrieval, answer generation, and quality assurance through a multi-stage pipeline.
+The Nexus AI RAG system is a comprehensive, modular RAG implementation designed for production use. It provides intelligent document retrieval, answer generation, and quality assurance through a multi-stage pipeline.
 
 ## 🏗️ Architecture
 
@@ -440,12 +440,12 @@ result = pipeline.query("complex query")
 
 ## 📝 License
 
-Part of VersaAI - See main project LICENSE
+Part of Nexus AI - See main project LICENSE
 
 ## 🤝 Contributing
 
-Follow VersaAI contribution guidelines in main project CONTRIBUTING.md
+Follow Nexus AI contribution guidelines in main project CONTRIBUTING.md
 
 ## 📧 Support
 
-For issues specific to the RAG system, please file an issue in the main VersaAI repository.
+For issues specific to the RAG system, please file an issue in the main Nexus AI repository.

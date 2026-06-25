@@ -1,5 +1,5 @@
 """
-VersaAI Document Chunker — production-grade text splitting.
+Nexus AI Document Chunker — production-grade text splitting.
 
 Splits documents into overlapping chunks that respect structural boundaries:
 - Markdown headers (split before ## sections)
@@ -23,7 +23,7 @@ from __future__ import annotations
 import re
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 

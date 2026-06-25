@@ -121,18 +121,18 @@ def run_command(
 
 
 def git_status(repo_path: str = ".") -> str:
-    """Return git status output. STUB: calls run_command."""
     result = run_command("git status --porcelain", cwd=repo_path)
     return result.stdout or "(clean)"
 
 
 def git_log(repo_path: str = ".", n: int = 10) -> str:
-    """Return recent git log. STUB: calls run_command."""
-    result = run_command(f"git log --oneline -{n}", cwd=repo_path)
+    safe_n = max(1, min(int(n), 1000))
+    result = run_command(f"git log --oneline -{safe_n}", cwd=repo_path)
     return result.stdout or "(no commits)"
 
 
 def git_diff(repo_path: str = ".", ref: str = "HEAD") -> str:
-    """Return git diff against *ref*. STUB: calls run_command."""
-    result = run_command(f"git diff {ref}", cwd=repo_path)
+    import shlex as _shlex
+    safe_ref = _shlex.quote(str(ref))
+    result = run_command(f"git diff {safe_ref}", cwd=repo_path)
     return result.stdout or "(no diff)"

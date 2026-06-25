@@ -31,9 +31,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
-import time
 from datetime import datetime, timezone, timedelta
-from typing import Any
 
 logger = logging.getLogger("nexus.retention")
 
@@ -63,7 +61,7 @@ def set_policy(data_type: str, retention_days: int) -> None:
         all_policies[data_type] = retention_days
         save_pref("retention:policies", all_policies)
     except Exception:
-        pass
+        logger.warning("retention.py:66: except Exception:", exc_info=True)
 
 
 def get_policy(data_type: str) -> int | None:
@@ -81,7 +79,7 @@ def _load_policies_from_db() -> None:
         if isinstance(saved, dict):
             _POLICIES.update(saved)
     except Exception:
-        pass
+        logger.warning("retention.py:84: except Exception:", exc_info=True)
 
 
 # ── Purge implementations ─────────────────────────────────────────────────────
@@ -159,7 +157,7 @@ def _purge_pref_namespace(namespace: str, days: int) -> int:
     """Purge JSON-blob pref entries in a namespace where created_at < cutoff."""
     cutoff_ts = (datetime.now(timezone.utc) - timedelta(days=days)).timestamp()
     try:
-        from src.db import _backend, load_pref, save_pref  # type: ignore
+        from src.db import load_pref, save_pref  # type: ignore
         data = load_pref(namespace)
         if not isinstance(data, list):
             return 0
@@ -170,6 +168,7 @@ def _purge_pref_namespace(namespace: str, days: int) -> int:
             try:
                 entry_ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
             except Exception:
+                logger.warning("retention.py:173: except Exception parsing timestamp in _purge_pref_namespace", exc_info=True)
                 entry_ts = 0.0
             if entry_ts >= cutoff_ts:
                 after_list.append(entry)
@@ -221,7 +220,7 @@ def run_purge_cycle() -> dict[str, int]:
         })
         save_pref("retention:purge_history", history[-100:])  # keep last 100 runs
     except Exception:
-        pass
+        logger.warning("retention.py:224: except Exception:", exc_info=True)
 
     return results
 
@@ -262,4 +261,5 @@ def get_purge_history(limit: int = 10) -> list[dict]:
         history = load_pref("retention:purge_history") or []
         return list(reversed(history[-limit:]))
     except Exception:
+        logger.warning("retention.py:265: except Exception in get_purge_history", exc_info=True)
         return []

@@ -19,7 +19,6 @@ be extended at runtime via engine.add_rule() or engine.disable_rule().
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -97,8 +96,7 @@ class GuardrailsEngine:
         the most severe WARN, or ALLOW if nothing triggers.
         """
         from ..safety_pipeline import (   # relative import; avoids circular load
-            screen_input, screen_output, screen_tool_action,
-            find_pii_matches, _toxicity_signal, _contains_pattern,
+            screen_input, screen_output, find_pii_matches, _toxicity_signal, _contains_pattern,
             INJECTION_PATTERNS, DESTRUCTIVE_PATTERNS, HIGH_STAKES_PATTERNS,
             SENSITIVE_PATTERNS,
         )

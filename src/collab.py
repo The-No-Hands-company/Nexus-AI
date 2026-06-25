@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 import asyncio
 import json
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -26,22 +27,26 @@ class RoomConnectionManager:
 
     def __init__(self) -> None:
         self._connections: dict[str, list["WebSocket"]] = {}
+        self._lock = threading.Lock()
 
     async def connect(self, room_id: str, websocket: "WebSocket") -> None:
         await websocket.accept()
-        if room_id not in self._connections:
-            self._connections[room_id] = []
-        self._connections[room_id].append(websocket)
-        logger.info("WS connected to room %s (total %d)", room_id, len(self._connections[room_id]))
+        with self._lock:
+            if room_id not in self._connections:
+                self._connections[room_id] = []
+            self._connections[room_id].append(websocket)
+        logger.info("WS connected to room %s (total %d)", room_id, len(self._connections.get(room_id, [])))
 
     def disconnect(self, room_id: str, websocket: "WebSocket") -> None:
-        conns = self._connections.get(room_id, [])
-        if websocket in conns:
-            conns.remove(websocket)
-        logger.info("WS disconnected from room %s (remaining %d)", room_id, len(conns))
+        with self._lock:
+            conns = self._connections.get(room_id, [])
+            if websocket in conns:
+                conns.remove(websocket)
+        logger.info("WS disconnected from room %s (remaining %d)", room_id, len(self._connections.get(room_id, [])))
 
     async def broadcast(self, room_id: str, payload: dict) -> None:
-        conns = self._connections.get(room_id, [])
+        with self._lock:
+            conns = list(self._connections.get(room_id, []))
         message = json.dumps(payload)
         dead: list["WebSocket"] = []
         for ws in conns:
@@ -49,14 +54,20 @@ class RoomConnectionManager:
                 await ws.send_text(message)
             except Exception:
                 dead.append(ws)
-        for ws in dead:
-            self.disconnect(room_id, ws)
+        if dead:
+            with self._lock:
+                for ws in dead:
+                    conns_local = self._connections.get(room_id, [])
+                    if ws in conns_local:
+                        conns_local.remove(ws)
 
     def connection_count(self, room_id: str) -> int:
-        return len(self._connections.get(room_id, []))
+        with self._lock:
+            return len(self._connections.get(room_id, []))
 
     def all_room_counts(self) -> dict[str, int]:
-        return {rid: len(conns) for rid, conns in self._connections.items() if conns}
+        with self._lock:
+            return {rid: len(conns) for rid, conns in self._connections.items() if conns}
 
 
 ws_manager = RoomConnectionManager()

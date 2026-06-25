@@ -20,9 +20,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from dataclasses import dataclass
+from datetime import datetime
 
 logger = logging.getLogger("nexus.rag.incremental_index")
 

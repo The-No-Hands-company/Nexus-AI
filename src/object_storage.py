@@ -5,9 +5,7 @@ Configured via environment variables; no credentials are stored in code.
 """
 from __future__ import annotations
 
-import io
 import os
-import json
 import hashlib
 import logging
 import gzip
@@ -222,15 +220,15 @@ def export_chat_to_obsidian(chat: dict) -> dict:
     # Build Markdown
     safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in title)[:80]
     md_lines = [
-        f"---",
+        "---",
         f"title: \"{title}\"",
         f"created: {created}",
         f"chat_id: {cid}",
-        f"tags: [nexus-ai, chat]",
-        f"---",
-        f"",
+        "tags: [nexus-ai, chat]",
+        "---",
+        "",
         f"# {title}",
-        f"",
+        "",
     ]
     for msg in msgs:
         role    = msg.get("role", "user")

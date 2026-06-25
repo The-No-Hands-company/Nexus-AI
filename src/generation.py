@@ -5,15 +5,22 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import math
 import os
 import shutil
 import subprocess
 import tempfile
-from typing import Iterator, Optional
+import threading
+from typing import Iterator
 
+logger = logging.getLogger(__name__)
 
-IMAGE_BACKENDS = ["auto", "pollinations", "ollama_flux", "comfyui", "stability_api"]
+# Cache for diffusion pipelines to avoid reloading models
+_diffusers_pipeline_cache: Dict[str, Any] = {}
+_diffusers_cache_lock = threading.Lock()
+
+IMAGE_BACKENDS = ["auto", "pollinations", "ollama_flux", "comfyui", "stability_api", "diffusers"]
 VIDEO_BACKENDS = [
     "auto",
     "wan_local",
@@ -165,6 +172,55 @@ def _stability_image(prompt: str, negative_prompt: str, width: int, height: int)
         return None
 
 
+def _diffusers_image(prompt: str, negative_prompt: str, width: int, height: int, steps: int) -> bytes | None:
+    """Generate image using local diffusers pipeline with caching."""
+    try:
+        import torch
+        from diffusers import StableDiffusionPipeline
+        
+        # Check if CUDA is available
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        torch_dtype = torch.float16 if device == "cuda" else torch.float32
+        
+        # Create a cache key based on device and dtype
+        cache_key = f"{device}_{torch_dtype}"
+        
+        # Use cached pipeline if available
+        with _diffusers_cache_lock:
+            if cache_key in _diffusers_pipeline_cache:
+                pipe = _diffusers_pipeline_cache[cache_key]
+            else:
+                # Load the model (using a default model that's reasonably sized)
+                model_id = "runwayml/stable-diffusion-v1-5"
+                pipe = StableDiffusionPipeline.from_pretrained(
+                    model_id, 
+                    torch_dtype=torch_dtype,
+                    safety_checker=None  # Disable safety checker for simplicity
+                )
+                pipe = pipe.to(device)
+                # Cache the pipeline
+                _diffusers_pipeline_cache[cache_key] = pipe
+        
+        # Generate image
+        with torch.autocast(device):
+            image = pipe(
+                prompt=prompt,
+                negative_prompt=negative_prompt,
+                width=width,
+                height=height,
+                num_inference_steps=steps,
+            ).images[0]
+        
+        # Convert to bytes
+        import io
+        img_buffer = io.BytesIO()
+        image.save(img_buffer, format="PNG")
+        return img_buffer.getvalue()
+    except Exception as e:
+        logger.error(f"Error in diffusers image generation: {e}")
+        return None
+
+
 def _comfyui_image(prompt: str, negative_prompt: str, width: int, height: int, steps: int) -> bytes | None:
     import requests
 
@@ -215,7 +271,7 @@ def generate_image_local(
         raise ValueError("steps must be positive")
 
     backend_name = backend if backend in IMAGE_BACKENDS else "auto"
-    backends = [backend_name] if backend_name != "auto" else ["comfyui", "stability_api", "pollinations", "ollama_flux"]
+    backends = [backend_name] if backend_name != "auto" else ["comfyui", "stability_api", "pollinations", "ollama_flux", "diffusers"]
 
     for name in backends:
         if name == "comfyui":
@@ -232,6 +288,10 @@ def generate_image_local(
                 return data
         elif name == "ollama_flux":
             return _render_prompt_art(clean_prompt, width, height, negative_prompt=negative_prompt, steps=steps)
+        elif name == "diffusers":
+            data = _diffusers_image(clean_prompt, negative_prompt, width, height, steps)
+            if data:
+                return data
 
     return _render_prompt_art(clean_prompt, width, height, negative_prompt=negative_prompt, steps=steps)
 
@@ -565,7 +625,7 @@ def video_to_text(video_bytes: bytes, frame_interval_s: float = 5.0,
             try:
                 os.unlink(tmp_path)
             except Exception:
-                pass
+                logger.warning("generation.py:569: failed to unlink temp file", exc_info=True)
 
         from .agent import call_llm_with_fallback
         seg_text = "\n".join(f"[{f['timestamp_s']}s] {f['description'][:200]}"
@@ -581,9 +641,9 @@ def video_to_text(video_bytes: bytes, frame_interval_s: float = 5.0,
         return {"ok": True, "frames": frame_descriptions, "summary": summary,
                 "backend": "opencv", "duration_s": duration}
     except ImportError:
-        pass
+        logger.debug("generation.py:585: opencv-python not available", exc_info=True)
     except Exception:
-        pass
+        logger.warning("generation.py:587: video_to_text failed", exc_info=True)
 
     return {"ok": False, "frames": [], "backend": "unavailable",
             "summary": f"Video ({len(video_bytes)} bytes). Install opencv-python + Pillow."}
@@ -593,7 +653,7 @@ def video_to_text(video_bytes: bytes, frame_interval_s: float = 5.0,
 
 def detect_video_chapters_from_transcript(video_bytes: bytes) -> list[dict]:
     """Detect chapters by transcribing the audio and asking an LLM for breaks."""
-    import json, re
+    import re
     try:
         from .audio import transcribe_audio
         result = transcribe_audio(video_bytes)
@@ -613,7 +673,7 @@ def detect_video_chapters_from_transcript(video_bytes: bytes) -> list[dict]:
         if m:
             return json.loads(m.group(0))
     except Exception:
-        pass
+        logger.warning("generation.py:617: chapter detection failed", exc_info=True)
     return [{"start": 0.0, "end": 0.0, "title": "Full video", "note": "Detection unavailable"}]
 
 
@@ -664,7 +724,7 @@ def edit_video(video_bytes: bytes, operations: list[dict]) -> dict:
                 import re as _re
                 d = float(op_def.get("duration_s", 1.0))
                 probe = subprocess.run([ffmpeg_bin, "-i", current, "-f", "null", "-"],
-                                       capture_output=True, text=True)
+                                       capture_output=True, text=True, timeout=30)
                 dur_m = _re.search(r"Duration:\s*([\d:.]+)", probe.stderr)
                 dur = 10.0
                 if dur_m:
@@ -699,4 +759,4 @@ def edit_video(video_bytes: bytes, operations: list[dict]) -> dict:
             try:
                 os.unlink(p)
             except Exception:
-                pass
+                logger.warning("generation.py:703: failed to unlink temp file", exc_info=True)

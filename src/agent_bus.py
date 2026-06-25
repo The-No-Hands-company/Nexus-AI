@@ -91,3 +91,45 @@ def all_agents() -> list[str]:
         ids.add(m.from_id)
         ids.add(m.to_id)
     return sorted(ids)
+
+
+# ── AgentBus class (OO wrapper for backward-compatible tests) ──────────
+
+_DLQ: list[dict] = []
+
+
+class AgentBus:
+    """Object-oriented wrapper around module-level agent-bus functions."""
+
+    def post(self, from_id: str, to_id: str, content: str, topic: str = "") -> AgentMessage:
+        return post_message(from_id, to_id, content, topic=topic or None)
+
+    def read(self, agent_id: str, topic: str | None = None, limit: int = 100) -> list[AgentMessage]:
+        return read_messages(agent_id, topic=topic, limit=limit)
+
+    def send_to_dlq(self, msg: AgentMessage, reason: str = "") -> dict:
+        entry = {"msg": msg, "reason": reason, "ts": time.time()}
+        _DLQ.append(entry)
+        return entry
+
+    def get_dlq(self) -> list[dict]:
+        return list(_DLQ)
+
+    def clear_dlq(self) -> int:
+        count = len(_DLQ)
+        _DLQ.clear()
+        return count
+
+
+def send_to_dlq(msg: AgentMessage, reason: str = "") -> dict:
+    return AgentBus().send_to_dlq(msg, reason=reason)
+
+
+def get_dlq() -> list[dict]:
+    return list(_DLQ)
+
+
+def clear_dlq() -> int:
+    count = len(_DLQ)
+    _DLQ.clear()
+    return count

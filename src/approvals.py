@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import threading
 import time
 import uuid
 from typing import Any
@@ -12,9 +14,11 @@ from .db import (
     update_hitl_approval_decision,
 )
 
+logger = logging.getLogger(__name__)
 
 pending_approvals: dict[str, dict[str, Any]] = {}
 _approval_store: dict[str, dict[str, Any]] = {}
+_approval_lock = threading.Lock()
 
 
 def create_tool_approval(session_id: str, action: dict[str, Any]) -> str:
@@ -34,15 +38,16 @@ def create_tool_approval(session_id: str, action: dict[str, Any]) -> str:
     _approval_store[approval_id] = dict(record)
     try:
         create_hitl_approval(approval_id, session_id, action, "", now, now)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("create_hitl_approval failed: %s", exc)
     return approval_id
 
 
 def list_tool_approvals(session_id: str | None = None) -> list[dict[str, Any]]:
     try:
         items = list_hitl_approvals(session_id or "")
-    except Exception:
+    except Exception as exc:
+        logger.warning("list_hitl_approvals failed: %s", exc)
         items = []
     if not items:
         items = list(_approval_store.values())
@@ -58,13 +63,15 @@ def decide_tool_approval(approval_id: str, approved: bool, note: str = "") -> di
     persisted = None
     try:
         persisted = update_hitl_approval_decision(approval_id, status, note, updated_at)
-    except Exception:
+    except Exception as exc:
+        logger.warning("update_hitl_approval_decision failed: %s", exc)
         persisted = None
     if persisted is None:
         if record is None:
             try:
                 record = load_hitl_approval(approval_id)
-            except Exception:
+            except Exception as exc:
+                logger.warning("load_hitl_approval failed: %s", exc)
                 record = None
         if record is None:
             return None
@@ -84,7 +91,8 @@ def consume_approved_action(approval_id: str, session_id: str | None = None, act
     if record is None:
         try:
             record = load_hitl_approval(approval_id)
-        except Exception:
+        except Exception as exc:
+            logger.warning("load_hitl_approval (consume) failed: %s", exc)
             record = None
     if record is None:
         return False
@@ -99,7 +107,8 @@ def consume_approved_action(approval_id: str, session_id: str | None = None, act
         persisted = consume_hitl_approval(approval_id, updated_at)
         if persisted:
             record = dict(persisted)
-    except Exception:
+    except Exception as exc:
+        logger.warning("consume_hitl_approval failed: %s", exc)
         record["status"] = "consumed"
         record["updated_at"] = updated_at
     _approval_store[approval_id] = dict(record)

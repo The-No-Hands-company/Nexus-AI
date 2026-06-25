@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import threading
+
+
+_state_lock = threading.Lock()
 
 run_results: dict = {}
 sessions: dict = {}
@@ -22,3 +26,30 @@ def get_rag_system():
 
         _rag_system = RAGSystem()
     return _rag_system
+
+
+def get_state_dict(name: str) -> dict:
+    with _state_lock:
+        state = {
+            "run_results": run_results,
+            "sessions": sessions,
+            "chats": chats,
+            "shares": shares,
+            "projects": projects,
+            "execution_traces": execution_traces,
+        }
+        return state.get(name, {})
+
+
+def update_state(name: str, key: str, value) -> None:
+    with _state_lock:
+        state = {
+            "run_results": run_results,
+            "sessions": sessions,
+            "chats": chats,
+            "shares": shares,
+            "projects": projects,
+        }
+        target = state.get(name)
+        if target is not None:
+            target[key] = value

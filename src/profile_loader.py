@@ -50,7 +50,8 @@ def load_profile_pack(persona_name: str = "assistant") -> dict:
         path = os.path.join(root, rel_path)
         if not os.path.exists(path):
             continue
-        raw = open(path, "r", encoding="utf-8", errors="ignore").read()
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            raw = f.read()
         meta, body = _parse_frontmatter(raw)
         if str(meta.get("safety_mode", "")).lower() == "off":
             continue
@@ -82,7 +83,8 @@ def inspect_profile_pack(persona_name: str = "assistant", base_dir: str | None =
         if not exists:
             filtered.append({**entry, "reason": "not_found"})
             continue
-        raw = open(path, "r", encoding="utf-8", errors="ignore").read()
+        with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            raw = f.read()
         meta, _ = _parse_frontmatter(raw)
         if str(meta.get("safety_mode", "")).lower() == "off":
             filtered.append({**entry, "reason": "safety_mode_off"})

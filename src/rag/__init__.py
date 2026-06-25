@@ -1,5 +1,5 @@
 """
-VersaAI RAG (Retrieval-Augmented Generation) Infrastructure.
+Nexus AI RAG (Retrieval-Augmented Generation) Infrastructure.
 
 Production-grade RAG components:
 - Embeddings (Ollama, sentence-transformers, hash fallback)

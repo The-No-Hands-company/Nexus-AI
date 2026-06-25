@@ -12,7 +12,7 @@ All operations are idempotent. Errors are logged but never crash startup.
 from __future__ import annotations
 
 import logging
-import os
+import re
 from typing import Callable
 
 logger = logging.getLogger("nexus.online_ddl")
@@ -30,6 +30,16 @@ def register_migration(migration_id: str, description: str, fn: Callable) -> Non
     _PENDING_MIGRATIONS.append(
         {"id": migration_id, "description": description, "fn": fn}
     )
+
+
+_VALID_IDENTIFIER_RE = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _sanitize_identifier(name: str) -> str:
+    """Validate and quote a SQL identifier to prevent injection."""
+    if not _VALID_IDENTIFIER_RE.match(name):
+        raise ValueError(f"Invalid SQL identifier: {name!r}")
+    return f'"{name}"'
 
 
 # ── Low-level DDL helpers ──────────────────────────────────────────────────
@@ -51,15 +61,17 @@ def add_column_if_missing(
         ALTER TABLE {table} ADD COLUMN {column} {column_def}
     (SQLite doesn't support IF NOT EXISTS on ADD COLUMN but errors silently.)
     """
-    from .db import _backend, SQLiteBackend, PostgresBackend, _sql_execute
+    from .db import _backend, SQLiteBackend, _sql_execute
 
     b = backend or _backend
+    safe_table = _sanitize_identifier(table)
+    safe_column = _sanitize_identifier(column)
     try:
         if isinstance(b, SQLiteBackend):
-            _sql_execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
+            _sql_execute(f"ALTER TABLE {safe_table} ADD COLUMN {safe_column} {column_def}")
         else:
             _sql_execute(
-                f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_def}"
+                f"ALTER TABLE {safe_table} ADD COLUMN IF NOT EXISTS {safe_column} {column_def}"
             )
         logger.info("online_ddl.add_column table=%s column=%s status=added", table, column)
         return True
@@ -90,17 +102,17 @@ def create_index_if_missing(
     from .db import _backend, SQLiteBackend, _sql_execute
 
     b = backend or _backend
+    safe_table = _sanitize_identifier(table)
+    safe_index = _sanitize_identifier(index_name)
     unique_kw = "UNIQUE " if unique else ""
     try:
         if isinstance(b, SQLiteBackend):
             _sql_execute(
-                f"CREATE {unique_kw}INDEX IF NOT EXISTS {index_name} ON {table}({columns})"
+                f"CREATE {unique_kw}INDEX IF NOT EXISTS {safe_index} ON {safe_table}({columns})"
             )
         else:
-            # PostgreSQL CONCURRENTLY cannot run inside a transaction block;
-            # _sql_execute uses connection-level commit so this is safe.
             _sql_execute(
-                f"CREATE {unique_kw}INDEX CONCURRENTLY IF NOT EXISTS {index_name} ON {table}({columns})"
+                f"CREATE {unique_kw}INDEX CONCURRENTLY IF NOT EXISTS {safe_index} ON {safe_table}({columns})"
             )
         logger.info("online_ddl.create_index index=%s table=%s status=ok", index_name, table)
         return True
@@ -127,8 +139,10 @@ def drop_column_if_exists(table: str, column: str, backend=None) -> bool:
             "online_ddl.drop_column skipped (SQLite) table=%s column=%s", table, column
         )
         return True
+    safe_table = _sanitize_identifier(table)
+    safe_column = _sanitize_identifier(column)
     try:
-        _sql_execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS {column}")
+        _sql_execute(f"ALTER TABLE {safe_table} DROP COLUMN IF EXISTS {safe_column}")
         return True
     except Exception as exc:
         logger.warning(

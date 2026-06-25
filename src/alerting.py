@@ -29,7 +29,6 @@ import time
 import threading
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any
 
 logger = logging.getLogger("nexus.alerting")
 

@@ -48,13 +48,30 @@ class NexusAIClient:
 
     def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         url = f"{self.base_url.rstrip('/')}{path}"
-        response = requests.request(
-            method=method,
-            url=url,
-            json=payload,
-            headers=self._headers(),
-            timeout=self.timeout_s,
-        )
+        try:
+            response = requests.request(
+                method=method,
+                url=url,
+                json=payload,
+                headers=self._headers(),
+                timeout=self.timeout_s,
+            )
+        except requests.exceptions.ConnectionError as e:
+            raise NexusAIError(
+                f"Failed to connect to Nexus AI API at {self.base_url}: {str(e)}",
+                status=0,
+            ) from e
+        except requests.exceptions.Timeout as e:
+            raise NexusAIError(
+                f"Request to Nexus AI API timed out after {self.timeout_s} seconds: {str(e)}",
+                status=408,
+            ) from e
+        except requests.exceptions.RequestException as e:
+            raise NexusAIError(
+                f"Request to Nexus AI API failed: {str(e)}",
+                status=0,
+            ) from e
+        
         if response.status_code >= 400:
             raise NexusAIError(
                 f"{method} {path} failed: {response.status_code} {response.text[:300]}",
@@ -62,7 +79,14 @@ class NexusAIClient:
             )
         if not response.text:
             return {}
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as e:
+            raise NexusAIError(
+                f"Failed to parse JSON response from {method} {path}: {str(e)}",
+                status=response.status_code,
+            ) from e
+            
         if isinstance(data, dict):
             return data
         return {"data": data}

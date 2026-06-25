@@ -167,7 +167,12 @@ class VectorStore:
                 if index_path.exists():
                     self.index = faiss.read_index(str(index_path))
                     if metadata_path.exists():
-                        self.metadata_store = np.load(str(metadata_path), allow_pickle=True).item()
+                        import json as _json
+                        try:
+                            with open(metadata_path, "r") as _mf:
+                                self.metadata_store = _json.load(_mf)
+                        except (json.JSONDecodeError, Exception):
+                            self.metadata_store = np.load(str(metadata_path), allow_pickle=False).item()
                     self._document_count = self.index.ntotal
                     logger.info("Loaded FAISS index with %d vectors", self._document_count)
 

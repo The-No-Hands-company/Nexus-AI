@@ -154,3 +154,137 @@ def test_no_section_labeled_route_modules_remaining():
     api_dir = Path(__file__).resolve().parents[1] / "src" / "api"
     matches = sorted(str(p.name) for p in api_dir.glob("section*.py"))
     assert matches == []
+
+
+# ── Memory route tests ──────────────────────────────────────────────────────────
+
+
+def test_memory_list_empty():
+    response = client.get("/memory")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, dict)
+    assert "memories" in data or isinstance(data.get("memories"), list)
+
+
+def test_memory_semantic():
+    response = client.post("/memory/semantic", json={"key": "test-key", "value": "test-value"})
+    assert response.status_code == 200
+
+    response = client.get("/memory/semantic")
+    assert response.status_code == 200
+
+
+def test_memory_episodic():
+    response = client.get("/memory/episodic")
+    assert response.status_code == 200
+
+
+def test_memory_export_roundtrip():
+    client.post("/memory/semantic", json={"key": "export-key", "value": "export-value"})
+    export_resp = client.get("/memory/export")
+    assert export_resp.status_code == 200
+    bundle = export_resp.json()
+    assert isinstance(bundle, dict)
+
+    import_resp = client.post("/memory/import", json=bundle)
+    assert import_resp.status_code == 200
+
+
+def test_memory_search():
+    response = client.get("/memory/search?q=test")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data, list) or isinstance(data, dict)
+
+
+# ── Session route tests ─────────────────────────────────────────────────────────
+
+
+def test_session_create_and_delete():
+    response = client.post("/session", json={})
+    assert response.status_code == 200
+    sid = response.json().get("session_id")
+    assert sid
+
+    delete_resp = client.delete(f"/session/{sid}")
+    assert delete_resp.status_code == 200
+
+
+def test_session_safety_profile():
+    response = client.post("/session", json={})
+    assert response.status_code == 200
+    sid = response.json().get("session_id")
+
+    get_resp = client.get(f"/session/{sid}/safety")
+    assert get_resp.status_code == 200
+
+    post_resp = client.post(f"/session/{sid}/safety", json={"safety_mode": "strict"})
+    assert post_resp.status_code == 200
+
+
+# ── Custom Instructions tests ────────────────────────────────────────────────────
+
+
+def test_instructions_set_and_get():
+    set_resp = client.post("/instructions", json={"text": "Test instruction text"})
+    assert set_resp.status_code == 200
+
+    get_resp = client.get("/instructions")
+    assert get_resp.status_code == 200
+
+
+def test_instruction_versions():
+    client.post("/instructions", json={"text": "V1 instruction"})
+    client.post("/instructions", json={"text": "V2 instruction"})
+
+    versions_resp = client.get("/instructions/versions")
+    assert versions_resp.status_code == 200
+
+
+# ── Chat route tests ─────────────────────────────────────────────────────────────
+
+
+def test_chat_save_load_delete():
+    save_resp = client.post("/chats", json={"title": "Test Chat", "messages": [{"role": "user", "content": "hello"}]})
+    assert save_resp.status_code == 200
+    cid = save_resp.json().get("chat_id")
+    assert cid
+
+    load_resp = client.get(f"/chats/{cid}")
+    assert load_resp.status_code == 200
+    chat = load_resp.json()
+    assert chat.get("id") == cid or chat.get("chat_id") == cid
+
+    del_resp = client.delete(f"/chats/{cid}")
+    assert del_resp.status_code == 200
+
+
+def test_chat_list():
+    client.post("/chats", json={"title": "List Test 1", "messages": []})
+    list_resp = client.get("/chats")
+    assert list_resp.status_code == 200
+    chats = list_resp.json()
+    assert isinstance(chats, (list, dict))
+
+
+def test_chat_search():
+    client.post("/chats", json={"title": "Searchable Chat", "messages": [{"role": "user", "content": "search me"}]})
+    search_resp = client.get("/chats/search?q=search")
+    assert search_resp.status_code == 200
+
+
+
+
+
+# ── Prefs route tests ────────────────────────────────────────────────────────────
+
+
+def test_prefs_roundtrip():
+    set_resp = client.post("/prefs", json={"key": "theme", "pref_value": "dark"})
+    assert set_resp.status_code == 200
+
+    get_resp = client.get("/prefs")
+    assert get_resp.status_code == 200
+    data = get_resp.json()
+    assert isinstance(data, dict)

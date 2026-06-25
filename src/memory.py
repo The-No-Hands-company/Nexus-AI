@@ -1,5 +1,9 @@
 """Nexus AI Memory - Phase 1 Super Intelligence Layer."""
-import os, time, threading, json, hashlib
+import os
+import time
+import threading
+import json
+import hashlib
 from pathlib import Path
 from typing import List, Dict
 from .db import (add_memory_entry, load_memory_entries,

@@ -137,6 +137,43 @@ def run_regression_benchmark(
     }
 
 
+# ── Backward compatibility aliases used by existing tests ──────────────
+
+EvalTask = EvalJob  # alias for test_finetune_adapter_quality.py
+
+
+def create_eval_job(
+    suite: str,
+    model: str,
+    provider: str = "local",
+    n_samples: int = 3,
+) -> EvalJob:
+    """Create and persist a deterministic eval job stub."""
+    score = _deterministic_score(f"{model}|{provider}|{suite}|{n_samples}")
+    record = save_eval_job_record({
+        "task_id": f"eval_{model}_{suite}_{int(time.time() * 1000)}",
+        "model": model,
+        "provider": provider,
+        "suite": suite,
+        "score": score,
+        "status": "completed",
+        "regression": score < 0.60,
+        "created_at": time.time(),
+    })
+    return EvalJob(**record)
+
+
+_BASELINES: dict[str, float] = {}
+
+
+def set_baseline(suite: str, model: str, score: float) -> None:
+    _BASELINES[f"{suite}|{model}"] = score
+
+
+def get_baseline(suite: str, model: str) -> float | None:
+    return _BASELINES.get(f"{suite}|{model}")
+
+
 def list_eval_jobs() -> list[EvalJob]:
     """Return all recorded eval jobs."""
     return [EvalJob(**row) for row in list_eval_job_records(limit=2000)]

@@ -64,7 +64,24 @@ class AsyncNexusAIClient:
 
     async def _request(self, method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
         client = self._client()
-        response = await client.request(method, path, json=payload)
+        try:
+            response = await client.request(method, path, json=payload)
+        except httpx.ConnectError as e:
+            raise NexusAIError(
+                f"Failed to connect to Nexus AI API at {self.base_url}: {str(e)}",
+                status=0,
+            ) from e
+        except httpx.TimeoutException as e:
+            raise NexusAIError(
+                f"Request to Nexus AI API timed out after {self.timeout_s} seconds: {str(e)}",
+                status=408,
+            ) from e
+        except httpx.RequestError as e:
+            raise NexusAIError(
+                f"Request to Nexus AI API failed: {str(e)}",
+                status=0,
+            ) from e
+        
         if response.status_code >= 400:
             raise NexusAIError(
                 f"{method} {path} failed: {response.status_code} {response.text[:300]}",
@@ -72,7 +89,14 @@ class AsyncNexusAIClient:
             )
         if not response.text:
             return {}
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError as e:
+            raise NexusAIError(
+                f"Failed to parse JSON response from {method} {path}: {str(e)}",
+                status=response.status_code,
+            ) from e
+            
         return data if isinstance(data, dict) else {"data": data}
 
     # ── Chat ──────────────────────────────────────────────────────────────────

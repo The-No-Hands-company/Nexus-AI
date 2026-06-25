@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import json
 import logging
+
+logger = logging.getLogger(__name__)
 import os
 import time
 import uuid
@@ -47,7 +49,7 @@ try:
     import structlog  # type: ignore
     _structlog_available = True
 except ImportError:
-    pass
+    logger.warning("observability.py:52: except ImportError:", exc_info=True)
 
 
 def _setup_structlog() -> None:
@@ -152,7 +154,7 @@ class _HttpForwardHandler(logging.Handler):
             _urlrequest.urlopen(req, timeout=self._timeout).read(0)
         except Exception:
             # Never allow logging sink failures to break request flow.
-            pass
+            logger.warning("observability.py:157: except Exception:", exc_info=True)
 
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────
@@ -162,7 +164,7 @@ try:
     import prometheus_client as prom  # type: ignore
     _prometheus_available = True
 except ImportError:
-    pass
+    logger.warning("observability.py:167: except ImportError:", exc_info=True)
 
 
 class _NoopCounter:
@@ -245,7 +247,7 @@ def set_active_streams_gauge(count: int) -> None:
     try:
         ACTIVE_STREAMS.set(max(0, int(count)))
     except Exception:
-        pass
+        logger.warning("observability.py:250: except Exception:", exc_info=True)
 
 
 def set_task_queue_depth_gauge(depth: int) -> None:
@@ -253,7 +255,7 @@ def set_task_queue_depth_gauge(depth: int) -> None:
     try:
         TASK_QUEUE_DEPTH.set(max(0, int(depth)))
     except Exception:
-        pass
+        logger.warning("observability.py:258: except Exception:", exc_info=True)
 
 
 def refresh_runtime_gauges() -> None:
@@ -267,14 +269,14 @@ def refresh_runtime_gauges() -> None:
         status = worker_status()
         set_task_queue_depth_gauge(int(status.get("queue_depth", 0)))
     except Exception:
-        pass
+        logger.warning("observability.py:272: except Exception:", exc_info=True)
 
     try:
         from .api.state import _active_streams
 
         set_active_streams_gauge(len(_active_streams))
     except Exception:
-        pass
+        logger.warning("observability.py:279: except Exception:", exc_info=True)
 
 
 def get_prometheus_metrics_text() -> str:
@@ -301,7 +303,7 @@ try:
     from opentelemetry.sdk.trace.export import BatchSpanProcessor  # type: ignore
     _otel_available = True
 except ImportError:
-    pass
+    logger.warning("observability.py:306: except ImportError:", exc_info=True)
 
 
 def _setup_otel() -> None:

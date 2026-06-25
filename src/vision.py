@@ -7,6 +7,10 @@ import os
 import shutil
 import subprocess
 import tempfile
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 VISION_CAPABLE_PROVIDERS = [
@@ -108,7 +112,7 @@ def _capture_with_browser_binary(url: str, width: int, height: int) -> bytes | N
         try:
             os.unlink(output_path)
         except Exception:
-            pass
+            logger.warning("vision.py:114: cleanup exception", exc_info=True)
 
 
 def capture_screenshot(url: str, width: int = 1280, height: int = 800) -> bytes:
@@ -187,7 +191,8 @@ def extract_charts_and_tables(image_bytes: bytes, mime_type: str = "image/png") 
         "{\"charts\": [...], \"tables\": [...], \"summary\": \"...\"}"
     )
     raw = describe_image(image_bytes, mime_type=mime_type, prompt=prompt)
-    import json, re
+    import json
+    import re
     # Try to parse JSON from the response
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     if match:
@@ -201,7 +206,7 @@ def extract_charts_and_tables(image_bytes: bytes, mime_type: str = "image/png") 
                 "ok": True,
             }
         except json.JSONDecodeError:
-            pass
+            logger.warning("vision.py:207: json decode error", exc_info=True)
     return {"charts": [], "tables": [], "summary": "", "raw_description": raw, "ok": False}
 
 
@@ -240,9 +245,9 @@ def understand_pdf(pdf_bytes: bytes, extract_tables: bool = True,
         return {"ok": True, "backend": "pdfplumber", "pages": pages,
                 "full_text": full_text, "tables": tables_all, "page_count": len(pages)}
     except ImportError:
-        pass
+        logger.debug("vision.py:246: pdfplumber import error", exc_info=True)
     except Exception:
-        pass
+        logger.warning("vision.py:248: pdfplumber exception", exc_info=True)
 
     # Try PyMuPDF
     try:
@@ -258,9 +263,9 @@ def understand_pdf(pdf_bytes: bytes, extract_tables: bool = True,
         return {"ok": True, "backend": "pymupdf", "pages": pages,
                 "full_text": full_text, "tables": [], "page_count": len(pages)}
     except ImportError:
-        pass
+        logger.debug("vision.py:264: pymupdf import error", exc_info=True)
     except Exception:
-        pass
+        logger.warning("vision.py:266: pymupdf exception", exc_info=True)
 
     return {"ok": False, "error": "No PDF backend available (install pdfplumber or PyMuPDF)",
             "pages": [], "full_text": "", "tables": []}

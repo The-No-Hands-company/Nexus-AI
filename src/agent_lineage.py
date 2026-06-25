@@ -7,12 +7,15 @@ Persistence uses preference storage so lineage survives restarts.
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 from collections import deque
 from typing import Any
 
 from .db import load_pref, save_pref
+
+logger = logging.getLogger(__name__)
 
 
 _LINEAGE_PREF_KEY = "agent_lineage_graph_v1"
@@ -32,7 +35,8 @@ def _load() -> None:
         parsed = json.loads(raw)
         if isinstance(parsed, list):
             _edges = [dict(item) for item in parsed if isinstance(item, dict)]
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to load lineage: %s", exc)
         _edges = []
     _loaded = True
 
@@ -40,8 +44,8 @@ def _load() -> None:
 def _persist() -> None:
     try:
         save_pref(_LINEAGE_PREF_KEY, json.dumps(_edges[-_MAX_EDGES:]))
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to persist lineage: %s", exc)
 
 
 def record_lineage_edge(

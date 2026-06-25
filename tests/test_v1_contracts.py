@@ -33,7 +33,7 @@ _TEST_AUTH_CRED = "StrongPass" + "123"
 
 
 class TestV1Contracts(unittest.TestCase):
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.reasoning.call_llm_with_fallback")
     def test_reasoning_routes_contracts(self, call_llm_with_fallback):
         def _mock_reasoning(messages, task=""):
             prompt = messages[-1]["content"]
@@ -90,9 +90,9 @@ class TestV1Contracts(unittest.TestCase):
         self.assertEqual(verify.status_code, 200)
         self.assertEqual(verify.json()["overall"], "valid")
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_reflection_creates_and_exports_fine_tuning_samples(self, call_llm_with_fallback):
-        from src.api import routes as api_routes
+        from src.routes import v1 as api_routes
 
         test_files_dir = "/tmp/nexus_ai_test_files_reflection"
         os.makedirs(test_files_dir, exist_ok=True)
@@ -129,7 +129,7 @@ class TestV1Contracts(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(test_files_dir, export_meta["id"])))
 
     def test_v1_fine_tuning_job_lifecycle_persisted(self):
-        from src.api import routes as api_routes
+        from src.routes import v1 as api_routes
 
         test_files_dir = "/tmp/nexus_ai_test_files"
         os.makedirs(test_files_dir, exist_ok=True)
@@ -559,7 +559,7 @@ class TestV1Contracts(unittest.TestCase):
         self.assertTrue(all("id" in item and "capabilities" in item for item in payload["data"]))
         self.assertTrue(all("tools" in item and "json_mode" in item and "reasoning" in item for item in payload["data"]))
 
-    @patch("src.api.routes.get_providers_list")
+    @patch("src.routes.v1.get_providers_list")
     def test_v1_models_capabilities_expand_per_model_flags(self, get_providers_list):
         get_providers_list.return_value = [
             {
@@ -612,7 +612,7 @@ class TestV1Contracts(unittest.TestCase):
         self.assertIsInstance(payload["json_mode"], bool)
         self.assertIsInstance(payload["reasoning"], bool)
 
-    @patch("src.api.routes.get_rag_system")
+    @patch("src.routes.v1.get_rag_system")
     def test_v1_embeddings_returns_embedding(self, get_rag_system):
         mock_rag = MagicMock()
         mock_embedding = MagicMock()
@@ -634,7 +634,7 @@ class TestV1Contracts(unittest.TestCase):
         self.assertGreaterEqual(payload["usage"]["prompt_tokens"], 1)
         self.assertEqual(payload["usage"]["total_tokens"], payload["usage"]["prompt_tokens"])
 
-    @patch("src.api.routes.get_rag_system")
+    @patch("src.routes.v1.get_rag_system")
     def test_v1_embeddings_accepts_token_array_input(self, get_rag_system):
         mock_rag = MagicMock()
         mock_embedding = MagicMock()
@@ -649,7 +649,7 @@ class TestV1Contracts(unittest.TestCase):
         self.assertEqual(payload["usage"]["prompt_tokens"], 3)
         mock_embedding.embed_batch.assert_called_once_with(["101 202 303"])
 
-    @patch("src.api.routes.get_rag_system")
+    @patch("src.routes.v1.get_rag_system")
     def test_v1_embeddings_accepts_batch_token_arrays_input(self, get_rag_system):
         mock_rag = MagicMock()
         mock_embedding = MagicMock()
@@ -674,7 +674,7 @@ class TestV1Contracts(unittest.TestCase):
         self.assertEqual(payload["type"], "validation_error")
         self.assertEqual(payload["error"]["code"], "validation_error")
 
-    @patch("src.api.routes.run_agent_task")
+    @patch("src.routes.v1.run_agent_task")
     def test_v1_chat_completions_json_mode_invalid(self, run_agent_task):
         run_agent_task.return_value = {"result": "not json", "provider": "nexus", "model": "nexus"}
         response = client.post(
@@ -687,7 +687,7 @@ class TestV1Contracts(unittest.TestCase):
         self.assertEqual(payload["error"]["type"], "invalid_response_format")
         self.assertEqual(payload["error"]["code"], "invalid_response_format")
 
-    @patch("src.api.routes.run_agent_task")
+    @patch("src.routes.v1.run_agent_task")
     def test_v1_chat_completions_json_mode_extracts_fenced_json(self, run_agent_task):
         run_agent_task.return_value = {
             "result": "Here is the result:\n```json\n{\"ok\": true, \"value\": 3}\n```",
@@ -703,7 +703,7 @@ class TestV1Contracts(unittest.TestCase):
         content = payload["choices"][0]["message"]["content"]
         self.assertEqual(content, '{"ok": true, "value": 3}')
 
-    @patch("src.api.routes.run_agent_task")
+    @patch("src.routes.v1.run_agent_task")
     def test_v1_chat_completions_json_schema_mode_validates_required_fields(self, run_agent_task):
         run_agent_task.return_value = {
             "result": '{"name":"nexus","score":9}',
@@ -736,7 +736,7 @@ class TestV1Contracts(unittest.TestCase):
         content = payload["choices"][0]["message"]["content"]
         self.assertEqual(content, '{"name": "nexus", "score": 9}')
 
-    @patch("src.api.routes.run_agent_task")
+    @patch("src.routes.v1.run_agent_task")
     def test_v1_chat_completions_json_schema_mode_rejects_mismatched_output(self, run_agent_task):
         run_agent_task.return_value = {
             "result": '{"name":"nexus"}',
@@ -769,7 +769,7 @@ class TestV1Contracts(unittest.TestCase):
         self.assertEqual(payload["error"]["type"], "invalid_response_format")
         self.assertEqual(payload["error"]["code"], "invalid_response_format")
 
-    @patch("src.api.routes.run_agent_task")
+    @patch("src.routes.v1.run_agent_task")
     def test_v1_chat_completions_reports_usage_token_counts(self, run_agent_task):
         run_agent_task.return_value = {
             "result": "hello from nexus assistant",
@@ -820,7 +820,7 @@ class TestV1Contracts(unittest.TestCase):
         self.assertIn("single_agent_loop", workflow_ids)
         self.assertIn("hierarchical_orchestrator", workflow_ids)
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.reasoning.call_llm_with_fallback")
     def test_reason_generator_critic_returns_revised_answer_with_citation_confidence(self, call_with_fallback):
         call_with_fallback.side_effect = [
             ({"content": "Initial answer with source: https://example.com/report"}, "provider_a"),
@@ -854,13 +854,13 @@ class TestV1Contracts(unittest.TestCase):
 
 class TestPerUserRateLimits(unittest.TestCase):
     def setUp(self):
-        from src.api import routes as api_routes
-        api_routes._session_requests.clear()
+        from src.routes._helpers import _session_requests
+        _session_requests.clear()
         client.post("/settings/rate-limits", json={"mode": "soft", "per_minute": 60, "per_day": 2500})
 
     def tearDown(self):
-        from src.api import routes as api_routes
-        api_routes._session_requests.clear()
+        from src.routes._helpers import _session_requests
+        _session_requests.clear()
         client.post("/settings/rate-limits", json={"mode": "soft", "per_minute": 60, "per_day": 2500})
 
     def test_rate_limit_settings_endpoint_roundtrip(self):
@@ -881,7 +881,7 @@ class TestPerUserRateLimits(unittest.TestCase):
         self.assertEqual(bad.status_code, 422)
         self.assertEqual(bad.json().get("type"), "validation_error")
 
-    @patch("src.api.routes.run_agent_task")
+    @patch("src.routes.v1.run_agent_task")
     def test_soft_mode_does_not_block_when_over_limit(self, run_agent_task):
         run_agent_task.return_value = {"result": "ok", "provider": "nexus", "model": "nexus"}
         client.post("/settings/rate-limits", json={"mode": "soft", "per_minute": 1, "per_day": 100})
@@ -898,7 +898,7 @@ class TestPerUserRateLimits(unittest.TestCase):
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 200)
 
-    @patch("src.api.routes.run_agent_task")
+    @patch("src.routes.v1.run_agent_task")
     def test_hard_mode_blocks_with_structured_quota_error(self, run_agent_task):
         run_agent_task.return_value = {"result": "ok", "provider": "nexus", "model": "nexus"}
         client.post("/settings/rate-limits", json={"mode": "hard", "per_minute": 1, "per_day": 100})
@@ -1226,13 +1226,13 @@ class TestWebhookAndGistContracts(unittest.TestCase):
 
         admin_headers = {"Authorization": f"Bearer {_make_token('gist_admin', role='admin')}"}
 
-        with patch("src.api.routes.restore_from_gist", return_value=True) as mock_restore:
+        with patch("src.gist_backup.restore_from_gist", return_value=True) as mock_restore:
             restore_resp = client.post("/backup/gist/restore", headers=admin_headers)
         self.assertEqual(restore_resp.status_code, 200)
         self.assertTrue(restore_resp.json().get("restored"))
         mock_restore.assert_called_once()
 
-        with patch("src.api.routes.gist_push_now") as mock_push:
+        with patch("src.gist_backup.push_now") as mock_push:
             push_resp = client.post("/backup/gist/push", headers=admin_headers)
         self.assertEqual(push_resp.status_code, 200)
         self.assertTrue(push_resp.json().get("ok"))
@@ -2596,7 +2596,7 @@ class TestSprintD(unittest.TestCase):
         self.assertIn("items", payload)
         self.assertIsInstance(payload["items"], list)
 
-    @patch("src.api.routes.get_rag_system")
+    @patch("src.routes.rag.get_rag_system")
     def test_rag_documents_list_and_delete_endpoints(self, mock_get_rag):
         class _FakeVectorStore:
             def __init__(self):
@@ -3078,7 +3078,7 @@ class TestSprintE(unittest.TestCase):
         self.assertEqual(deleted.status_code, 200)
         self.assertEqual(deleted.json().get("deleted"), policy["id"])
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.finetune.call_llm_with_fallback")
     def test_synthetic_generation_and_curation_contract(self, call_llm_with_fallback):
         call_llm_with_fallback.return_value = ({"action": "respond", "content": "{\"statement\":\"synthetic\"}"}, "mock")
 
@@ -3154,7 +3154,7 @@ class TestSprintE(unittest.TestCase):
         self.assertEqual(wiring.status_code, 200)
         self.assertTrue(wiring.json().get("wired"))
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.finetune.call_llm_with_fallback")
     def test_distillation_pipeline_contract(self, call_llm_with_fallback):
         call_llm_with_fallback.return_value = ({"action": "respond", "content": "Distilled answer"}, "mock")
         created = client.post(
@@ -3580,7 +3580,7 @@ class TestSprintF(unittest.TestCase):
         self.assertIn("hints", payload)
         self.assertIn("retry_after_seconds", payload)
 
-    @patch("src.api.routes.run_agent_task")
+    @patch("src.routes.agent.run_agent_task")
     def test_agent_post_forwards_execution_budget_controls(self, mock_run):
         mock_run.return_value = {
             "result": "ok",
@@ -3602,7 +3602,7 @@ class TestSprintF(unittest.TestCase):
         self.assertEqual(kwargs.get("max_time_s"), 1.5)
         self.assertEqual(kwargs.get("budget_tokens_out"), 250)
 
-    @patch("src.api.routes.warmup_agent")
+    @patch("src.routes.agent.warmup_agent")
     def test_agent_warmup_endpoint_calls_runtime(self, mock_warmup):
         mock_warmup.return_value = {"status": "warmed", "provider": "groq"}
         response = client.post("/agent/warmup", json={"session_id": "s1", "persona": "coder"})
@@ -4874,8 +4874,8 @@ class TestSelfImprovementLoop(unittest.TestCase):
             {"trace_id": "tr_001", "steps": 3, "task": "test", "started_at": "2026-04-14T12:00:00Z"},
             {"trace_id": "tr_002", "steps": 5, "task": "test", "started_at": "2026-04-14T11:00:00Z"},
         ]
-        with patch("src.api.routes.call_llm_with_fallback", return_value=(mock_response, "mock-provider")), \
-             patch("src.api.routes._list_traces", return_value=mock_traces):
+        with patch("src.routes.agent.call_llm_with_fallback", return_value=(mock_response, "mock-provider")), \
+             patch("src.routes.agent._list_traces", return_value=mock_traces):
             resp = client.post("/agent/self-review", json={"limit": 5})
         self.assertEqual(resp.status_code, 200)
         data = resp.json()
@@ -4893,8 +4893,8 @@ class TestSelfImprovementLoop(unittest.TestCase):
         mock_traces = [
             {"trace_id": "tr_hist_001", "steps": 2, "task": "test", "started_at": "2026-04-14T10:00:00Z"},
         ]
-        with patch("src.api.routes.call_llm_with_fallback", return_value=(mock_response, "test-provider")), \
-             patch("src.api.routes._list_traces", return_value=mock_traces):
+        with patch("src.routes.agent.call_llm_with_fallback", return_value=(mock_response, "test-provider")), \
+             patch("src.routes.agent._list_traces", return_value=mock_traces):
             post_resp = client.post("/agent/self-review", json={"limit": 3})
         review_id = post_resp.json().get("review_id")
         self.assertIsNotNone(review_id)
@@ -5357,7 +5357,7 @@ class TestAdvancedReasoning(unittest.TestCase):
     _MOCK_CRITIC_TURN = {"content": '{"argument":"Counter point","key_points":["B"],"confidence":0.7}'}
     _MOCK_VERDICT    = {"content": '{"verdict":"inconclusive","synthesis":"Balanced view","strongest_proponent_point":"A","strongest_critic_point":"B","confidence":0.65}'}
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_debate_returns_expected_shape(self, mock_llm):
         mock_llm.side_effect = [
             (self._MOCK_DEBATE_TURN, "prov_a"),
@@ -5376,7 +5376,7 @@ class TestAdvancedReasoning(unittest.TestCase):
         self.assertIsInstance(data["transcript"], list)
         self.assertEqual(len(data["transcript"]), 1)
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_debate_verdict_is_valid_value(self, mock_llm):
         mock_llm.side_effect = [
             (self._MOCK_DEBATE_TURN, "prov_a"),
@@ -5387,7 +5387,7 @@ class TestAdvancedReasoning(unittest.TestCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn(resp.json()["verdict"], ("supported", "refuted", "inconclusive"))
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_debate_transcript_has_round_structure(self, mock_llm):
         mock_llm.side_effect = [
             (self._MOCK_DEBATE_TURN, "prov_a"),
@@ -5402,7 +5402,7 @@ class TestAdvancedReasoning(unittest.TestCase):
         self.assertIn("critic", rnd)
         self.assertEqual(rnd["round"], 1)
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_debate_confidence_in_range(self, mock_llm):
         mock_llm.side_effect = [
             (self._MOCK_DEBATE_TURN, "prov_a"),
@@ -5415,7 +5415,7 @@ class TestAdvancedReasoning(unittest.TestCase):
         self.assertGreaterEqual(conf, 0.0)
         self.assertLessEqual(conf, 1.0)
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_debate_rounds_clamped_to_max(self, mock_llm):
         # 99 rounds → clamped to 5: 5×2 turn calls + 1 verdict call = 11 calls
         _turn    = {"content": '{"argument":"x","key_points":[],"confidence":0.5}'}
@@ -5445,7 +5445,7 @@ class TestAdvancedReasoning(unittest.TestCase):
     _HYP_CONC_RESP = {"content": ('{"conclusion":"H1 most likely","best_hypothesis_id":1,'  
         '"uncertainty":"low","next_steps":["step1"],"overall_confidence":0.75}')}
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_hypothesis_returns_expected_shape(self, mock_llm):
         mock_llm.side_effect = [
             (self._HYP_GEN_RESP,  "gen"),
@@ -5466,7 +5466,7 @@ class TestAdvancedReasoning(unittest.TestCase):
         self.assertIn("providers", data)
         self.assertIsInstance(data["hypotheses_tested"], list)
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_hypothesis_each_result_has_verdict(self, mock_llm):
         mock_llm.side_effect = [
             (self._HYP_GEN_RESP,  "gen"),
@@ -5484,7 +5484,7 @@ class TestAdvancedReasoning(unittest.TestCase):
             self.assertIn("verdict", h)
             self.assertIn("confidence", h)
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_hypothesis_overall_confidence_in_range(self, mock_llm):
         mock_llm.side_effect = [
             (self._HYP_GEN_RESP,  "gen"),
@@ -5501,7 +5501,7 @@ class TestAdvancedReasoning(unittest.TestCase):
         self.assertGreaterEqual(conf, 0.0)
         self.assertLessEqual(conf, 1.0)
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.agent.call_llm_with_fallback")
     def test_hypothesis_max_clamped(self, mock_llm):
         # 99 -> clamped to 8: 1 gen + 8 test + 1 conc = 10 calls
         mock_llm.side_effect = (
@@ -6110,7 +6110,7 @@ class TestIntegrationAutonomyRAGReasoning(unittest.TestCase):
         response = client.post("/reason/consensus", json={})
         self.assertEqual(response.status_code, 422)
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.reasoning.call_llm_with_fallback")
     def test_reason_generator_critic_task_returns_result(self, mock_llm):
         """POST /reason/generator-critic returns critique-revised answer."""
         # Mock the llm calls for generation and criticism
@@ -6240,7 +6240,7 @@ class TestIntegrationAutonomyRAGReasoning(unittest.TestCase):
 class TestRagSection5Hardening(unittest.TestCase):
     """Section 5 hardening checks: citations, confidence, filtering, and versioning."""
 
-    @patch("src.api.routes.call_llm_with_fallback")
+    @patch("src.routes.rag.call_llm_with_fallback")
     def test_rag_query_returns_citations_and_calibrated_confidence(self, mock_call):
         mock_call.return_value = ({"content": "Python is a web framework language [1]."}, "mock")
 

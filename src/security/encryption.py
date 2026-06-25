@@ -29,7 +29,6 @@ import base64
 import json
 import logging
 import os
-import secrets
 import threading
 
 logger = logging.getLogger("nexus.security.encryption")

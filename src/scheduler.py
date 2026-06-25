@@ -5,6 +5,9 @@ import time
 import uuid
 from typing import Any, Callable
 
+import logging
+
+logger = logging.getLogger(__name__)
 
 _lock = threading.Lock()
 _jobs: dict[str, "Job"] = {}
@@ -44,7 +47,7 @@ def _persist(job: Job) -> None:
         from .db import upsert_scheduled_job
         upsert_scheduled_job(job.to_dict())
     except Exception:
-        pass
+        logger.warning("scheduler.py:49: _persist failed", exc_info=True)
 
 
 def schedule_job(
@@ -108,7 +111,7 @@ def delete_job(job_id: str) -> bool:
         from .db import delete_scheduled_job
         delete_scheduled_job(job_id)
     except Exception:
-        pass
+        logger.warning("scheduler.py:113: delete_scheduled_job failed", exc_info=True)
     return True
 
 
@@ -121,6 +124,7 @@ def restore_from_db() -> list[Job]:
         from .db import load_scheduled_jobs
         rows = load_scheduled_jobs()
     except Exception:
+        logger.warning("scheduler.py:126: restore_from_db failed", exc_info=True)
         return []
     restored: list[Job] = []
     with _lock:

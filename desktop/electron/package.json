@@ -1,8 +1,7 @@
 {
   "name": "nexus-ai-desktop",
   "version": "0.1.0",
-  "description": "Nexus AI desktop shell",
-  "private": true,
+  "description": "Nexus AI — universal AI assistant desktop shell",
   "license": "MIT",
   "main": "main.js",
   "scripts": {
@@ -10,67 +9,89 @@
     "dev": "electron .",
     "pack": "electron-builder --dir",
     "dist": "electron-builder",
-    "dist:linux": "electron-builder --linux AppImage deb",
-    "dist:mac": "electron-builder --mac dmg zip",
-    "dist:win": "electron-builder --win nsis zip",
+    "dist:linux": "electron-builder --linux",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:all": "electron-builder -lw",
     "release": "electron-builder --publish always"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/zajferx/Nexus-Systems.git"
+  },
+  "author": {
+    "name": "Zajferx",
+    "email": "zajferx@example.com"
+  },
+  "homepage": "https://github.com/zajferx/Nexus-Systems#readme",
   "build": {
     "appId": "ai.nexus.desktop",
     "productName": "Nexus AI",
     "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
     "files": [
       "main.js",
-      "package.json"
+      "preload.js",
+      "package.json",
+      {
+        "from": "../../static",
+        "to": "static",
+        "filter": ["**/*"]
+      }
+    ],
+    "extraResources": [
+      {
+        "from": "../../static",
+        "to": "static",
+        "filter": ["**/*"]
+      }
     ],
     "directories": {
       "output": "dist"
     },
     "linux": {
       "category": "Utility",
+      "icon": "../../static/icon-512.png",
+      "desktop": {
+        "Name": "Nexus AI",
+        "Comment": "Universal AI Assistant",
+        "Categories": "Utility;AI;Network;",
+        "StartupWMClass": "nexus-ai-desktop"
+      },
       "target": [
-        {
-          "target": "AppImage",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "deb",
-          "arch": [
-            "x64"
-          ]
-        }
-      ],
-      "icon": "../../static/icon-512.png"
+        { "target": "AppImage", "arch": ["x64", "arm64"] },
+        { "target": "deb", "arch": ["x64", "arm64"] },
+        { "target": "rpm", "arch": ["x64", "arm64"] },
+        { "target": "snap", "arch": ["x64"] },
+        { "target": "tar.gz", "arch": ["x64", "arm64"] }
+      ]
     },
     "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "../../static/icon-512.png",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "entitlements.mac.plist",
+      "entitlementsInherit": "entitlements.mac.plist",
       "target": [
-        "dmg",
-        "zip"
-      ],
-      "category": "public.app-category.productivity"
+        { "target": "dmg", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] }
+      ]
     },
     "win": {
+      "icon": "../../static/icon-512.png",
       "target": [
-        {
-          "target": "nsis",
-          "arch": [
-            "x64"
-          ]
-        },
-        {
-          "target": "zip",
-          "arch": [
-            "x64"
-          ]
-        }
+        { "target": "nsis", "arch": ["x64", "arm64"] },
+        { "target": "zip", "arch": ["x64", "arm64"] },
+        { "target": "portable", "arch": ["x64"] }
       ]
     },
     "nsis": {
       "oneClick": false,
       "allowElevation": true,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Nexus AI"
     },
     "publish": [
       {

@@ -2,10 +2,18 @@
 Built-in tools that don't need LLM calls — calculator, weather, currency,
 unit converter, regex tester, base64, JSON formatter, color info.
 """
+import logging
 import importlib.util
-import os, re, json, math, subprocess, zipfile, base64 as b64lib, time, hashlib
+import os
+import re
+import json
+import math
+import subprocess
+import zipfile
+import base64 as b64lib
+import time
+import hashlib
 from pathlib import Path
-from datetime import datetime
 from .providers.model_router import ModelRouter
 from .scheduler import (
     schedule_job,
@@ -17,8 +25,9 @@ from .knowledge_graph import (
     kg_store as _kg_store,
     kg_query as _kg_query,
     kg_list_entities as _kg_list,
-    kg_get as _kg_get,
 )
+
+logger = logging.getLogger(__name__)
 
 # ── CALCULATOR ────────────────────────────────────────────────────────────────
 _SAFE_NAMES = {k: v for k, v in math.__dict__.items() if not k.startswith('_')}
@@ -1076,7 +1085,10 @@ def tool_audio_analyse(
 def tool_youtube_transcript(url: str) -> str:
     """Extract subtitles/transcript from a YouTube video using yt-dlp."""
     try:
-        import yt_dlp, tempfile, os, json as _json
+        import yt_dlp
+        import tempfile
+        import os
+        import json as _json
         opts = {
             "skip_download": True,
             "writeautomaticsub": True,
@@ -1160,6 +1172,7 @@ def tool_youtube(url: str) -> str:
                 _sum_resp, _ = _clf([{"role": "user", "content": _sum_prompt}], task="summarize")
                 summary_text = _sum_resp.get("content", transcript_text[:2000])
             except Exception:
+                logger.warning("YouTube summarization via LLM failed, falling back to raw transcript", exc_info=True)
                 pass
         return (
             f"**{title or 'YouTube video'}**\n"
@@ -1324,7 +1337,8 @@ def tool_read_pptx(path: str, workdir: str = "/tmp") -> str:
 
 # ── SPREADSHEET (CSV) ─────────────────────────────────────────────────────────
 def tool_read_csv(path: str, workdir: str = "/tmp") -> str:
-    import os, csv
+    import os
+    import csv
     full = os.path.join(workdir, path) if not os.path.isabs(path) else path
     if not os.path.exists(full):
         return f"File not found: {path}"
@@ -1347,7 +1361,8 @@ def tool_read_csv(path: str, workdir: str = "/tmp") -> str:
 
 def tool_write_csv(path: str, data: list, workdir: str = "/tmp") -> str:
     """data: list of lists (first row = headers)"""
-    import os, csv
+    import os
+    import csv
     full = os.path.join(workdir, path) if not os.path.isabs(path) else path
     os.makedirs(os.path.dirname(full), exist_ok=True)
     try:
@@ -1361,11 +1376,12 @@ def tool_write_csv(path: str, data: list, workdir: str = "/tmp") -> str:
 # ── API CALLER ────────────────────────────────────────────────────────────────
 def tool_api_call(method: str, url: str, headers: dict | None = None,
                   body: dict | str | None = None, timeout: int = 15) -> str:
-    import requests as _r, json as _j
+    import requests as _r
+    import json as _j
     BLOCKED_HOSTS = ["169.254.", "192.168.", "10.", "127.", "0.0.0.0", "localhost"]
     for b in BLOCKED_HOSTS:
         if b in url:
-            return f"Blocked: cannot call internal/local addresses."
+            return "Blocked: cannot call internal/local addresses."
     try:
         method = method.upper()
         hdrs   = {"User-Agent": "ClaudeAlt/1.0", **(headers or {})}
@@ -1393,7 +1409,9 @@ def tool_api_call(method: str, url: str, headers: dict | None = None,
 # ── PAGE READER ───────────────────────────────────────────────────────────────
 def tool_read_page(url: str) -> str:
     """Fetch a webpage and return readable text (strips HTML tags)."""
-    import requests as _r, re as _re, html as _html
+    import requests as _r
+    import re as _re
+    import html as _html
     BLOCKED = ["localhost", "127.", "192.168.", "10.", "169.254."]
     for b in BLOCKED:
         if b in url:
@@ -1479,6 +1497,7 @@ def tool_search_in_files(pattern: str, include_glob: str = "*", workdir: str = "
                         if len(matches) >= max_results:
                             break
         except Exception:
+            logger.warning("Failed to read file '%s' during grep search, skipping", file_path, exc_info=True)
             continue
         if len(matches) >= max_results:
             break
@@ -1684,7 +1703,6 @@ def tool_create_issue(title: str, body: str = "", labels: str = "", repo_path: s
 # ── DATABASE QUERY TOOL ───────────────────────────────────────────────────────
 def tool_query_db(connection_string: str, query: str) -> str:
     """Run a read-only SQL query. Only SELECT statements allowed."""
-    import re as _re
     stripped = query.strip().upper()
     if not stripped.startswith("SELECT"):
         return "❌ Only SELECT queries are allowed."
@@ -1708,7 +1726,7 @@ def tool_query_db(connection_string: str, query: str) -> str:
             lines += ["-+-".join("-"*max(1,len(str(c))) for c in cols)]
             for row in rows:
                 lines.append(" | ".join(str(row[c])[:30] for c in cols))
-            return f"```\n" + "\n".join(lines) + "\n```"
+            return "```\n" + "\n".join(lines) + "\n```"
         else:
             return "❌ Only SQLite (sqlite:///path.db) supported currently."
     except Exception as e:
@@ -1918,7 +1936,8 @@ def estimate_cost(provider_label: str, in_tokens: int, out_tokens: int) -> float
 
 def tool_inspect_sqlite(query: str = "", db_path: str = "") -> str:
     """Introspect a SQLite database: list tables, describe schema, or run a read-only query."""
-    import sqlite3 as _sq, os as _os
+    import sqlite3 as _sq
+    import os as _os
     path = db_path or _os.getenv("DB_PATH", "/tmp/nexus_ai.db")
     if not _os.path.exists(path):
         return f"❌ Database not found: {path}"
@@ -2111,7 +2130,6 @@ def tool_get_time(timezone: str = "UTC") -> str:
 
 def tool_nexus_status() -> str:
     """Return live Nexus AI system status including DB, Redis, and uptime."""
-    import os as _os, time as _time
     lines = ["**Nexus AI System Status**\n"]
     # DB
     try:
@@ -2201,7 +2219,9 @@ def tool_qr_code(text: str, size: int = 10) -> str:
 
 def tool_csv_to_json(csv_text: str) -> str:
     """Convert CSV text to a JSON array."""
-    import csv, io, json as _json
+    import csv
+    import io
+    import json as _json
     if not csv_text.strip():
         return "❌ csv_text is required."
     try:
@@ -2219,7 +2239,9 @@ def tool_csv_to_json(csv_text: str) -> str:
 
 def tool_json_to_csv(json_text: str) -> str:
     """Convert a JSON array of objects to CSV text."""
-    import csv, io, json as _json
+    import csv
+    import io
+    import json as _json
     if not json_text.strip():
         return "❌ json_text is required."
     try:
@@ -2296,12 +2318,18 @@ def tool_url_encode(text: str, mode: str = "encode") -> str:
         return f"❌ URL encode/decode failed: {e}"
 
 
+def tool_url_decode(text: str) -> str:
+    """URL-decode a string."""
+    return tool_url_encode(text, mode="decode")
+
+
 def tool_jwt_decode(token: str) -> str:
     """Inspect a JWT payload (no signature validation — read-only)."""
     if not token.strip():
         return "❌ token is required."
     try:
-        import base64 as _b64, json as _json
+        import base64 as _b64
+        import json as _json
         parts = token.strip().split(".")
         if len(parts) not in (2, 3):
             return "❌ Not a valid JWT (expected 2 or 3 dot-separated parts)."
@@ -2452,7 +2480,7 @@ def tool_delete_file(path: str, workdir: str = "/tmp") -> str:
     if not target.exists():
         return f"❌ File not found: {path}"
     if target.is_dir():
-        return f"❌ Path is a directory. Use delete_directory instead."
+        return "❌ Path is a directory. Use delete_directory instead."
     try:
         target.unlink()
         return f"✅ Deleted: `{path}`"
@@ -2567,6 +2595,7 @@ def tool_run_command(command: str, workdir: str = "/tmp",
             resource.setrlimit(resource.RLIMIT_FSIZE, (max_file,   max_file))
             resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))  # limit fork bombs
         except Exception:
+            logger.warning("Failed to set resource limits in subprocess", exc_info=True)
             pass
 
     # ── Sandbox strategy ──────────────────────────────────────────────────────
@@ -2727,7 +2756,10 @@ def tool_web_search(query: str, max_results: int = 5, engine: str = "auto") -> s
     Search the web using Brave Search API, SerpAPI, or DuckDuckGo HTML fallback.
     BRAVE_SEARCH_API_KEY or SERPAPI_KEY env vars enable premium engines.
     """
-    import urllib.parse, urllib.request as _urlreq, json as _json, re as _re
+    import urllib.parse
+    import urllib.request as _urlreq
+    import json as _json
+    import re as _re
     if not query.strip():
         return "❌ query is required."
     limit = max(1, min(int(max_results), 10))
@@ -2754,6 +2786,7 @@ def tool_web_search(query: str, max_results: int = 5, engine: str = "auto") -> s
                         lines.append(f"   {desc}")
                 return "\n".join(lines)
         except Exception:
+            logger.warning("Brave search failed, falling back to next engine", exc_info=True)
             pass
 
     # ── SerpAPI ──────────────────────────────────────────────────────────
@@ -2773,6 +2806,7 @@ def tool_web_search(query: str, max_results: int = 5, engine: str = "auto") -> s
                         lines.append(f"   {r['snippet'][:200]}")
                 return "\n".join(lines)
         except Exception:
+            logger.warning("SerpAPI search failed, falling back to next engine", exc_info=True)
             pass
 
     # ── DuckDuckGo HTML fallback ──────────────────────────────────────────
@@ -2807,7 +2841,10 @@ def tool_web_scrape_structured(url: str, selectors: dict | None = None,
     selectors: dict of {field_name: css_selector}  e.g. {"title": "h1", "price": ".price"}
     output_format: "json" or "table"
     """
-    import urllib.request as _urlreq, re as _re, html as _html, json as _json
+    import urllib.request as _urlreq
+    import re as _re
+    import html as _html
+    import json as _json
     BLOCKED = ["localhost", "127.", "192.168.", "10.", "169.254."]
     for b in BLOCKED:
         if b in url:
@@ -2863,7 +2900,9 @@ def tool_web_scrape_structured(url: str, selectors: dict | None = None,
 
 def tool_rss_fetch(url: str, max_items: int = 10) -> str:
     """Fetch and parse an RSS or Atom feed, returning the latest items."""
-    import urllib.request as _urlreq, re as _re, html as _html
+    import urllib.request as _urlreq
+    import re as _re
+    import html as _html
     BLOCKED = ["localhost", "127.", "192.168.", "10.", "169.254."]
     for b in BLOCKED:
         if b in url:
@@ -2916,7 +2955,8 @@ def tool_rss_fetch(url: str, max_items: int = 10) -> str:
 
 def tool_sitemap_crawl(url: str, max_urls: int = 50) -> str:
     """Discover URLs from a sitemap.xml and return the URL list."""
-    import urllib.request as _urlreq, xml.etree.ElementTree as _ET
+    import urllib.request as _urlreq
+    import xml.etree.ElementTree as _ET
     BLOCKED = ["localhost", "127.", "192.168.", "10.", "169.254."]
     for b in BLOCKED:
         if b in url:
@@ -3044,7 +3084,7 @@ def tool_db_migrate(migration_sql: str, database_url: str = "",
             conn.executescript(q)
             conn.commit()
             conn.close()
-            return f"✅ SQLite migration applied successfully."
+            return "✅ SQLite migration applied successfully."
         elif url.startswith("postgresql://") or url.startswith("postgres://"):
             import psycopg2
             conn = psycopg2.connect(url)
@@ -3052,7 +3092,7 @@ def tool_db_migrate(migration_sql: str, database_url: str = "",
             with conn.cursor() as cur:
                 cur.execute(q)
             conn.close()
-            return f"✅ PostgreSQL migration applied successfully."
+            return "✅ PostgreSQL migration applied successfully."
         else:
             return "❌ Unsupported DATABASE_URL scheme."
     except Exception as e:
@@ -3443,6 +3483,7 @@ def _write_tool_audit(
         from .db import append_tool_audit_log
         append_tool_audit_log(record)
     except Exception:
+        logger.warning("Failed to persist tool audit log to DB, keeping in-memory only", exc_info=True)
         pass
 
 
@@ -3459,6 +3500,7 @@ def get_tool_audit_log(
         if rows:
             return rows
     except Exception:
+        logger.warning("Failed to load tool audit log from DB, falling back to in-memory", exc_info=True)
         pass
     # Fall back to in-memory
     with _audit_lock:
@@ -3468,3 +3510,32 @@ def get_tool_audit_log(
     if session_id:
         records = [r for r in records if r.get("session_id") == session_id]
     return records[:limit]
+
+
+# Tools dictionary for easy access by name
+_TOOLS = {
+    "calculate": tool_calculate,
+    "weather": tool_weather,
+    "currency": tool_currency,
+    "convert": tool_convert,
+    "regex": tool_regex,
+    "base64": tool_base64,
+    "json_format": tool_json_format,
+    "get_time": tool_get_time,
+    "nexus_status": tool_nexus_status,
+    "hash": tool_hash,
+    "uuid": tool_uuid,
+    "qr_code": tool_qr_code,
+    "csv_to_json": tool_csv_to_json,
+    "json_to_csv": tool_json_to_csv,
+    "xml_parse": tool_xml_parse,
+    "url_encode": tool_url_encode,
+    "url_decode": tool_url_decode,
+    "jwt_decode": tool_jwt_decode,
+    "color_convert": tool_color_convert,
+}
+
+# Backward compatibility alias
+_tools = _TOOLS
+
+

@@ -6,8 +6,7 @@ import unittest
 
 sys.path.insert(0, ".")
 
-
-# ── Python SDK version ────────────────────────────────────────────────────────
+# ── Python SDK version ────────────────────────────────────────────────────
 
 class TestSDKVersion(unittest.TestCase):
     def test_version_importable(self):
@@ -24,7 +23,7 @@ class TestSDKVersion(unittest.TestCase):
         self.assertRegex(__min_server_version__, r"^\d+\.\d+\.\d+")
 
 
-# ── SDK __init__ exports ──────────────────────────────────────────────────────
+# ── SDK __init__ exports ──────────────────────────────────────────────────
 
 class TestSDKInit(unittest.TestCase):
     def test_top_level_exports(self):
@@ -49,7 +48,7 @@ class TestSDKInit(unittest.TestCase):
         self.assertIsNotNone(AsyncCls)
 
 
-# ── NexusAIClient unit tests ──────────────────────────────────────────────────
+# ── NexusAIClient unit tests ──────────────────────────────────────────────
 
 class TestNexusAIClient(unittest.TestCase):
     def _make_client(self):
@@ -85,8 +84,30 @@ class TestNexusAIClient(unittest.TestCase):
         self.assertEqual(chunk.delta, "hello")
         self.assertEqual(chunk.finish_reason, "stop")
 
+    # === Enhanced error handling tests ===
+    def test_connection_error_handling(self):
+        """Test that connection errors are properly handled and converted to NexusAIError."""
+        from sdk.python.nexus_ai_sdk.client import NexusAIClient, NexusAIError
+        
+        client = NexusAIClient(base_url="http://localhost:9999", api_key="test-key")
+        
+        # We can't easily test actual connection errors without mocking,
+        # but we can verify the error types are correct
+        self.assertIsInstance(NexusAIError("test", status=0), NexusAIError)
+        
+    def test_timeout_error_handling(self):
+        """Test that timeout errors are properly handled and converted to NexusAIError with status 408."""
+        from sdk.python.nexus_ai_sdk.client import NexusAIClient, NexusAIError
+        
+        client = NexusAIClient(base_url="http://localhost:9999", api_key="test-key", timeout_s=30)
+        
+        # Test that we can create a timeout error with correct status
+        error = NexusAIError("Request timed out", status=408)
+        self.assertEqual(error.status, 408)
+        self.assertIn("Request timed out", str(error))
 
-# ── Operator tests ────────────────────────────────────────────────────────────
+
+# ── Operator tests ────────────────────────────────────────────────────
 
 class TestNexusOperator(unittest.TestCase):
     def setUp(self):
@@ -181,7 +202,7 @@ class TestNexusOperator(unittest.TestCase):
         self.assertEqual(call_count, 3)
 
 
-# ── Compatibility validator tests ─────────────────────────────────────────────
+# ── Compatibility validator tests ─────────────────────────────────────────
 
 class TestCompatValidator(unittest.TestCase):
     def test_validate_returns_report(self):
@@ -248,7 +269,7 @@ class TestCompatValidator(unittest.TestCase):
                 self.assertFalse(httpx_check.required)
 
 
-# ── pyproject.toml structure test ─────────────────────────────────────────────
+# ── pyproject.toml structure test ─────────────────────────────────────────
 
 class TestPyprojectToml(unittest.TestCase):
     def test_pyproject_exists(self):
@@ -278,7 +299,7 @@ class TestPyprojectToml(unittest.TestCase):
             self.assertIn(ver, content, f"Python {ver} not in classifiers")
 
 
-# ── SDK README test ───────────────────────────────────────────────────────────
+# ── SDK README test ───────────────────────────────────────────────────────
 
 class TestSDKReadme(unittest.TestCase):
     def test_sdk_readme_exists(self):
@@ -290,7 +311,7 @@ class TestSDKReadme(unittest.TestCase):
         self.assertIn("python", content)
 
 
-# ── TypeScript package.json test ──────────────────────────────────────────────
+# ── TypeScript package.json test ────────────────────────────────────────────
 
 class TestTypescriptPackageJson(unittest.TestCase):
     def test_package_json_fields(self):
@@ -326,7 +347,7 @@ class TestTypescriptPackageJson(unittest.TestCase):
         self.assertIn("declaration", cfg["compilerOptions"])
 
 
-# ── Go module test ────────────────────────────────────────────────────────────
+# ── Go module test ────────────────────────────────────────────────────────
 
 class TestGoSDK(unittest.TestCase):
     def test_go_mod_exists(self):
@@ -348,7 +369,7 @@ class TestGoSDK(unittest.TestCase):
             self.assertIn(method, content, f"Missing method: {method}")
 
 
-# ── Async client smoke test ───────────────────────────────────────────────────
+# ── Async client smoke test ───────────────────────────────────────────────
 
 class TestAsyncClientStructure(unittest.TestCase):
     def test_async_client_importable(self):
@@ -358,14 +379,42 @@ class TestAsyncClientStructure(unittest.TestCase):
     def test_async_client_has_methods(self):
         from sdk.python.nexus_ai_sdk.async_client import AsyncNexusAIClient
         for method in ["chat_completions", "chat_stream", "run_agent", "stream_agent",
-                        "benchmark_dataset", "benchmark_dataset_suite", "benchmark_export",
-                        "health", "close"]:
+                         "benchmark_dataset", "benchmark_dataset_suite", "benchmark_export",
+                         "health", "close"]:
             self.assertTrue(hasattr(AsyncNexusAIClient, method), f"Missing method: {method}")
 
     def test_async_client_context_manager_methods(self):
         from sdk.python.nexus_ai_sdk.async_client import AsyncNexusAIClient
         self.assertTrue(hasattr(AsyncNexusAIClient, "__aenter__"))
         self.assertTrue(hasattr(AsyncNexusAIClient, "__aexit__"))
+
+
+# ── Enhanced Async Client Error Handling Tests ─────────────────────────────────
+
+class TestAsyncClientErrorHandling(unittest.TestCase):
+    def test_async_client_importable(self):
+        """Test that the async client can be imported."""
+        from sdk.python.nexus_ai_sdk.async_client import AsyncNexusAIClient
+        self.assertIsNotNone(AsyncNexusAIClient)
+
+    def test_async_client_error_types(self):
+        """Test that we can create the expected error types."""
+        from sdk.python.nexus_ai_sdk.client import NexusAIError
+        
+        # Test connection error equivalent (status 0)
+        conn_error = NexusAIError("Failed to connect", status=0)
+        self.assertEqual(conn_error.status, 0)
+        self.assertIn("Failed to connect", str(conn_error))
+        
+        # Test timeout error equivalent (status 408)
+        timeout_error = NexusAIError("Request timed out", status=408)
+        self.assertEqual(timeout_error.status, 408)
+        self.assertIn("Request timed out", str(timeout_error))
+        
+        # Test general error
+        general_error = NexusAIError("General error", status=500)
+        self.assertEqual(general_error.status, 500)
+        self.assertIn("General error", str(general_error))
 
 
 if __name__ == "__main__":

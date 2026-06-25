@@ -1,4 +1,13 @@
-import os, re, json, glob, time, subprocess, threading, resource, hmac, hashlib
+import os
+import re
+import json
+import glob
+import time
+import subprocess
+import threading
+import resource
+import hmac
+import hashlib
 import urllib.request
 from urllib.parse import quote as _url_quote
 from functools import lru_cache
@@ -8,7 +17,7 @@ from typing import Dict, Any, List, Iterator, Optional, Pattern
 from pathlib import Path
 from .tools_builtin import dispatch_builtin, build_openai_tools
 from .autonomy import Orchestrator, classify_subtask, PlanningSystem
-from .personas import build_system_prompt, get_active_persona_name, get_persona, get_allowed_tools
+from .personas import get_active_persona_name, get_allowed_tools
 from .thinking import (
     build_tot_prompt,
     parse_tot_response,
@@ -19,18 +28,22 @@ from .thinking import (
     run_mcts_planning,
 )
 from .context_window import ContextWindowManager
-from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk, get_ensemble_enabled, set_ensemble_enabled
+from .ensemble import call_llm_ensemble, is_high_risk, score_task_risk, set_ensemble_enabled
 from .db import load_custom_instructions, log_usage, init_usage_table, add_safety_audit_entry, record_strict_clone_bypass_event, count_strict_clone_bypass_events, list_strict_clone_bypass_events
 from .knowledge_graph import kg_to_context_string
 from .execution_trace import save_checkpoint as _save_checkpoint
 from .safety_pipeline import SAFETY_POLICY_PROFILES, describe_block, screen_output, screen_tool_action
 from .safety_types import SafetyAction
-from .approvals import create_tool_approval, list_tool_approvals, decide_tool_approval, consume_approved_action
+from .approvals import create_tool_approval, consume_approved_action
 from .memory import add_memory, summarize_history as _summarize_history, get_memory_context
 from .profile_loader import load_profile_pack
-from .secrets_manager import get_secret, inject_request_credentials, secret_access_context
+from .secrets_manager import get_secret, inject_request_credentials
+import logging
+logger = logging.getLogger(__name__)
 from .circuit_breaker import CircuitBreakerOpen, CircuitState, get_circuit_breaker
 
+import logging
+logger = logging.getLogger(__name__)
 
 def _load_local_env_files() -> None:
     """Best-effort .env loader for local/dev runs.
@@ -46,7 +59,7 @@ def _load_local_env_files() -> None:
                 load_dotenv(dotenv_path=p, override=False)
         return
     except Exception:
-        pass
+        logger.warning("agent.py:50: failed to load dotenv", exc_info=True)
 
     for p in env_paths:
         if not p.exists():
@@ -66,14 +79,12 @@ def _load_local_env_files() -> None:
                 if (value.startswith('"') and value.endswith('"')) or (value.startswith("'") and value.endswith("'")):
                     value = value[1:-1]
                 else:
-                    # Strip inline comments in unquoted values (e.g. KEY=abc # note).
-                    # This avoids accidentally including human-readable comments in secrets.
                     hash_idx = value.find(" #")
                     if hash_idx != -1:
                         value = value[:hash_idx].rstrip()
                 os.environ[key] = value
         except Exception:
-            pass
+            logger.warning("agent.py:77: failed to parse .env line", exc_info=True)
 
 
 _load_local_env_files()
@@ -81,7 +92,7 @@ _load_local_env_files()
 try:
     init_usage_table()
 except Exception:
-    pass
+    logger.warning("agent.py:85: failed to init usage table", exc_info=True)
 
 # ── runtime config ────────────────────────────────────────────────────────────
 _config: Dict[str, Any] = {
@@ -184,30 +195,30 @@ def update_config(provider=None, model=None, temperature=None, persona=None,
             value = float(strict_confidence_threshold)
             _config["strict_confidence_threshold"] = min(1.0, max(0.0, value))
         except Exception:
-            pass
+            logger.warning("agent.py:189: invalid strict_confidence_threshold", exc_info=True)
     if strict_evidence_threshold is not None:
         try:
             value = int(strict_evidence_threshold)
             _config["strict_evidence_threshold"] = max(0, value)
         except Exception:
-            pass
+            logger.warning("agent.py:195: invalid strict_evidence_threshold", exc_info=True)
     if native_tool_budget_mode is not None:
         _config["native_tool_budget_mode"] = str(native_tool_budget_mode).lower().strip()
     if injected_context_max_chars is not None:
         try:
             _config["injected_context_max_chars"] = max(200, int(injected_context_max_chars))
         except Exception:
-            pass
+            logger.warning("agent.py:202: invalid injected_context_max_chars", exc_info=True)
     if tool_result_context_max_chars is not None:
         try:
             _config["tool_result_context_max_chars"] = max(200, int(tool_result_context_max_chars))
         except Exception:
-            pass
+            logger.warning("agent.py:208: invalid tool_result_context_max_chars", exc_info=True)
     if context_reserve_tokens is not None:
         try:
             _config["context_reserve_tokens"] = max(512, int(context_reserve_tokens))
         except Exception:
-            pass
+            logger.warning("agent.py:214: invalid context_reserve_tokens", exc_info=True)
     if turn_budget_enforced is not None:
         if isinstance(turn_budget_enforced, bool):
             _config["turn_budget_enforced"] = turn_budget_enforced
@@ -282,7 +293,7 @@ def _send_safety_event_webhook(entry: Dict[str, Any]) -> None:
         with urllib.request.urlopen(req, timeout=webhook_timeout):
             return
     except Exception as e:
-        print(f"Failed to send safety event webhook: {e}")
+        logger.error(f"Failed to send safety event webhook: {e}")
 
 def _push_safety_event(event_type: str, detail: Dict) -> None:
     """Append a safety audit event.  event_type: 'block' | 'profile_change' | 'pii_scrub'."""
@@ -297,13 +308,11 @@ def _push_safety_event(event_type: str, detail: Dict) -> None:
     try:
         add_safety_audit_entry(entry)
     except Exception:
-        # Keep runtime safety logging resilient even if persistence is unavailable.
-        pass
+        logger.warning("agent.py:302: failed to persist safety audit entry", exc_info=True)
     try:
         _send_safety_event_webhook(entry)
     except Exception:
-        # Never let webhook transport failures affect user-facing safety flows.
-        pass
+        logger.warning("agent.py:307: failed to send safety event webhook", exc_info=True)
 
 # ── token extraction from user messages ───────────────────────────────────────
 _TOKEN_RE   = re.compile(r'gh[ps]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{80,}')
@@ -333,7 +342,7 @@ def _redact_sensitive_text(text: str, secrets: list[str] | tuple[str, ...] = ())
             if encoded:
                 redacted = redacted.replace(encoded, "[REDACTED]")
         except Exception:
-            pass
+            logger.warning("agent.py:334: URL encoding failed in redactor", exc_info=True)
     # Hide URL userinfo credentials if present (e.g. https://token@host/...)
     redacted = re.sub(r"https://[^@/\s]+@", "https://[REDACTED]@", redacted)
     return redacted
@@ -981,7 +990,7 @@ def get_system_resources(max_age_seconds: int = 10) -> Dict[str, Any]:
                 elif line.startswith("MemAvailable:"):
                     avail_kb = int(line.split()[1])
     except Exception:
-        pass
+        logger.warning("agent.py:981: failed to parse /proc/meminfo", exc_info=True)
 
     total_gb = round(total_kb / (1024 * 1024), 2) if total_kb else None
     available_gb = round(avail_kb / (1024 * 1024), 2) if avail_kb else None
@@ -990,7 +999,7 @@ def get_system_resources(max_age_seconds: int = 10) -> Dict[str, Any]:
     try:
         load_1m = os.getloadavg()[0]
     except Exception:
-        pass
+        logger.warning("agent.py:991: getloadavg not available", exc_info=True)
 
     cpu_count = _cpu_count()
     cpu_load_ratio = round(load_1m / max(cpu_count, 1), 3) if load_1m is not None else None
@@ -1432,7 +1441,7 @@ def get_best_ollama_model(task_type: str) -> str:
                 if preferred.lower() in available:
                     return preferred
     except Exception:
-        pass
+        logger.warning("agent.py:1433: failed to query Ollama models", exc_info=True)
     # Return first preference as optimistic default (it may still work via cloud pull)
     return PROVIDERS["ollama"]["default_model"]
 
@@ -1453,7 +1462,7 @@ def get_best_vision_model() -> str:
                 if mdl.lower() in available:
                     return mdl
     except Exception:
-        pass
+        logger.warning("agent.py:1454: failed to query vision models", exc_info=True)
     return OLLAMA_VISION_MODELS[0]
 
 
@@ -1723,7 +1732,7 @@ def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[
         elif hw.get("prefer_local") and "ollama" in ordered:
             ordered = ["ollama"] + [p for p in ordered if p != "ollama"]
     except Exception:
-        pass
+        logger.warning("agent.py:1724: provider ordering by hardware failed", exc_info=True)
 
     # Budget-aware filtering: drop providers that exceed the cost ceiling.
     # FREE_ONLY_MODE forces free-tier provider routing globally.
@@ -2113,57 +2122,50 @@ ALWAYS finish with a respond action — never leave the user without an answer.
 # ── tool executors ────────────────────────────────────────────────────────────
 import requests as _req
 
+def _ensure_path_safe(path: str, workdir: str) -> str:
+    resolved = os.path.realpath(os.path.join(workdir, path))
+    wd = os.path.realpath(workdir)
+    if not resolved.startswith(wd + os.sep) and resolved != wd:
+        raise ValueError(f"Path traversal blocked: {path} escapes workspace")
+    return resolved
+
 def _time_re() -> str:
     try:
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-        return ""
-    except: return ""
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError  # noqa: F401
+    except ImportError:
+        pass
+    return ""
 
 def tool_get_time(timezone: str = "UTC") -> str:
-    try:
-        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-        ALIASES = {"sweden":"Europe/Stockholm","stockholm":"Europe/Stockholm",
-            "uk":"Europe/London","london":"Europe/London",
-            "new york":"America/New_York","nyc":"America/New_York",
-            "los angeles":"America/Los_Angeles","la":"America/Los_Angeles",
-            "tokyo":"Asia/Tokyo","japan":"Asia/Tokyo","paris":"Europe/Paris",
-            "france":"Europe/Paris","berlin":"Europe/Berlin","germany":"Europe/Berlin",
-            "dubai":"Asia/Dubai","uae":"Asia/Dubai","sydney":"Australia/Sydney",
-            "australia":"Australia/Sydney","jakarta":"Asia/Jakarta","indonesia":"Asia/Jakarta",
-            "utc":"UTC","gmt":"GMT"}
-        tz_name = ALIASES.get(timezone.lower().strip(), timezone)
-        try: tz = ZoneInfo(tz_name)
-        except ZoneInfoNotFoundError: return f"Unknown timezone: '{timezone}'"
-        now = datetime.now(tz)
-        return now.strftime("**%H:%M:%S** %Z — %A, %B %d %Y (UTC%z)")
-    except Exception as e: return f"Time lookup failed: {e}"
+    from .tools_builtin import tool_get_time as _f
+    return _f(timezone)
 
 def tool_web_search(query: str) -> str:
-    try:
-        from duckduckgo_search import DDGS
-        results = list(DDGS().text(query, max_results=6))
-        if not results: return "No results found."
-        # Return structured JSON so the agent can cite sources
-        import json as _json
-        sources = [{"title": r["title"], "url": r["href"],
-                    "snippet": r["body"][:300], "domain": r["href"].split("/")[2] if "://" in r["href"] else ""}
-                   for r in results]
-        lines = [f"[{i+1}] **{s['title']}** ({s['domain']})\n{s['url']}\n{s['snippet']}"
-                 for i, s in enumerate(sources)]
-        structured = "\n\n".join(lines)
-        structured += f"\n\n[SOURCES_JSON]{_json.dumps(sources)}[/SOURCES_JSON]"
-        return structured
-    except Exception as e: return f"Search failed: {e}"
+    from .tools_builtin import tool_web_search as _f
+    return _f(query)
 
-def tool_image_gen(prompt: str, width: int = 512, height: int = 512) -> str:
-    """Generate image via Pollinations.ai — completely free, no API key."""
-    import urllib.parse
+def tool_image_gen(prompt: str, width: int = 512, height: int = 512, backend: str = "pollinations") -> str:
+    """Generate image via specified backend."""
+    from .generation import generate_image_local
+    
     w = min(max(int(width), 256), 1024)
     h = min(max(int(height), 256), 1024)
-    encoded = urllib.parse.quote(prompt)
-    # Pollinations returns a direct image URL
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width={w}&height={h}&nologo=true"
-    return f"![Generated image]({url})\n\n*Prompt: {prompt}*"
+    
+    # Generate image bytes
+    image_bytes = generate_image_local(
+        prompt=prompt,
+        width=w,
+        height=h,
+        backend=backend
+    )
+    
+    if image_bytes is None:
+        return f"❌ Failed to generate image with backend '{backend}'"
+    
+    # Convert to base64 for display
+    import base64
+    b64_image = base64.b64encode(image_bytes).decode('utf-8')
+    return f"![Generated image](data:image/png;base64,{b64_image})\n\n*Prompt: {prompt}*"
 
 def tool_mcp_call(name: str, args: dict) -> str:
     """Call an external MCP tool by name."""
@@ -2226,13 +2228,13 @@ def tool_nexus_status() -> str:
         return f"⚠️ nexus_status failed: {e}"
 
 def tool_write_file(path: str, content: str, workdir: str) -> str:
-    full = os.path.join(workdir, path)
+    full = _ensure_path_safe(path, workdir)
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w", encoding="utf-8") as f: f.write(content)
     return f"Wrote {path} ({len(content)} chars)"
 
 def tool_read_file(path: str, workdir: str) -> str:
-    full = os.path.join(workdir, path)
+    full = _ensure_path_safe(path, workdir)
     if not os.path.exists(full):
         # Help the model recover without looping: list immediate subdirs that may contain the file.
         try:
@@ -2251,33 +2253,40 @@ def tool_read_file(path: str, workdir: str) -> str:
     return f"```\n{preview}{suffix}\n```"
 
 def tool_list_files(pattern: str, workdir: str) -> str:
-    matches = glob.glob(os.path.join(workdir, pattern), recursive=True)
-    rel = [os.path.relpath(m, workdir) for m in sorted(matches) if os.path.isfile(m)]
+    wd = os.path.realpath(workdir)
+    matches = glob.glob(os.path.join(wd, pattern), recursive=True)
+    rel = [os.path.relpath(m, wd) for m in sorted(matches) if os.path.isfile(m)]
     return "\n".join(rel) if rel else "(no files found)"
 
 def tool_delete_file(path: str, workdir: str) -> str:
-    full = os.path.join(workdir, path)
+    full = _ensure_path_safe(path, workdir)
     if not os.path.exists(full): return f"Not found: {path}"
     os.remove(full); return f"Deleted {path}"
 
 def tool_run_command(cmd: str, workdir: str) -> str:
-    BLOCKED = ["rm -rf /","sudo","ncat","mkfs","dd if=",":(){ :|:& };:",
-               "cd /app",">/app",">> /app","/app/main.py","/app/agent.py"]
-    for b in BLOCKED:
-        if b in cmd: return f"❌ Blocked: {cmd}"
+    BLOCKED_PATTERNS = ["rm -rf /", "sudo", "ncat", "mkfs", "dd if=",
+                        ":(){ :|:& };:", "cd /app", ">/app", ">> /app",
+                        "/app/main.py", "/app/agent.py"]
+    for b in BLOCKED_PATTERNS:
+        cmd_stripped = cmd.strip().lower()
+        if b in cmd_stripped:
+            return f"❌ Blocked: {cmd}"
     # Common sandbox mismatch: host mount paths are not visible in this runtime.
     if ("/run/media/" in cmd or "/media/" in cmd) and not (os.path.exists("/run/media") or os.path.exists("/media")):
         return ("❌ Host mount paths are not available in this runtime. "
                 f"Use a path under the current workspace: {workdir}")
     try:
+        import shlex
+        args = shlex.split(cmd)
         # Resource limits: 256MB RAM, 10s CPU
         def _preexec():
             try:
                 resource.setrlimit(resource.RLIMIT_AS,  (268435456, 268435456))
                 resource.setrlimit(resource.RLIMIT_CPU, (10, 10))
-            except Exception: pass
+            except Exception:
+                logger.warning("setrlimit in _preexec failed", exc_info=True)
 
-        r = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+        r = subprocess.run(args, capture_output=True, text=True,
                            cwd=workdir, timeout=60, preexec_fn=_preexec)
         out = (r.stdout + r.stderr).strip()
         out = _redact_sensitive_text(mask_token(out))
@@ -2291,7 +2300,7 @@ def tool_clone_repo(url: str, token: str, workdir: str, dest_path: str = "") -> 
     Works in sandboxes where outbound git:// / git+https is blocked.
     Falls back to subprocess git clone if API fetch fails.
     """
-    import requests as _req, base64 as _b64
+    import base64 as _b64
 
     # Parse owner/repo from URL
     parts = url.rstrip('/').replace('.git','').split('/')
@@ -2332,7 +2341,7 @@ def tool_clone_repo(url: str, token: str, workdir: str, dest_path: str = "") -> 
             if resp.status_code == 404:
                 return 0
             resp.raise_for_status()
-        except Exception as e:
+        except Exception:
             return 0
 
         items = resp.json()
@@ -2361,7 +2370,7 @@ def tool_clone_repo(url: str, token: str, workdir: str, dest_path: str = "") -> 
                         f.write(decoded)
                     fetched += 1
                 except Exception:
-                    pass
+                    logger.warning("agent.py:2363: failed to fetch repo file", exc_info=True)
         return fetched
 
     # Try API fetch first
@@ -2437,7 +2446,7 @@ def tool_commit_push(message: str, repo_url: str, token: str, workdir: str) -> s
     repo_name = repo_url.rstrip('/').split('/')[-1].replace('.git','')
     repo_dir = os.path.join(workdir, repo_name) if repo_name and os.path.isdir(os.path.join(workdir, repo_name)) else workdir
 
-    import requests as _req, base64 as _b64, hashlib as _hl
+    import base64 as _b64
 
     # Parse owner/repo
     parts = repo_url.rstrip('/').replace('.git','').split('/')
@@ -2849,7 +2858,7 @@ def _strict_doubt_assessment(
                 },
             )
         except Exception:
-            pass
+            logger.warning("agent.py:2850: failed to record strict clone bypass event", exc_info=True)
 
     deduped_reasons = list(dict.fromkeys(reasons))
     return {
@@ -2868,7 +2877,7 @@ def _parse_json(raw: str) -> Dict[str, Any]:
         if raw.lower().startswith("json"): raw = raw[4:].strip()
     try:
         return json.loads(raw)
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         # Try to salvage write_file actions with broken content fields
         # by extracting action + path and using raw content between first/last quote pairs
         if '"action": "write_file"' in raw or '"action":"write_file"' in raw:
@@ -2884,7 +2893,7 @@ def _parse_json(raw: str) -> Dict[str, Any]:
                     content = content.replace("\\n","\n").replace("\\t","\t").replace('\\"',"\"")
                     return {"action":"write_file","path":path_m.group(1),"content":content}
             except Exception:
-                pass
+                logger.warning("agent.py:2886: failed to parse write action", exc_info=True)
         # Fall back to treating as plain text response
         return {"action": "respond", "content": raw}
 
@@ -2989,7 +2998,7 @@ def _estimate_tokens(text: str) -> int:
         try:
             return len(enc.encode(text, disallowed_special=()))
         except Exception:
-            pass
+            logger.warning("agent.py:2991: token count estimate failed, using fallback", exc_info=True)
     # Fallback: average GPT-4 tokenisation is ~3.5 chars/token for English.
     return max(1, len(text) * 2 // 7)
 
@@ -3009,88 +3018,64 @@ def _messages_token_estimate(messages: List[Dict]) -> int:
 
 def _ollama_pull(model: str, base_url: str) -> None:
     """Auto-pull a missing Ollama model (pull-on-demand)."""
-    import requests as _req
     ollama_base = base_url.rstrip("/")
     if ollama_base.endswith("/v1"):
         ollama_base = ollama_base[:-3]
-    print(f"🔄 Ollama pull-on-demand: {model}")
+    logger.info(f"🔄 Ollama pull-on-demand: {model}")
     try:
         r = _req.post(f"{ollama_base}/api/pull", json={"name": model, "stream": False}, timeout=600)
         r.raise_for_status()
-        print(f"✅ Pulled {model}")
+        logger.info(f"✅ Pulled {model}")
     except Exception as exc:
-        print(f"⚠️ Could not pull {model}: {exc}")
+        logger.warning(f"⚠️ Could not pull {model}: {exc}")
         raise
 
 
-def _call_openai(
+def _build_openai_request(
     cfg: Dict,
     messages: List[Dict],
+    api_key: str,
+    model: str,
     tools: List[Dict] | None = None,
     system_prompt: str | None = None,
-) -> Dict[str, Any]:
-    import requests
-    secret_name = _provider_secret_name(cfg)
-    ctx = inject_request_credentials([secret_name]) if secret_name else nullcontext({})
-    with ctx as creds:
-        _raw_key = str((creds.get(secret_name) if secret_name else "") or _provider_api_key(cfg) or "").strip()
-        # Drop placeholder/comment keys (contain non-ASCII or start with '#')
-        api_key = _raw_key if (_raw_key and _raw_key.isascii() and not _raw_key.startswith("#")) else ""
-    # Consume vision model override (set by _smart_order_for_vision before the call).
-    model = cfg.pop("_vision_override", None) or _effective_model_for_provider(str(cfg.get("id") or ""), cfg)
-    if not model:
-        model = _effective_model_for_provider(str(cfg.get("id") or ""), cfg)
-    is_local = cfg.get("local") and cfg.get("keyless")
-
+) -> tuple[str, Dict[str, str], bytes]:
+    import json as _json
     _use_tools = bool(tools)
     _sys_prompt = system_prompt if system_prompt is not None else get_provider_system_prompt(native_tools=_use_tools)
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    body: Dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "system", "content": _sys_prompt}] + messages,
+        "temperature": _config["temperature"],
+        "max_tokens": 4096,
+    }
+    if _use_tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    payload = _json.dumps(body, ensure_ascii=False).encode("utf-8")
+    logger.debug(
+        f"[llm/{cfg.get('id','?')}] payload={len(payload)}B msgs={len(messages)}"
+        f"{' tools=' + str(len(tools)) if _use_tools else ''}",
+        flush=True,
+    )
+    url = cfg["base_url"].rstrip("/") + "/chat/completions"
+    return url, headers, payload
 
-    def _do_request():
-        import json as _json
-        headers = {"Content-Type": "application/json; charset=utf-8"}
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-        body: Dict[str, Any] = {
-            "model": model,
-            "messages": [{"role": "system", "content": _sys_prompt}] + messages,
-            "temperature": _config["temperature"],
-            "max_tokens": 4096,
-        }
-        if _use_tools:
-            body["tools"] = tools
-            body["tool_choice"] = "auto"
-        payload = _json.dumps(body, ensure_ascii=False).encode("utf-8")
-        print(
-            f"[llm/{cfg.get('id','?')}] payload={len(payload)}B msgs={len(messages)}"
-            f"{' tools=' + str(len(tools)) if _use_tools else ''}",
-            flush=True,
-        )
-        _call_timeout = int(os.getenv("LLM_CALL_TIMEOUT_S", "30"))
-        r = requests.post(
-            cfg["base_url"].rstrip("/")+"/chat/completions",
-            headers=headers,
-            data=payload,
-            timeout=_call_timeout)
-        if r.status_code >= 400:
-            body_txt = (r.text or "")[:300]
-            raise RuntimeError(f"openai_compat_http_{r.status_code}: {body_txt}")
-        return r
 
-    try:
-        resp = _do_request()
-    except Exception as exc:
-        if is_local and ("404" in str(exc) or "not found" in str(exc).lower()):
-            _ollama_pull(model, cfg["base_url"])
-            resp = _do_request()
-        else:
-            raise
+def _do_openai_http_call(url: str, headers: Dict[str, str], payload: bytes) -> Dict[str, Any]:
+    import requests
+    _call_timeout = int(os.getenv("LLM_CALL_TIMEOUT_S", "30"))
+    r = requests.post(url, headers=headers, data=payload, timeout=_call_timeout)
+    if r.status_code >= 400:
+        body_txt = (r.text or "")[:300]
+        raise RuntimeError(f"openai_compat_http_{r.status_code}: {body_txt}")
+    return r.json()
 
-    data = resp.json()
-    msg_obj = data["choices"][0]["message"]
+
+def _parse_openai_message(msg_obj: Dict[str, Any], use_tools: bool) -> Dict[str, Any]:
     content = msg_obj.get("content") or ""
-    # Some OpenAI-compatible backends (notably local Ollama/Qwen variants)
-    # can return an empty ``content`` but place text in reasoning/thinking fields.
-    # Normalize those into ``content`` to avoid empty assistant replies.
     if not content:
         content = (
             msg_obj.get("reasoning")
@@ -3099,7 +3084,6 @@ def _call_openai(
             or ""
         )
 
-    # Reasoning field normalization (DeepSeek/Ollama variants)
     reasoning = (
         msg_obj.get("reasoning_content")
         or msg_obj.get("reasoning")
@@ -3107,12 +3091,10 @@ def _call_openai(
         or ""
     )
 
-    # ── Native tool-calling path (highest priority) ───────────────────────────
-    # When we sent a tools= array, the model returns tool_calls instead of JSON
-    # text.  Parse the first tool call into the action dict directly — no regex
-    # fragility, no JSON parsing from raw text.
     raw_tool_calls = msg_obj.get("tool_calls") or []
-    if raw_tool_calls and _use_tools:
+
+    # Native tool-calling path
+    if raw_tool_calls and use_tools:
         tc = raw_tool_calls[0]
         fn = tc.get("function", {})
         try:
@@ -3124,21 +3106,19 @@ def _call_openai(
         result: Dict[str, Any] = {"action": fn.get("name", ""), **args}
         if reasoning and not result.get("thought"):
             result["thought"] = reasoning
-        # Store the raw tool_call metadata so stream_agent_task can build native history
         result["_tool_calls"] = [
-            {"id": tc.get("id") or f"call_{i}", "function": raw_tc.get("function", {})}
+            {"id": raw_tc.get("id") or f"call_{i}", "function": raw_tc.get("function", {})}
             for i, raw_tc in enumerate(raw_tool_calls)
         ]
         result["_native_tool_call"] = True
         if not result.get("action"):
-            print(f"[llm/{cfg.get('id','?')}] native tool_call but empty name — raw={fn}", flush=True)
+            logger.debug("[llm] native tool_call but empty name — raw=" + repr(fn))
         else:
-            print(f"[llm/{cfg.get('id','?')}] native tool_call action={result['action']!r}", flush=True)
+            logger.debug("[llm] native tool_call action=" + repr(result["action"]))
         return result
 
-    # In native mode, if no tool_call is returned, treat content as a final
-    # assistant response instead of forcing legacy JSON action parsing.
-    if _use_tools:
+    # Native mode but model returned content instead of tool call
+    if use_tools:
         result_native: Dict[str, Any] = {
             "action": "respond",
             "content": content or "",
@@ -3152,25 +3132,54 @@ def _call_openai(
             ])
         return result_native
 
-    # ── Legacy JSON-parsing path (non-native callers) ────────────────────────
-    result = _parse_json(content)
+    # Legacy JSON-parsing path
     if not result.get("action"):
-        print(f"[llm/{cfg.get('id','?')}] action=None raw={content[:200]!r}", flush=True)
+        logger.debug(f"[llm] action=None raw={content[:200]!r}")
     if reasoning and isinstance(result, dict) and not result.get("thought"):
         result["thought"] = reasoning
-
-    # Preserve any tool_calls metadata even on the legacy path (e.g. Gemini)
     if raw_tool_calls and isinstance(result, dict):
         result.setdefault("_tool_calls", [
             {"id": tc.get("id") or f"call_{i}", "function": tc.get("function", {})}
             for i, tc in enumerate(raw_tool_calls)
         ])
-
     return result
 
 
+def _call_openai(
+    cfg: Dict,
+    messages: List[Dict],
+    tools: List[Dict] | None = None,
+    system_prompt: str | None = None,
+) -> Dict[str, Any]:
+    secret_name = _provider_secret_name(cfg)
+    ctx = inject_request_credentials([secret_name]) if secret_name else nullcontext({})
+    with ctx as creds:
+        _raw_key = str((creds.get(secret_name) if secret_name else "") or _provider_api_key(cfg) or "").strip()
+        api_key = _raw_key if (_raw_key and _raw_key.isascii() and not _raw_key.startswith("#")) else ""
+    model = cfg.pop("_vision_override", None) or _effective_model_for_provider(str(cfg.get("id") or ""), cfg)
+    if not model:
+        model = _effective_model_for_provider(str(cfg.get("id") or ""), cfg)
+    is_local = cfg.get("local") and cfg.get("keyless")
+
+    url, headers, payload = _build_openai_request(cfg, messages, api_key, model, tools, system_prompt)
+
+    try:
+        data = _do_openai_http_call(url, headers, payload)
+    except Exception as exc:
+        if is_local and ("404" in str(exc) or "not found" in str(exc).lower()):
+            _ollama_pull(model, cfg["base_url"])
+            data = _do_openai_http_call(url, headers, payload)
+        else:
+            raise
+
+    msg_obj = data["choices"][0]["message"]
+    return _parse_openai_message(msg_obj, use_tools=bool(tools))
+
+
 def _call_grok(messages):
-    import requests, time as _t, json as _json
+    import requests
+    import time as _t
+    import json as _json
     secret_name = "GROK_API_KEY"  # pragma: allowlist secret
     with inject_request_credentials([secret_name]) as creds:
         _gk = str(creds.get(secret_name) or get_secret(secret_name, "") or "").strip()
@@ -3212,7 +3221,8 @@ def _call_grok(messages):
 
 
 def _call_claude_api(messages):
-    import requests, json as _json
+    import requests
+    import json as _json
     secret_name = "CLAUDE_API_KEY"  # pragma: allowlist secret
     with inject_request_credentials([secret_name]) as creds:
         _ck = str(creds.get(secret_name) or get_secret(secret_name, "") or "").strip()
@@ -3451,7 +3461,7 @@ def call_llm_with_fallback(
     resource_hint = _resource_tier(resources)
     avail_ram = resources.get("available_ram_gb")
     ram_txt = f"{avail_ram}GB" if avail_ram is not None else "unknown"
-    print(f"🧠 {complexity}/{resource_hint} (ram={ram_txt}) → {' → '.join(order[:4])}")
+    logger.debug(f"🧠 {complexity}/{resource_hint} (ram={ram_txt}) → {' → '.join(order[:4])}")
     last_err = None
     for pid in order:
         if _provider_temporarily_unavailable(pid):
@@ -3507,7 +3517,7 @@ def call_llm_with_fallback(
                 "status": "circuit_open",
                 "error": str(e),
             })
-            print(f"⛔ {pid} circuit open ({e.retry_after:.1f}s)")
+            logger.debug(f"⛔ {pid} circuit open ({e.retry_after:.1f}s)")
         except Exception as e:
             last_err = e
             elapsed = max(0.0, time.time() - started)
@@ -3525,7 +3535,7 @@ def call_llm_with_fallback(
                     "error": str(e),
                     "latency_ms": int(elapsed * 1000),
                 })
-                print(f"↩️ {pid} rate-limited")
+                logger.debug(f"↩️ {pid} rate-limited")
             elif isinstance(e, (_r.ConnectionError, _r.Timeout)):
                 attempts.append({
                     "provider_id": pid,
@@ -3534,7 +3544,7 @@ def call_llm_with_fallback(
                     "error": str(e),
                     "latency_ms": int(elapsed * 1000),
                 })
-                print(f"⚠️ {pid} connection error")
+                logger.debug(f"⚠️ {pid} connection error")
             else:
                 attempts.append({
                     "provider_id": pid,
@@ -3543,7 +3553,7 @@ def call_llm_with_fallback(
                     "error": str(e),
                     "latency_ms": int(elapsed * 1000),
                 })
-                print(f"⚠️ {pid}: {e}")
+                logger.debug(f"⚠️ {pid}: {e}")
 
     result, fallback_provider = _graceful_degraded_response(messages, task, str(last_err))
     attempts.append({
@@ -3574,14 +3584,19 @@ def _graceful_degraded_response(messages: List[Dict], task: str, reason: str) ->
         cache_key = _hl.md5(prompt_txt[:512].encode(), usedforsecurity=False).hexdigest()
         cached = cache_get(cache_key)
         if cached:
-            print("⚡ Graceful degradation: serving from response cache")
+            logger.debug("⚡ Graceful degradation: serving from response cache")
             if isinstance(cached, dict):
-                cached = dict(cached)
+                # Create a copy to avoid modifying the cached object
+                try:
+                    cached = dict(cached)
+                except Exception:
+                    # Fallback if dict() fails (e.g., if cached is not a proper mapping)
+                    return {"action": "respond", "content": str(cached), "_source": "cache"}, "cache"
                 cached["_source"] = "cache"
                 return cached, "cache"
             return {"action": "respond", "content": str(cached), "_source": "cache"}, "cache"
     except Exception:
-        pass
+        logger.warning("agent.py:3583: response cache lookup failed", exc_info=True)
 
     # 2 — Local Ollama fallback
     try:
@@ -3592,7 +3607,7 @@ def _graceful_degraded_response(messages: List[Dict], task: str, reason: str) ->
             tags = test.json().get("models", [])
             if tags:
                 first_model = tags[0].get("name", "llama3")
-                print(f"⚡ Graceful degradation: Ollama local model {first_model}")
+                logger.debug(f"⚡ Graceful degradation: Ollama local model {first_model}")
                 openai_base = ollama_url if ollama_url.endswith("/v1") else f"{ollama_url}/v1"
                 cfg = {
                     "id": "ollama_local_fallback",
@@ -3606,10 +3621,10 @@ def _graceful_degraded_response(messages: List[Dict], task: str, reason: str) ->
                 result["_source"] = "ollama_local"
                 return result, "ollama_local"
     except Exception:
-        pass
+        logger.warning("agent.py:3608: Ollama fallback failed", exc_info=True)
 
     # 3 — All fallbacks exhausted: raise structured error for caller.
-    print(f"⚡ Graceful degradation failed — all fallbacks exhausted (reason={reason})")
+    logger.debug(f"⚡ Graceful degradation failed — all fallbacks exhausted (reason={reason})")
     raise AllProvidersExhausted(f"All providers exhausted and no local fallback available. reason={reason}")
 
 
@@ -3677,7 +3692,7 @@ def call_llm_smart(
 
     threshold = float(_config.get("ensemble_threshold", 0.4))
     if not hints.get("disable_ensemble") and _config.get("ensemble_mode", True) and is_high_risk(effective_task, threshold=threshold):
-        print(f"🔴 High-risk task (score={risk:.2f}) — entering ensemble mode")
+        logger.debug(f"🔴 High-risk task (score={risk:.2f}) — entering ensemble mode")
         try:
             result, pid, ens_meta = call_llm_ensemble(
                 messages=messages,
@@ -3693,9 +3708,9 @@ def call_llm_smart(
             if meta.get("ensemble"):
                 return result, pid, meta
             # Ensemble fell below MIN_ENSEMBLE_SIZE — fall through to standard path.
-            print("⚠️  Ensemble insufficient — falling back to standard routing")
+            logger.debug("⚠️  Ensemble insufficient — falling back to standard routing")
         except Exception as exc:
-            print(f"⚠️  Ensemble failed ({exc}) — falling back")
+            logger.debug(f"⚠️  Ensemble failed ({exc}) — falling back")
 
     # Standard single-provider-with-fallback path.
     result, pid = call_llm_with_fallback(
@@ -3715,7 +3730,7 @@ def _maybe_compress_history(history: List[Dict]) -> List[Dict]:
         try:
             return CONTEXT_WINDOW.compress_history_with_llm(history, _orchestrator_llm)
         except Exception:
-            pass
+            logger.warning("agent.py:3717: LLM history compression failed", exc_info=True)
     head = history[:2]
     tail = history[-14:]
     omitted = len(history) - 16
@@ -3836,6 +3851,72 @@ def is_tool_allowed_for_persona(persona_name: str, tool_name: str) -> bool:
     return tool_name in allowed
 
 
+# ── stream_agent_task helpers ─────────────────────────────────────────────────
+
+def _action_sig(a: Dict[str, Any]) -> str:
+    keys = ("action", "url", "dest_path", "path", "cmd", "query", "name", "repo_url")
+    return "|".join(str(a.get(k, "")) for k in keys)[:800]
+
+
+def _requested_path_from_text(text: str) -> str:
+    m = re.search(r"(/(?:run/media|media|home|workspace|tmp|mnt)[^\s,;]*)", text)
+    if not m:
+        return ""
+    p = m.group(1)
+    return "" if p.startswith("http") else p
+
+
+def _blocker_reason(kind: str, result_text: str) -> str:
+    txt = (result_text or "").lower()
+    if not txt:
+        return ""
+    if "host mount paths are not available in this runtime" in txt:
+        return "runtime_path_mismatch"
+    if "packfile cannot be mapped" in txt or "cannot allocate memory" in txt:
+        return "runtime_clone_limits"
+    if kind == "clone_repo" and (
+        "both api fetch and git clone failed" in txt
+        or "operation timed out" in txt
+        or "timed out" in txt
+    ):
+        return "runtime_clone_limits"
+    return ""
+
+
+def _single_shot_blocker_reply(reason: str, clean_task: str, workdir: str) -> str:
+    req_path = _requested_path_from_text(clean_task) or "(path not detected)"
+    if reason == "runtime_path_mismatch":
+        return (
+            "I hit a runtime limitation here, so I am stopping tool retries.\n\n"
+            f"- Requested host path: {req_path}\n"
+            f"- This Nexus AI runtime cannot access that host mount directly.\n"
+            f"- This does not mean your workstation is misconfigured.\n"
+            f"- Immediate fallback: I can clone into this runtime now at {workdir}, "
+            "or give you a single host command to run locally.\n\n"
+            "Reply with: `runtime` or `host` and I will do exactly one path."
+        )
+    if reason == "runtime_clone_limits":
+        return (
+            "I hit a runtime limitation here, so I am stopping tool retries.\n\n"
+            "- Clone failed due to runtime memory/map limits in this sandbox.\n"
+            "- Your workstation may still be fine; this is runtime-specific.\n"
+            "- Immediate fallback: I can provide one exact host command for your machine, "
+            "or clone a smaller mirror/test repo here to verify flow.\n\n"
+            "Reply with: `host command` or `sandbox test`."
+        )
+    if reason == "host_env_change_required":
+        return (
+            "I hit a blocker that cannot be solved from inside Nexus AI alone.\n\n"
+            "- At this point, the remaining path requires a change on your workstation or host environment.\n"
+            "- I should only say this when there is no tool-only or runtime-only workaround left.\n\n"
+            "If you want, I will give you one exact host-side fix command and nothing more."
+        )
+    return (
+        "I hit a hard blocker in this runtime and stopped retries to avoid looping.\n"
+        "Tell me whether to continue on host or sandbox and I will do one direct path."
+    )
+
+
 # ── streaming agent ───────────────────────────────────────────────────────────
 def stream_agent_task(task: str, history: list, files: list | None = None,
                       stop_evt=None, sid: str = "", trace_id: str = "",
@@ -3904,73 +3985,14 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             try:
                 warmup_agent(sid=sid or "runtime", persona=_config.get("persona", "general"))
             except Exception:
-                pass
+                logger.warning("agent.py:3906: warmup_agent failed", exc_info=True)
 
     # Accumulated reasoning trace — populated by think/think_deep steps
     _trace_steps: List[Dict[str, Any]] = []
     _tool_attempts: Dict[str, int] = {}
 
-    def _action_sig(a: Dict[str, Any]) -> str:
-        keys = ("action", "url", "dest_path", "path", "cmd", "query", "name", "repo_url")
-        return "|".join(str(a.get(k, "")) for k in keys)[:800]
-
-    def _requested_path_from_text(text: str) -> str:
-        m = re.search(r"(/(?:run/media|media|home|workspace|tmp|mnt)[^\s,;]*)", text)
-        if not m:
-            return ""
-        p = m.group(1)
-        return "" if p.startswith("http") else p
-
-    def _blocker_reason(kind: str, result_text: str) -> str:
-        txt = (result_text or "").lower()
-        if not txt:
-            return ""
-        if "host mount paths are not available in this runtime" in txt:
-            return "runtime_path_mismatch"
-        if "packfile cannot be mapped" in txt or "cannot allocate memory" in txt:
-            return "runtime_clone_limits"
-        if kind == "clone_repo" and (
-            "both api fetch and git clone failed" in txt
-            or "operation timed out" in txt
-            or "timed out" in txt
-        ):
-            return "runtime_clone_limits"
-        # Reserve workstation/environment change guidance for truly unavoidable cases.
-        # Do not infer this from ordinary sandbox/runtime mismatches.
-        return ""
-
-    def _single_shot_blocker_reply(reason: str) -> str:
-        req_path = _requested_path_from_text(clean_task) or "(path not detected)"
-        if reason == "runtime_path_mismatch":
-            return (
-                "I hit a runtime limitation here, so I am stopping tool retries.\n\n"
-                f"- Requested host path: {req_path}\n"
-                f"- This Nexus AI runtime cannot access that host mount directly.\n"
-                f"- This does not mean your workstation is misconfigured.\n"
-                f"- Immediate fallback: I can clone into this runtime now at {workdir}, "
-                "or give you a single host command to run locally.\n\n"
-                "Reply with: `runtime` or `host` and I will do exactly one path."
-            )
-        if reason == "runtime_clone_limits":
-            return (
-                "I hit a runtime limitation here, so I am stopping tool retries.\n\n"
-                "- Clone failed due to runtime memory/map limits in this sandbox.\n"
-                f"- Your workstation may still be fine; this is runtime-specific.\n"
-                "- Immediate fallback: I can provide one exact host command for your machine, "
-                "or clone a smaller mirror/test repo here to verify flow.\n\n"
-                "Reply with: `host command` or `sandbox test`."
-            )
-        if reason == "host_env_change_required":
-            return (
-                "I hit a blocker that cannot be solved from inside Nexus AI alone.\n\n"
-                "- At this point, the remaining path requires a change on your workstation or host environment.\n"
-                "- I should only say this when there is no tool-only or runtime-only workaround left.\n\n"
-                "If you want, I will give you one exact host-side fix command and nothing more."
-            )
-        return (
-            "I hit a hard blocker in this runtime and stopped retries to avoid looping.\n"
-            "Tell me whether to continue on host or sandbox and I will do one direct path."
-        )
+    _trace_steps: List[Dict[str, Any]] = []
+    _tool_attempts: Dict[str, int] = {}
 
     # Checkpoint tracking
     _step_idx: int = 0
@@ -4266,7 +4288,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                        "polled": _llm_meta.get("polled", []),
                        "action_votes": _llm_meta.get("action_votes", {}),
                        "risk_score": _llm_meta.get("risk_score", 0.0)}
-        except AllProvidersExhausted as e:
+        except AllProvidersExhausted:
             time.sleep(8)
             try:
                 action, pid, _llm_meta = _next_action(messages, clean_task)
@@ -4289,11 +4311,12 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
 
         # Auto-retry once if output is clearly bad
         if _is_bad_output(action):
-            print(f"⚠️ Bad output from {pid}, retrying once…")
+            logger.debug(f"⚠️ Bad output from {pid}, retrying once…")
             try:
                 action, pid, _ = _next_action(messages, clean_task)
             except AllProvidersExhausted:
-                pass   # give up, use original bad output
+                logger.warning("agent.py:4295: all providers exhausted on retry, giving up", exc_info=True)
+                # give up, use original bad output
 
         if pid not in providers_used:
             providers_used.append(pid)
@@ -4327,7 +4350,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 messages.append({"role": "user", "content": _bad_fmt_msg})
             _step_idx += 1
             continue
-        print(f"[agent/loop step={_step_idx} sid={sid[:8] if sid else '-'}] action={kind!r} "
+        logger.debug(f"[agent/loop step={_step_idx} sid={sid[:8] if sid else '-'}] action={kind!r} "
               f"path={action.get('path','')!r} url={action.get('url','')!r}",
               flush=True)
         llm_confidence = 1.0
@@ -4603,7 +4626,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                     cost_usd=round(est_cost_usd, 8),
                 )
             except Exception:
-                pass
+                logger.warning("agent.py:4605: log_usage failed", exc_info=True)
 
             # ── Sprint E: live SSE signals ────────────────────────────────────
             yield {
@@ -5103,7 +5126,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             _hard = _blocker_reason(kind, result_str)
             if _hard:
                 _recent_conflict = _hard
-                final = _single_shot_blocker_reply(_hard)
+                final = _single_shot_blocker_reply(_hard, clean_task, workdir)
                 messages.append({"role": "assistant", "content": final})
                 cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
                 yield {
@@ -5151,7 +5174,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                         with open(_full_path, "r", encoding="utf-8", errors="replace") as _bfh:
                             _before_content = _bfh.read()
                     except Exception:
-                        pass
+                        logger.warning("agent.py:5153: failed to read existing file for diff", exc_info=True)
                 result       = tool_write_file(file_path, fc, workdir)
                 file_content = fc
                 artifact     = _is_artifact(file_path, fc)
@@ -5174,7 +5197,10 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
                 result = tool_delete_file(action.get("path",""), workdir)
             elif kind == "image_gen":
                 result = tool_image_gen(
-                    action.get("prompt",""), action.get("width",512), action.get("height",512))
+                    action.get("prompt",""), 
+                    action.get("width",512), 
+                    action.get("height",512),
+                    action.get("backend", "pollinations"))
             elif kind == "run_command":
                 result = tool_run_command(action.get("cmd",""), workdir)
             elif kind == "read_pdf":
@@ -5240,7 +5266,7 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
             err_class   = _classify_tool_error(e)
             retry_delay = _RETRY_DELAYS.get(err_class, 0.0)
             if err_class != "other" and kind in _RETRY_TOOL_KINDS and retry_delay > 0:
-                print(f"⚠️ {kind} failed ({err_class}), retrying in {retry_delay:.0f}s…")
+                logger.debug(f"⚠️ {kind} failed ({err_class}), retrying in {retry_delay:.0f}s…")
                 time.sleep(retry_delay)
                 try:
                     if   kind == "web_search":
@@ -5805,7 +5831,7 @@ def get_free_provider_diagnostics() -> Dict[str, Any]:
         latest_events = list_strict_clone_bypass_events(limit=1)
         latest_clone_bypass_ts = float(latest_events[0].get("ts") or 0.0) if latest_events else retained_latest_ts
     except Exception:
-        pass
+        logger.warning("agent.py:5807: failed to load strict clone bypass events", exc_info=True)
     for pid, cfg in PROVIDERS.items():
         has_key = _has_key(cfg)
         rate_limited = _is_rate_limited(pid)
@@ -5860,3 +5886,31 @@ def get_free_provider_diagnostics() -> Dict[str, Any]:
         },
         "timestamp": time.time(),
     }
+
+
+def run_task_description(task_id: str, description: str, cancel_event: threading.Event) -> str:
+    """Run a task from the background task queue.
+
+    Consumes *stream_agent_task* synchronously and returns the final
+    assistant content (or an error message).
+    """
+    from .execution_trace import new_trace
+
+    trace_id = new_trace()
+    accumulated: list[str] = []
+    for event in stream_agent_task(
+        task=description,
+        history=[],
+        stop_evt=cancel_event,
+        sid=f"task-{task_id}-trace-{trace_id}",
+        trace_id=trace_id,
+    ):
+        if cancel_event and cancel_event.is_set():
+            return "[cancelled]"
+        if event.get("type") == "final" or event.get("type") == "result":
+            content = event.get("content", event.get("result", ""))
+            if content:
+                accumulated.append(str(content))
+        if event.get("type") == "error":
+            return f"[error] {event.get('message', str(event.get('error', 'unknown')))}"
+    return "\n".join(accumulated) if accumulated else "(no output)"

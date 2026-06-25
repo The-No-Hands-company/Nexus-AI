@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.api.routes import _run_fine_tuning_job
+from src.routes.finetune import _run_fine_tuning_job
 from src.api.schemas import FineTuningJob
 from src.db import (
     create_fine_tuning_job,

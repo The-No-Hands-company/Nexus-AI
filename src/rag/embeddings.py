@@ -1,5 +1,5 @@
 """
-VersaAI Embedding System — multi-backend embedding generation.
+Nexus AI Embedding System — multi-backend embedding generation.
 
 Supports (in priority order):
 1. Ollama /api/embed – zero extra deps, uses running Ollama server
@@ -19,10 +19,9 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 

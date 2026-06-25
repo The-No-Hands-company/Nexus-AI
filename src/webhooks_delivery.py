@@ -33,7 +33,6 @@ import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
 
 logger = logging.getLogger("nexus.webhooks_delivery")
 
@@ -138,7 +137,7 @@ def _save_delivery(delivery: WebhookDelivery) -> None:
                 deliveries.pop(k, None)
         save_pref("webhook:deliveries", deliveries)
     except Exception:
-        pass
+        logger.warning("webhooks_delivery.py:141: except Exception:", exc_info=True)
 
 
 def _load_pending_deliveries() -> list[WebhookDelivery]:
@@ -160,6 +159,7 @@ def _load_pending_deliveries() -> list[WebhookDelivery]:
                 ))
         return pending
     except Exception:
+        logger.warning("webhooks_delivery.py:163: except Exception in _load_pending_deliveries", exc_info=True)
         return []
 
 
@@ -171,6 +171,7 @@ def _worker_loop() -> None:
             # Priority queue: (next_attempt_at, delivery)
             priority, delivery = _delivery_queue.get(timeout=5)
         except queue.Empty:
+            logger.warning("webhooks_delivery.py:174: except queue.Empty:", exc_info=True)
             continue
 
         now = time.time()
@@ -257,6 +258,7 @@ def get_delivery_status(delivery_id: str) -> dict | None:
         deliveries = load_pref("webhook:deliveries") or {}
         return deliveries.get(delivery_id)
     except Exception:
+        logger.warning("webhooks_delivery.py:260: except Exception in get_delivery_status", exc_info=True)
         return None
 
 
@@ -267,6 +269,7 @@ def list_dlq() -> list[dict]:
         deliveries = load_pref("webhook:deliveries") or {}
         return [d for d in deliveries.values() if d.get("status") == "dlq"]
     except Exception:
+        logger.warning("webhooks_delivery.py:270: except Exception in list_dlq", exc_info=True)
         return []
 
 
@@ -291,6 +294,7 @@ def retry_dlq_delivery(delivery_id: str) -> bool:
         _delivery_queue.put((delivery.next_attempt_at, delivery))
         return True
     except Exception:
+        logger.warning("webhooks_delivery.py:294: except Exception in retry_dlq_delivery", exc_info=True)
         return False
 
 
@@ -308,4 +312,5 @@ def get_webhook_stats() -> dict:
             "queue_depth": _delivery_queue.qsize(),
         }
     except Exception:
+        logger.warning("webhooks_delivery.py:311: except Exception in get_webhook_stats", exc_info=True)
         return {}

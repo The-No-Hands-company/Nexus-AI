@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
 
 logger = logging.getLogger("nexus.agent_tool_policy")
 
@@ -101,8 +100,8 @@ def _save_policy(policy: ToolPolicy) -> None:
             "description": policy.description,
         }
         save_pref("agent_tool_policies", all_policies)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to save agent tool policy: %s", exc)
 
 
 def _load_policies_from_db() -> None:
@@ -119,8 +118,8 @@ def _load_policies_from_db() -> None:
                 require_approval_for=data.get("require_approval_for", []),
                 description=data.get("description", ""),
             )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Failed to load agent tool policies: %s", exc)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -191,8 +190,8 @@ def delete_policy(persona_id: str) -> bool:
             all_policies = load_pref("agent_tool_policies") or {}
             all_policies.pop(persona_id, None)
             save_pref("agent_tool_policies", all_policies)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("Failed to delete agent tool policy: %s", exc)
         return True
     return False
 

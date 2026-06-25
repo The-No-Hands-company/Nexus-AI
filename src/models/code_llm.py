@@ -12,7 +12,7 @@ This module is a STUB — most methods raise NotImplementedError.
 
 from __future__ import annotations
 
-from .model_base import GenerateOptions, GenerateResult, ModelBase
+from .model_base import GenerateOptions, ModelBase
 
 
 # Language-specific stop sequences (avoid cutting off mid-block)

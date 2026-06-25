@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 from .logging_compat import HAS_CPP_LOGGER, CPPLogger
 
 from .query_decomposer import QueryDecomposer, DecompositionResult
-from .planner import PlannerAgent, Plan, PlanStep, StepType, StepStatus
-from .critic import CriticAgent, Critique, CriticConfig, CriticDimension
+from .planner import PlannerAgent, Plan
+from .critic import CriticAgent, Critique, CriticConfig
 from .retriever import AdaptiveRetriever, RetrieverConfig, RetrievalResult
 from .vector_store import VectorStore, VectorStoreConfig
 from .embeddings import EmbeddingModel, EmbeddingConfig

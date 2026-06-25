@@ -1,13 +1,17 @@
-"""
-src/agents/tools/rag_query.py — Typed RAG query wrapper stub
-
-Thin typed wrapper around the RAG retrieval pipeline with
-structured result types and metadata.
-"""
-
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+from src.rag import (
+    AdaptiveRetriever,
+    EmbeddingModel,
+    EmbeddingConfig,
+    RetrieverConfig,
+    RetrievalStrategy,
+    VectorStore,
+    VectorStoreConfig,
+    VectorStoreType,
+)
 
 
 @dataclass
@@ -16,7 +20,7 @@ class RAGChunk:
     source: str
     score: float
     chunk_id: str = ""
-    metadata: dict = None   # type: ignore[assignment]
+    metadata: dict = None
 
     def __post_init__(self) -> None:
         if self.metadata is None:
@@ -27,9 +31,39 @@ class RAGChunk:
 class RAGResult:
     query: str
     chunks: list[RAGChunk]
-    context: str      # pre-formatted string ready for prompt injection
+    context: str
     collection: str
     retrieved_at: str = ""
+
+
+_rag_system = None
+
+
+def _get_rag_system():
+    global _rag_system
+    if _rag_system is None:
+        embed_config = EmbeddingConfig()
+        embedding = EmbeddingModel(embed_config)
+
+        vs_config = VectorStoreConfig(
+            store_type=VectorStoreType.MEMORY,
+            persist_directory=None,
+        )
+        vector_store = VectorStore(vs_config, embedding)
+
+        retriever_config = RetrieverConfig(
+            strategy=RetrievalStrategy.HYBRID,
+            top_k=10,
+            rerank_top_k=5,
+        )
+        retriever = AdaptiveRetriever(vector_store, embedding, retriever_config)
+
+        _rag_system = {
+            "embedding": embedding,
+            "vector_store": vector_store,
+            "retriever": retriever,
+        }
+    return _rag_system
 
 
 def rag_query(
@@ -39,24 +73,39 @@ def rag_query(
     min_score: float = 0.5,
     filter_metadata: dict | None = None,
 ) -> RAGResult:
-    """
-    Query the RAG vector store and return typed results.
+    rag = _get_rag_system()
+    retriever = rag["retriever"]
 
-    STUB: raises NotImplementedError until RAG pipeline is connected.
-    Implementation plan:
-    - Call src/rag/retriever.retrieve() with query and collection
-    - Filter by min_score
-    - Format chunks into context string
-    - Return RAGResult
-    """
-    raise NotImplementedError(
-        "rag_query is not yet implemented as typed wrapper. "
-        "Planned: call src/rag/retriever.retrieve() → RAGResult."
+    result = retriever.retrieve(
+        query,
+        top_k=n_results * 2,
+        filter_metadata=filter_metadata,
+    )
+
+    chunks = []
+    for doc, score in zip(result.documents, result.scores):
+        if score < min_score:
+            continue
+        metadata = doc.get("metadata", {})
+        chunks.append(RAGChunk(
+            content=doc.get("document", ""),
+            source=metadata.get("source", doc.get("id", "unknown")),
+            score=float(score),
+            chunk_id=doc.get("id", ""),
+            metadata=metadata,
+        ))
+
+    from datetime import datetime, timezone
+    return RAGResult(
+        query=query,
+        chunks=chunks,
+        context=format_rag_context(chunks),
+        collection=collection,
+        retrieved_at=datetime.now(timezone.utc).isoformat(),
     )
 
 
 def format_rag_context(chunks: list[RAGChunk], max_chars: int = 4000) -> str:
-    """Format a list of RAGChunks into a context string for prompt injection."""
     if not chunks:
         return ""
     parts = []
@@ -78,13 +127,21 @@ def ingest_text(
     collection: str = "default",
     metadata: dict | None = None,
 ) -> str:
-    """
-    Ingest a text chunk into the RAG vector store.
+    rag = _get_rag_system()
+    vector_store = rag["vector_store"]
+    embedding = rag["embedding"]
 
-    STUB: raises NotImplementedError.
-    Implementation plan: call src/rag/ingestion.ingest_text().
-    """
-    raise NotImplementedError(
-        "ingest_text is not yet implemented. "
-        "Planned: call src/rag/ingestion.ingest_text()."
+    meta = dict(metadata or {})
+    meta["source"] = source
+    meta["collection"] = collection
+
+    import uuid
+    doc_id = f"{collection}-{uuid.uuid4().hex[:12]}"
+
+    vector_store.add_documents(
+        documents=[text],
+        metadata=[meta],
+        ids=[doc_id],
     )
+
+    return doc_id

@@ -34,6 +34,7 @@ from .db import (
     db_save_task_job,
     db_set_shared_memory,
     db_list_task_jobs,
+    _sql_execute,
 )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -90,7 +91,11 @@ _task_runner: Optional[Callable[[str, str, threading.Event], str]] = None
 
 
 def _restore_tasks_from_db() -> None:
-    """Rehydrate non-terminal tasks from persistent storage into the live worker heap."""
+    """Rehydrate non-terminal tasks from persistent storage into the live worker heap.
+
+    Crash recovery: tasks stuck in RUNNING status are reset to PENDING so they
+    get retried by the worker.
+    """
     persisted = db_list_task_jobs(limit=1000)
     with _heap_lock:
         for row in persisted:
@@ -100,6 +105,23 @@ def _restore_tasks_from_db() -> None:
             status = str(row.get("status") or TASK_PENDING)
             if status in (TASK_DONE, TASK_FAILED, TASK_CANCELLED):
                 continue
+            # Crash recovery: reset tasks that were RUNNING at crash time
+            if status == TASK_RUNNING:
+                status = TASK_PENDING
+                db_save_task_job(
+                    task_id=task_id,
+                    description=str(row.get("description") or ""),
+                    priority=int(row.get("priority") or 5),
+                    dependencies=list(row.get("dependencies") or []),
+                    metadata=dict(row.get("metadata") or {}),
+                    schedule_cron=str(row.get("schedule_cron") or ""),
+                    status=status,
+                    result=str(row.get("result") or ""),
+                    error=str(row.get("error") or ""),
+                    created_at=float(row.get("created_at") or time.time()),
+                    started_at=None,
+                    finished_at=None,
+                )
             task = QueuedTask(
                 task_id=task_id,
                 description=str(row.get("description") or ""),
@@ -107,12 +129,12 @@ def _restore_tasks_from_db() -> None:
                 dependencies=list(row.get("dependencies") or []),
                 metadata=dict(row.get("metadata") or {}),
                 schedule_cron=str(row.get("schedule_cron") or ""),
-                status=TASK_PENDING,
+                status=status,
                 result=str(row.get("result") or ""),
                 error=str(row.get("error") or ""),
                 created_at=float(row.get("created_at") or time.time()),
                 started_at=None,
-                finished_at=float(row.get("finished_at")) if row.get("finished_at") else None,
+                finished_at=None,
             )
             _tasks[task_id] = task
             heapq.heappush(_heap, task)
@@ -305,6 +327,51 @@ def _task_to_dict(task: QueuedTask) -> Dict[str, Any]:
         "finished_at":   datetime.fromtimestamp(task.finished_at, tz=timezone.utc).isoformat()
                          if task.finished_at else None,
     }
+
+
+def get_task_history(task_id: str, limit: int = 10) -> list[dict]:
+    """Return full execution history for a task, including from DB persistence.
+
+    This retrieves the complete record even if the in-memory state has been
+    evicted or the task was completed before a restart.
+    """
+    task = _tasks.get(task_id)
+    if task:
+        return [_task_to_dict(task)]
+    persisted = db_list_task_jobs(limit=limit)
+    for row in persisted:
+        if row.get("task_id") == task_id:
+            return [row]
+    return []
+
+
+def prune_old_tasks(days: int = 30) -> dict:
+    """Delete terminal tasks older than *days* days from the DB.
+
+    Returns a summary dict with the count of pruned rows.
+    """
+    cutoff = time.time() - days * 86400
+
+    try:
+        result = _sql_execute(
+            "DELETE FROM task_queue_jobs WHERE status IN ('done','failed','cancelled') "
+            "AND finished_at IS NOT NULL AND finished_at < ?",
+            (cutoff,),
+        )
+        pruned = getattr(result, "rowcount", 0)
+    except Exception:
+        pruned = 0
+    # Also clear in-memory terminal tasks older than the cutoff
+    stale_ids = [
+        tid
+        for tid, t in _tasks.items()
+        if t.status in (TASK_DONE, TASK_FAILED, TASK_CANCELLED)
+        and t.finished_at is not None
+        and t.finished_at < cutoff
+    ]
+    for tid in stale_ids:
+        del _tasks[tid]
+    return {"pruned": pruned + len(stale_ids), "cutoff_days": days}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
