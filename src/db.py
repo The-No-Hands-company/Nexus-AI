@@ -43,7 +43,7 @@ class DatabaseBackend(ABC):
     def load_share(self, sid: str) -> dict | None: pass
 
     @abstractmethod
-    def add_memory_entry(self, summary: str, tags: list, ts: float): pass
+    def add_memory_entry(self, summary: str, tags: list[str], ts: float) -> None: pass
 
     @abstractmethod
     def load_memory_entries(self, limit: int = 20) -> list[dict]: pass
@@ -597,7 +597,7 @@ class SQLiteBackend(DatabaseBackend):
         d["messages"] = json.loads(d["messages"])
         return d
 
-    def add_memory_entry(self, summary: str, tags: list, ts: float):
+    def add_memory_entry(self, summary: str, tags: list[str], ts: float) -> None:
         self._conn().execute(
             "INSERT INTO memory(created_at, summary, tags) VALUES(?,?,?)",
             (ts, summary, json.dumps(tags))
@@ -1266,7 +1266,7 @@ class PostgresBackend(DatabaseBackend):
         conn.close()
         return dict(row) if row else None
 
-    def add_memory_entry(self, summary: str, tags: list, ts: float):
+    def add_memory_entry(self, summary: str, tags: list[str], ts: float) -> None:
         conn = self._get_conn()
         with conn.cursor() as cur:
             cur.execute("INSERT INTO memory(created_at, summary, tags) VALUES(%s,%s,%s)", (ts, summary, json.dumps(tags)))

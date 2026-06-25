@@ -1873,11 +1873,26 @@ PERSONAS: Dict[str, Dict] = {
 def get_active_persona() -> Dict:
     return PERSONAS.get(_config["persona"], PERSONAS["general"])
 
-def get_system_prompt() -> str:
-    """Build the system prompt for the current persona."""
+def get_system_prompt(context: str = "standard") -> str:
+    """Build the system prompt for the current persona with context-aware optimization.
+    
+    Args:
+        context: "minimal" for simple tool use, "standard" for general queries,
+                "detailed" for complex reasoning tasks
+    """
     persona = get_active_persona()
     extra = persona["system_extra"]
-    base = TOOLS_DESCRIPTION
+    
+    # Context-aware base prompt selection for token optimization
+    if context == "minimal":
+        base = """You are Nexus AI, a helpful assistant. Use tools when needed.
+Respond concisely in markdown. Never return raw JSON as final answer.
+Rules: clarify only when architecture matters. Plan before building 3+ files.
+Use get_time for time/date questions. Never run destructive commands.
+For GitHub URLs: clone_repo immediately, then read 3 files max, respond with analysis.
+Always finish with a respond action."""
+    else:
+        base = TOOLS_DESCRIPTION
     if extra:
         base = base.rstrip() + f"\n\nPersona instructions:\n{extra}\n"
 
@@ -1901,7 +1916,7 @@ def get_system_prompt() -> str:
     return base
 
 
-def get_provider_system_prompt(max_chars: int = 7000, native_tools: bool = False) -> str:
+def get_provider_system_prompt(max_chars: int = 7000, native_tools: bool = False, context: str = "standard") -> str:
     """Return a bounded system prompt for upstream provider compatibility.
 
     When ``native_tools=True`` the returned prompt omits the legacy
@@ -1911,7 +1926,7 @@ def get_provider_system_prompt(max_chars: int = 7000, native_tools: bool = False
     if native_tools:
         prompt = _get_native_tools_system_prompt()
     else:
-        prompt = get_system_prompt()
+        prompt = get_system_prompt(context=context)
     if len(prompt) <= max_chars:
         return prompt
     marker = "\n\n[... system prompt truncated for provider size limits ...]\n\n"
@@ -3133,6 +3148,7 @@ def _parse_openai_message(msg_obj: Dict[str, Any], use_tools: bool) -> Dict[str,
         return result_native
 
     # Legacy JSON-parsing path
+    result = _parse_json(content)
     if not result.get("action"):
         logger.debug(f"[llm] action=None raw={content[:200]!r}")
     if reasoning and isinstance(result, dict) and not result.get("thought"):
@@ -3731,14 +3747,27 @@ def _maybe_compress_history(history: List[Dict]) -> List[Dict]:
             return CONTEXT_WINDOW.compress_history_with_llm(history, _orchestrator_llm)
         except Exception:
             logger.warning("agent.py:3717: LLM history compression failed", exc_info=True)
-    head = history[:2]
-    tail = history[-14:]
-    omitted = len(history) - 16
-    summary_msg = {
-        "role":    "user",
-        "content": f"[{omitted} earlier messages omitted to save context. Continue naturally.]"
-    }
-    return head + [summary_msg] + tail
+    # Token-aware history compression: keep as many recent messages as possible
+    MAX_HISTORY_TOKENS = 2000
+    selected_messages = []
+    current_tokens = 0
+    
+    for msg in reversed(history):
+        msg_tokens = _messages_token_estimate([msg])
+        if current_tokens + msg_tokens > MAX_HISTORY_TOKENS:
+            break
+        selected_messages.insert(0, msg)
+        current_tokens += msg_tokens
+    
+    if selected_messages and len(selected_messages) < len(history):
+        omitted_count = len(history) - len(selected_messages)
+        summary_msg = {
+            "role": "user",
+            "content": f"[{omitted_count} earlier messages omitted to stay within token limits. Continuing with recent context.]"
+        }
+        selected_messages.insert(0, summary_msg)
+    
+    return selected_messages if selected_messages else history[:2]
 
 
 def _get_custom_instructions() -> str:
