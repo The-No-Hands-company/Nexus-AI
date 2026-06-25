@@ -3971,6 +3971,16 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
     # Mask tokens before LLM ever sees them
     clean_task = mask_token(task)
 
+    # ── Token optimization: detect vague prompts and add disambiguation ────
+    from .token_optimizer import is_vague_prompt, get_vague_prompt_clarification
+    _vague_category = is_vague_prompt(clean_task)
+    if _vague_category:
+        _clarification = get_vague_prompt_clarification(_vague_category, clean_task)
+        if _clarification:
+            clean_task = f"""{_clarification}
+
+Original prompt: {clean_task}"""
+
     # Auto warm-up keeps first-turn latency stable for new/expired sessions.
     # Skip warm-up when call_llm_smart is monkeypatched (e.g. contract tests)
     # so test side effects are not consumed by the warm-up probe.
@@ -5449,6 +5459,14 @@ def stream_agent_task(task: str, history: list, files: list | None = None,
         final = "Reached the step limit. See the tool steps above — the work has been done but I ran out of turns to summarise it."
 
     messages.append({"role": "assistant", "content": final})
+    
+    # ── Token optimization: ensure response quality ─────────────────────────
+    from .token_optimizer import optimize_response, is_response_truncated
+    _optimized = optimize_response(str(final))
+    if is_response_truncated(str(final)) and _optimized == str(final):
+        _optimized = str(final) + "\n\n*(Response may be incomplete — consider asking for more detail.)*"
+    final = _optimized
+    
     yield {"type": "done", "content": final, "provider": cfg.get("label", "?"),
            "model": _config["model"] or cfg.get("default_model", "?"), "history": _pub_history(),
            "tokens": {"input": input_token_estimate, "output": len(final)//4,

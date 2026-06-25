@@ -331,15 +331,41 @@ def _run_proactive_agent_job(job_id: str) -> None:
         
         # Add calendar context source
         if "calendar" in job.context_sources:
-            logger.warning("Calendar service not implemented; using placeholder.")
-            # For now, provide placeholder calendar context
-            context_parts.append("Calendar context: [Calendar integration not yet implemented]")
+            try:
+                from .service_integrations import fetch_calendar_events
+                cal_result = fetch_calendar_events(user_id=job.user_id)
+                if cal_result.success and cal_result.events:
+                    event_lines = [
+                        f"- {e.title} ({e.start} – {e.end})" 
+                        for e in cal_result.events[:5]
+                    ]
+                    context_parts.append(
+                        f"Upcoming calendar events:\n" + "\n".join(event_lines)
+                    )
+                else:
+                    context_parts.append(f"Calendar: {cal_result.error or 'No upcoming events found.'}")
+            except Exception:
+                logger.warning("Calendar service fetch failed", exc_info=True)
+                context_parts.append("Calendar context: [Calendar service unavailable]")
         
         # Add email context source
         if "email" in job.context_sources:
-            logger.warning("Email service not implemented; using placeholder.")
-            # For now, provide placeholder email context
-            context_parts.append("Email context: [Email integration not yet implemented]")
+            try:
+                from .service_integrations import fetch_unread_emails
+                email_result = fetch_unread_emails(user_id=job.user_id)
+                if email_result.success and email_result.messages:
+                    msg_lines = [
+                        f"- {m.subject} (from: {m.sender})"
+                        for m in email_result.messages[:5]
+                    ]
+                    context_parts.append(
+                        f"Recent unread emails:\n" + "\n".join(msg_lines)
+                    )
+                else:
+                    context_parts.append(f"Email: {email_result.error or 'No unread emails found.'}")
+            except Exception:
+                logger.warning("Email service fetch failed", exc_info=True)
+                context_parts.append("Email context: [Email service unavailable]")
         
         # Build the full prompt with context
         full_prompt = job.prompt
@@ -400,10 +426,22 @@ Please perform the task based on the above context and instructions."""
                 add_memory(result_content)
         
         elif job.result_action == "notify":
-            # Send notification (placeholder implementation)
-            logger.warning("Notification service not implemented; using placeholder.")
+            # Send notification via service integration
+            try:
+                from .service_integrations import send_notification
+                notif_result = send_notification(
+                    user_id=job.user_id,
+                    title=f"Nexus AI: {job.name}",
+                    body=str(result.result)[:500],
+                    channel="push",
+                )
+                if notif_result.success:
+                    logger.info("Notification sent for job %s", job.name)
+                else:
+                    logger.warning("Notification failed for job %s: %s", job.name, notif_result.errors)
+            except Exception:
+                logger.warning("Notification service unavailable for job %s", job.name, exc_info=True)
             notification_msg = f"[Proactive Agent Notification] {job.name}: {result.result}"
-            print(notification_msg)
             # Also store in memory for user to see
             add_memory(notification_msg, tags=["notifications"])
         
