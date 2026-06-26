@@ -64,3 +64,5 @@ desktop/electron/main.js.backup
 .openclaude-profile.json
 .openclaw/
 tests/**/*.backup
+web/dist/
+mobile/capacitor/dist/
