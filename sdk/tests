@@ -1,0 +1,111 @@
+"""Tests for the Nexus AI SDK."""
+
+from __future__ import annotations
+
+import json
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from sdk import NexusClient, _HTTPError
+
+
+class TestNexusClient:
+    def test_base_url_normalization(self):
+        client = NexusClient(base_url="http://localhost:8000/")
+        assert client.base_url == "http://localhost:8000"
+
+    def test_api_key_in_headers(self):
+        client = NexusClient(api_key="nxk_test123")
+        headers = client._headers()
+        assert headers["X-API-Key"] == "nxk_test123"
+
+    def test_session_token_in_headers(self):
+        client = NexusClient(session_token="eyJ.abc.xyz")
+        headers = client._headers()
+        assert headers["Authorization"] == "Bearer eyJ.abc.xyz"
+
+    def test_build_url(self):
+        client = NexusClient(base_url="http://localhost:8000")
+        assert client._build_url("/v1/models") == "http://localhost:8000/v1/models"
+
+    def test_get_with_params(self):
+        client = NexusClient()
+        url = client._build_url("/memory")
+        full = f"{url}?q=test&limit=5"
+        assert "q=test" in full
+        assert "limit=5" in full
+
+    @patch("urllib.request.urlopen")
+    def test_health_check(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"status": "ok"}).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        client = NexusClient()
+        result = client.health()
+        assert result["status"] == "ok"
+
+    @patch("urllib.request.urlopen")
+    def test_chat_completions(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"choices": [{"message": {"content": "Hello!"}}]}).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        client = NexusClient()
+        result = client.chat.completions.create(messages=[{"role": "user", "content": "Hi"}])
+        assert result["choices"][0]["message"]["content"] == "Hello!"
+
+    @patch("urllib.request.urlopen")
+    def test_agent_run(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"result": "done", "status": "ok"}).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        client = NexusClient()
+        result = client.agent.run("test task")
+        assert result["status"] == "ok"
+
+    @patch("urllib.request.urlopen")
+    def test_login_stores_token(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"access_token": "tok123"}).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        client = NexusClient()
+        result = client.login("user", "pass")
+        assert client.session_token == "tok123"
+
+    @patch("urllib.request.urlopen")
+    def test_http_error_handling(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"error": "not found"}).encode()
+        mock_resp.code = 404
+        from urllib.error import HTTPError
+        mock_urlopen.side_effect = HTTPError("http://localhost:8000/bad", 404, "Not Found", {}, MagicMock(read=MagicMock(return_value=json.dumps({"error": "not found"}).encode())))
+
+        client = NexusClient()
+        with pytest.raises(_HTTPError) as exc:
+            client._get("/bad")
+        assert exc.value.status_code == 404
+
+    def test_domain_clients_exist(self):
+        client = NexusClient()
+        assert client.chat is not None
+        assert client.agent is not None
+        assert client.models is not None
+        assert client.memory is not None
+        assert client.browser is not None
+        assert client.rag is not None
+        assert client.kg is not None
+        assert client.audio is not None
+        assert client.safety is not None
+        assert client.workspace is not None
+        assert client.orgs is not None
+        assert client.admin is not None
+        assert client.finetuning is not None
+        assert client.mcp is not None

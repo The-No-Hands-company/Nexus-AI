@@ -1,0 +1,81 @@
+{
+  "name": "nexus-ai-vscode-extension",
+  "displayName": "Nexus AI Extension",
+  "description": "VS Code extension for Nexus AI assistant",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:nexusAI.chat",
+    "onCommand:nexusAI.generateImage",
+    "onCommand:nexusAI.voiceInput",
+    "onCommand:nexusAI.nostackList",
+    "onCommand:nexusAI.nostackRun",
+    "onCommand:nexusAI.nostackSprint"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "nexusAI.chat",
+        "title": "Nexus AI: Chat with Assistant"
+      },
+      {
+        "command": "nexusAI.generateImage",
+        "title": "Nexus AI: Generate Image"
+      },
+      {
+        "command": "nexusAI.voiceInput",
+        "title": "Nexus AI: Voice Input"
+      },
+      {
+        "command": "nexusAI.nostackList",
+        "title": "Nexus AI: Nostack — List Skills"
+      },
+      {
+        "command": "nexusAI.nostackRun",
+        "title": "Nexus AI: Nostack — Run Skill"
+      },
+      {
+        "command": "nexusAI.nostackSprint",
+        "title": "Nexus AI: Nostack — Run Sprint"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Nexus AI Configuration",
+      "properties": {
+        "nexusAI.apiEndpoint": {
+          "type": "string",
+          "default": "http://localhost:8000",
+          "description": "Nexus AI backend API endpoint"
+        },
+        "nexusAI.apiKey": {
+          "type": "string",
+          "default": "",
+          "description": "API key for Nexus AI backend"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "lint": "eslint .",
+    "pretest": "npm run lint",
+    "test": "node ./test/runTest.js"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.70.0",
+    "@types/glob": "^7.2.0",
+    "@types/mocha": "^9.1.1",
+    "@types/node": "14.x",
+    "eslint": "^8.15.0",
+    "glob": "^7.2.0",
+    "mocha": "^9.2.2",
+    "typescript": "^4.6.4",
+    "vscode-test": "^1.6.2"
+  }
+}
