@@ -375,6 +375,69 @@ ipcMain.on('close-window', () => {
 });
 
 
+// ── Nostack skill IPC handlers ───────────────────────────────────────
+
+const http = require('node:http');
+const https = require('node:https');
+
+function nexusRequest(method, path, body) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(path, backendUrl);
+    const lib = url.protocol === 'https:' ? https : http;
+    const payload = body ? JSON.stringify(body) : undefined;
+    const options = {
+      method, hostname: url.hostname, port: url.port, path: url.pathname,
+      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    };
+    const req = lib.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); } catch { resolve(data); }
+      });
+    });
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+ipcMain.handle('nostack-list-skills', async () => {
+  try { return await nexusRequest('GET', '/nostack/skills'); }
+  catch (e) { return { error: e.message, skills: [], total: 0 }; }
+});
+
+ipcMain.handle('nostack-get-skill', async (_event, name) => {
+  try { return await nexusRequest('GET', `/nostack/skills/${name}`); }
+  catch (e) { return { error: e.message }; }
+});
+
+ipcMain.handle('nostack-run-skill', async (_event, name, task) => {
+  try {
+    return await nexusRequest('POST', `/nostack/skills/${name}/run`, { task: task || '' });
+  } catch (e) { return { error: e.message }; }
+});
+
+ipcMain.handle('nostack-run-sprint', async (_event, task, skills) => {
+  try {
+    return await nexusRequest('POST', '/nostack/sprint', { task: task || '', skills: skills || [] });
+  } catch (e) { return { error: e.message }; }
+});
+
+ipcMain.handle('nexus-chat', async (_event, messages) => {
+  try {
+    return await nexusRequest('POST', '/v1/chat/completions', {
+      model: 'nexus-ai/auto', messages: messages || [], stream: false,
+    });
+  } catch (e) { return { error: e.message }; }
+});
+
+ipcMain.handle('nexus-agent-task', async (_event, task, images) => {
+  try {
+    return await nexusRequest('POST', '/agent', { task: task || '', images: images || [] });
+  } catch (e) { return { error: e.message }; }
+});
+
 process.on('uncaughtException', (err) => {
   console.error('Uncaught Exception:', err);
   process.exit(1);
