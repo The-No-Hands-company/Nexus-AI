@@ -1985,9 +1985,38 @@ def get_nostack_skill_prompt(skill_name: str):
         return {"error": "nostack not installed"}
 
 
+def _import_nostack_sprint():
+    import sys
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    from nostack.sprint_state import (
+        create_sprint as _create_sprint,
+        load_sprint as _load_sprint,
+        list_sprints as _list_sprints,
+        cancel_sprint as _cancel_sprint,
+        run_sprint_background,
+        cancel_sprint_background,
+    )
+    from nostack.sprint_templates import list_templates, get_template
+    return _create_sprint, _load_sprint, _list_sprints, _cancel_sprint, run_sprint_background, cancel_sprint_background, list_templates, get_template
+
+
+def _run_sprint_in_background(sprint_id: str, task: str, skills: list[str]) -> None:
+    """Run a sprint in a daemon background thread."""
+    import threading
+    create_sprint_fn, load_sprint_fn, _, _, run_fn, _, _, _ = _import_nostack_sprint()
+    t = threading.Thread(target=run_fn, args=(sprint_id, task, skills), daemon=True, name=f"sprint-{sprint_id}")
+    t.start()
+
+
 @router.post("/nostack/sprint")
 async def run_nostack_sprint(request: Request):
-    """Run a nosprint — a chain of nostack skills in sequence."""
+    """Run a nosprint — a chain of nostack skills in sequence.
+
+    Returns the sprint_id immediately. Skills run asynchronously in the background.
+    """
     body = {}
     try:
         body = await request.json()
@@ -1996,41 +2025,106 @@ async def run_nostack_sprint(request: Request):
 
     task = body.get("task", "")
     skills = body.get("skills", [])
-    provider = body.get("provider", "")
+    template = body.get("template", "")
+
+    if template and not skills:
+        _, _, _, _, _, _, _, get_template_fn = _import_nostack_sprint()
+        tmpl = get_template_fn(template)
+        if tmpl is None:
+            return _api_error(f"Template not found: {template}", "not_found", 404)
+        skills = tmpl["skills"]
 
     if not task or not skills:
-        return {"error": "task and skills list are required"}
+        return _api_error("task and skills list (or template) are required", "validation_error", 422)
 
     try:
-        _, _, _, run_skill = _import_nostack()
+        import nostack.registry  # noqa: F401 - verify nostack is importable
     except ImportError:
-        return {"error": "nostack not installed"}
+        return _api_error("nostack not installed", "not_installed", 500)
 
-    sprint_id = f"sprint-{uuid.uuid4().hex[:8]}"
-    results = []
-    context = task
-
-    for skill_name in skills:
-        enriched_task = (
-            f"Previous sprint context:\n{context[:2000]}\n\n"
-            f"Now run /{skill_name} on this task: {task}"
-        )
-        result = run_skill(skill_name, task=enriched_task, provider=provider)
-        results.append({
-            "skill": skill_name,
-            "result": result.get("result", "")[:2000],
-        })
-        if result.get("result"):
-            context = result["result"][:2000]
-        # Persist intermediate results
-        from src.db import save_pref
-        save_pref(f"nostack.sprint.{sprint_id}.{skill_name}",
-                  json.dumps({"result": result.get("result", "")[:4000]}))
+    create_sprint_fn = _import_nostack_sprint()[0]
+    state = create_sprint_fn(task=task, skills=skills)
+    _run_sprint_in_background(state.sprint_id, task, skills)
 
     return {
-        "sprint_id": sprint_id,
+        "sprint_id": state.sprint_id,
         "task": task,
-        "skills_run": len(results),
-        "results": results,
-        "status": "completed",
+        "skills": skills,
+        "total_skills": len(skills),
+        "status": "running",
     }
+
+
+@router.get("/nostack/sprint/{sprint_id}")
+def get_nostack_sprint(sprint_id: str):
+    """Check sprint status and progress."""
+    _, load_sprint_fn, _, _, _, _, _, _ = _import_nostack_sprint()
+    state = load_sprint_fn(sprint_id)
+    if state is None:
+        return _api_error(f"Sprint not found: {sprint_id}", "not_found", 404)
+    return state.resume()
+
+
+@router.post("/nostack/sprint/{sprint_id}/resume")
+def resume_nostack_sprint(sprint_id: str):
+    """Resume a failed or interrupted sprint from where it left off."""
+    _, load_sprint_fn, _, _, run_fn, _, _, _ = _import_nostack_sprint()
+    state = load_sprint_fn(sprint_id)
+    if state is None:
+        return _api_error(f"Sprint not found: {sprint_id}", "not_found", 404)
+
+    if state.status == "completed":
+        return {
+            "sprint_id": sprint_id,
+            "status": "completed",
+            "message": "Sprint already completed",
+            "sprint": state.to_dict(),
+        }
+
+    if state.status == "cancelled":
+        return {
+            "sprint_id": sprint_id,
+            "status": "cancelled",
+            "message": "Sprint is cancelled; cannot resume",
+            "sprint": state.to_dict(),
+        }
+
+    _run_sprint_in_background(sprint_id, state.task, state.skills)
+    return {
+        "sprint_id": sprint_id,
+        "status": "running",
+        "task": state.task,
+        "skills": state.skills,
+        "total_skills": state.total_skills(),
+    }
+
+
+@router.get("/nostack/sprints")
+def list_nostack_sprints(limit: int = 20):
+    """List recent sprints."""
+    _, _, list_fn, _, _, _, _, _ = _import_nostack_sprint()
+    states = list_fn(limit=limit)
+    return {
+        "sprints": [s.to_dict() for s in states],
+        "total": len(states),
+    }
+
+
+@router.delete("/nostack/sprint/{sprint_id}")
+def cancel_nostack_sprint(sprint_id: str):
+    """Cancel a running sprint."""
+    _, load_sprint_fn, _, cancel_fn, _, cancel_bg_fn, _, _ = _import_nostack_sprint()
+    state = load_sprint_fn(sprint_id)
+    if state is None:
+        return _api_error(f"Sprint not found: {sprint_id}", "not_found", 404)
+
+    cancel_bg_fn(sprint_id)
+    cancel_fn(sprint_id)
+    return {"sprint_id": sprint_id, "status": "cancelled"}
+
+
+@router.get("/nostack/templates")
+def list_nostack_templates():
+    """List all available sprint templates."""
+    _, _, _, _, _, _, list_templates_fn, _ = _import_nostack_sprint()
+    return {"templates": list_templates_fn()}
