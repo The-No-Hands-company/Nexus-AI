@@ -547,8 +547,11 @@ class SQLiteBackend(DatabaseBackend):
             try:
                 c.execute(col_sql)
                 c.commit()
-            except Exception:
-                logger.warning("db.py:547: failed to add column in SQLite migration", exc_info=True)
+            except sqlite3.OperationalError as e:
+                if "duplicate column" in str(e):
+                    pass
+                else:
+                    logger.warning("db.py:547: failed to add column in SQLite migration", exc_info=True)
 
     def save_chat(self, cid: str, title: str, created_at: str, updated_at: str, messages: list):
         self._conn().execute(

@@ -1904,3 +1904,133 @@ def list_active_agents():
         ],
         "total": len(SPECIALIST_AGENTS),
     }
+
+
+# ── nostack skill routes ───────────────────────────────────────────────────
+
+
+def _import_nostack():
+    """Import nostack registry, handling the path resolution."""
+    import sys, os
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[2]
+    nostack_path = root / "nostack"
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
+    if str(nostack_path.parent) not in sys.path:
+        sys.path.insert(0, str(nostack_path.parent))
+    from nostack.registry import list_skill_names, get_skill_agent, get_skill_prompt, run_skill
+    return list_skill_names, get_skill_agent, get_skill_prompt, run_skill
+
+
+@router.get("/nostack/skills")
+def list_nostack_skills():
+    """List all available nostack virtual team skills."""
+    try:
+        list_skill_names, get_skill_agent, _, _ = _import_nostack()
+        skills = []
+        for name in list_skill_names():
+            agent = get_skill_agent(name)
+            skills.append({
+                "id": f"nostack-{name}",
+                "command": f"/{name}",
+                "name": agent.name if agent else name,
+                "description": agent.description if agent else "",
+                "tier": agent.tier if agent else "standard",
+            })
+        return {"skills": skills, "total": len(skills)}
+    except ImportError:
+        return {"skills": [], "total": 0, "error": "nostack not installed"}
+
+
+@router.post("/nostack/skills/{skill_name}/run")
+async def run_nostack_skill(skill_name: str, request: Request):
+    """Run a nostack skill against the agent pipeline."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    task = body.get("task", "")
+    history = body.get("history")
+    provider = body.get("provider", "")
+    model = body.get("model", "")
+
+    try:
+        _, _, _, run_skill = _import_nostack()
+        result = run_skill(skill_name, task=task, history=history,
+                          provider=provider, model=model)
+        return result
+    except ImportError:
+        return {"error": "nostack not installed", "skill_name": skill_name}
+
+
+@router.get("/nostack/skills/{skill_name}")
+def get_nostack_skill_prompt(skill_name: str):
+    """Get the full system prompt for a nostack skill."""
+    try:
+        _, get_skill_agent, get_skill_prompt, _ = _import_nostack()
+        prompt = get_skill_prompt(skill_name)
+        agent = get_skill_agent(skill_name)
+        if prompt is None:
+            return {"error": f"Skill not found: {skill_name}"}
+        return {
+            "skill": skill_name,
+            "name": agent.name if agent else skill_name,
+            "description": agent.description if agent else "",
+            "system_prompt": prompt,
+        }
+    except ImportError:
+        return {"error": "nostack not installed"}
+
+
+@router.post("/nostack/sprint")
+async def run_nostack_sprint(request: Request):
+    """Run a nosprint — a chain of nostack skills in sequence."""
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    task = body.get("task", "")
+    skills = body.get("skills", [])
+    provider = body.get("provider", "")
+
+    if not task or not skills:
+        return {"error": "task and skills list are required"}
+
+    try:
+        _, _, _, run_skill = _import_nostack()
+    except ImportError:
+        return {"error": "nostack not installed"}
+
+    sprint_id = f"sprint-{uuid.uuid4().hex[:8]}"
+    results = []
+    context = task
+
+    for skill_name in skills:
+        enriched_task = (
+            f"Previous sprint context:\n{context[:2000]}\n\n"
+            f"Now run /{skill_name} on this task: {task}"
+        )
+        result = run_skill(skill_name, task=enriched_task, provider=provider)
+        results.append({
+            "skill": skill_name,
+            "result": result.get("result", "")[:2000],
+        })
+        if result.get("result"):
+            context = result["result"][:2000]
+        # Persist intermediate results
+        from src.db import save_pref
+        save_pref(f"nostack.sprint.{sprint_id}.{skill_name}",
+                  json.dumps({"result": result.get("result", "")[:4000]}))
+
+    return {
+        "sprint_id": sprint_id,
+        "task": task,
+        "skills_run": len(results),
+        "results": results,
+        "status": "completed",
+    }

@@ -90,11 +90,16 @@ def get_benchmark_tradeoff(days: int = 14, limit: int = 2000) -> dict:
     }
 
 
-def run_ollama_benchmark() -> dict:
-    return {"ok": True, "provider": "ollama", "score": round(random.uniform(0.5, 0.95), 3)}
+def run_ollama_benchmark(
+    models: list[str] | None = None,
+    prompt: str = "",
+    runs: int = 3,
+    ollama_base: str = "",
+) -> dict:
+    return {"ok": True, "provider": "ollama", "score": round(random.uniform(0.5, 0.95), 3), "models": models or [], "runs": runs, "prompt": prompt}
 
 
-def register_benchmark_schedules() -> dict:
+def register_benchmark_schedules(run_func: object = None) -> dict:
     return {"registered": True}
 
 
@@ -258,21 +263,45 @@ def get_regression_report(model: str = "", provider: str = "", limit: int = 50) 
     return {"reports": reports, "count": len(reports)}
 
 
-def set_regression_baseline(model: str, provider: str, suite: str, score: float) -> dict[str, Any]:
+def set_regression_baseline(body_or_model: str | dict[str, Any], provider: str = "", suite: str = "", score: float = 0.0) -> dict[str, Any]:
+    if isinstance(body_or_model, dict):
+        body = body_or_model
+        model = str(body.get("model", ""))
+        provider = str(body.get("provider", ""))
+        suite = str(body.get("suite", ""))
+        score = float(body.get("score", 0.0))
+    else:
+        model = body_or_model
     return {"baseline": score, "model": model, "provider": provider, "suite": suite}
 
 
-def run_safety_benchmark(*, limit: int = 500) -> dict[str, Any]:
-    return {"status": "ok", "results": load_safety_benchmark_results(limit=limit)}
+def run_safety_benchmark(test_cases: list[str] | None = None, *, limit: int = 500) -> dict[str, Any]:
+    results = load_safety_benchmark_results(limit=limit)
+    tc = test_cases or []
+    if tc:
+        results = [r for r in results if r.get("test_case", "") in tc]
+    return {"status": "ok", "results": results, "test_cases": tc}
 
 
-def run_dataset_benchmark(dataset: str = "", model: str = "", provider: str = "", limit: int = 50) -> dict[str, Any]:
-    return {"dataset": dataset, "model": model, "provider": provider, "results": [], "status": "ok"}
+def run_dataset_benchmark(dataset: str = "", model: str = "", provider: str = "", limit: int = 50, max_samples: int = 50) -> dict[str, Any]:
+    return {"dataset": dataset, "model": model, "provider": provider, "results": [], "status": "ok", "max_samples": max_samples}
 
 
-def run_dataset_suite_benchmark(suites: list[str] | None = None, model: str = "", provider: str = "") -> dict[str, Any]:
-    return {"suites": suites or [], "model": model, "provider": provider, "results": {}, "status": "ok"}
+def run_dataset_suite_benchmark(
+    suites: list[str] | None = None,
+    datasets: list[str] | None = None,
+    model: str = "",
+    provider: str = "",
+    max_samples_per_dataset: int = 10,
+) -> dict[str, Any]:
+    suite_list = suites or datasets or []
+    return {"suites": suite_list, "model": model, "provider": provider, "results": {}, "status": "ok", "max_samples_per_dataset": max_samples_per_dataset}
 
 
-def export_dataset_suite_artifacts(run_id: str, formats: list[str] | None = None) -> dict[str, Any]:
-    return {"run_id": run_id, "artifacts": [], "status": "ok"}
+def export_dataset_suite_artifacts(
+    run_id: str = "",
+    suite_data: dict[str, Any] | None = None,
+    full_results: list[dict[str, Any]] | None = None,
+    formats: list[str] | None = None,
+) -> dict[str, Any]:
+    return {"run_id": run_id, "artifacts": [], "status": "ok", "suite_data": suite_data, "full_results": full_results}

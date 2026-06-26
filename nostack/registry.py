@@ -424,6 +424,60 @@ def register_all() -> int:
     return count
 
 
+def list_skill_names() -> list[str]:
+    """Return all nostack skill names."""
+    return sorted([a.id.replace("nostack-", "", 1) for a in NOSTACK_AGENTS])
+
+
+def get_skill_prompt(skill_name: str) -> str | None:
+    """Get the full system prompt for a nostack skill by name."""
+    skill_path = _SKILLS_DIR / f"{skill_name}.md"
+    if not skill_path.is_file():
+        return None
+    return skill_path.read_text(encoding="utf-8")
+
+
+def get_skill_agent(skill_name: str) -> SpecialistAgent | None:
+    """Get the SpecialistAgent for a nostack skill."""
+    target_id = f"nostack-{skill_name}"
+    for agent in NOSTACK_AGENTS:
+        if agent.id == target_id:
+            return agent
+    return None
+
+
+def run_skill(skill_name: str, task: str = "", history: list | None = None,
+              provider: str = "", model: str = "") -> dict:
+    """Run a nostack skill against the Nexus AI agent pipeline.
+
+    Loads the skill persona, prepends it as a system prompt, and passes
+    the task through the standard agent execution flow.
+
+    Returns:
+        dict with keys: result, provider, model, history, skill_name
+    """
+    prompt = get_skill_prompt(skill_name)
+    if prompt is None:
+        return {"error": f"Skill not found: {skill_name}", "available": list_skill_names()}
+
+    agent = get_skill_agent(skill_name)
+    system_prompt = agent.system_prompt if agent else prompt
+
+    # Build messages with skill system prompt
+    messages = [{"role": "system", "content": system_prompt[:8000]}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": task or f"Run the /{skill_name} skill on the current project."})
+
+    try:
+        from src.agent import run_agent_task
+        result = run_agent_task(task or f"/{skill_name}", history=messages)
+        result["skill_name"] = skill_name
+        return result
+    except Exception as exc:
+        return {"error": str(exc), "skill_name": skill_name, "result": ""}
+
+
 def register_nostack_agents() -> None:
     import src.agents.registry as _reg
 
