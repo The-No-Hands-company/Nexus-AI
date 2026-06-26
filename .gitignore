@@ -63,3 +63,4 @@ src/**/__pycache__/
 desktop/electron/main.js.backup
 .openclaude-profile.json
 .openclaw/
+tests/**/*.backup
