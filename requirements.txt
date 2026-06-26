@@ -5,7 +5,7 @@ requests==2.32.3
 duckduckgo-search==8.1.1
 pymupdf==1.24.5
 yt-dlp==2024.11.18
-pypdf==4.3.1
+pypdf==6.13.3
 youtube-transcript-api==1.2.4
 PyJWT>=2.8.0
 numpy>=1.21.0
