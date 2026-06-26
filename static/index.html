@@ -131,6 +131,8 @@
       <button onclick="openSafetyAudit();toggleOverflow()">🛡 Safety audit</button>
       <button onclick="showTokenBar();toggleOverflow()">🔑 GitHub token</button>
       <button onclick="openShortcuts();toggleOverflow()">⌨️ Keyboard shortcuts</button>
+      <hr style="border:none;border-top:1px solid var(--border);margin:4px 0">
+      <button onclick="openNostackPanel();toggleOverflow()">🦾 Nostack Team</button>
     </div>
   </div>
 </header>
@@ -2340,6 +2342,42 @@ async function updateApprovalsBadge(count){
 init();
 </script>
 
+<!-- ── Nostack Virtual Team Panel ──────────────────────────────────────────── -->
+<div id="nostack-panel" style="position:fixed;bottom:80px;right:18px;width:420px;max-height:520px;background:var(--surface);border:1px solid var(--border);border-radius:12px;display:none;flex-direction:column;z-index:40;box-shadow:0 8px 32px rgba(0,0,0,.4);">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <span style="font-size:.78rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);">🦾 Nostack Virtual Team</span>
+    <button class="panel-btn" onclick="closeNostackPanel()" title="Close">✕</button>
+  </div>
+  <!-- Sprint section -->
+  <div style="padding:10px 14px;border-bottom:1px solid var(--border);flex-shrink:0;background:var(--surface2);">
+    <div style="font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;margin-bottom:8px;">🏃 Sprint</div>
+    <textarea id="nostack-sprint-task" placeholder="Task description…" rows="2" style="width:100%;padding:7px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:.78rem;resize:vertical;font-family:inherit;box-sizing:border-box;margin-bottom:6px;"></textarea>
+    <div style="display:flex;gap:6px;align-items:center;">
+      <input id="nostack-sprint-skills" placeholder="Skills (comma-separated)" style="flex:1;padding:6px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:.78rem;box-sizing:border-box;" />
+      <button onclick="runNostackSprint()" style="padding:6px 12px;border:none;border-radius:7px;background:#6366f1;color:#fff;font-size:.72rem;font-weight:600;cursor:pointer;white-space:nowrap;">Run Sprint</button>
+    </div>
+    <div id="nostack-sprint-status" style="margin-top:6px;font-size:.7rem;color:var(--muted);min-height:18px;"></div>
+  </div>
+  <!-- Skills list -->
+  <div style="padding:8px 10px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:space-between;">
+    <span style="font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">🛠 Skills</span>
+    <button onclick="loadNostackSkills()" style="font-size:.65rem;padding:3px 9px;border:1px solid var(--border);border-radius:6px;background:none;color:var(--muted);cursor:pointer;">↻ Reload</button>
+  </div>
+  <div id="nostack-skills-list" style="flex:1;overflow-y:auto;padding:6px 10px;display:flex;flex-direction:column;gap:4px;min-height:0;">
+    <div style="color:var(--muted);font-size:.72rem;padding:8px 4px;">Click ↻ Reload to load skills</div>
+  </div>
+  <!-- Skill detail section -->
+  <div id="nostack-skill-detail" style="display:none;padding:10px 14px;border-top:1px solid var(--border);flex-shrink:0;background:var(--surface2);">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+      <span id="nostack-skill-detail-name" style="font-size:.74rem;font-weight:700;color:var(--text);"></span>
+      <button onclick="document.getElementById('nostack-skill-detail').style.display='none'" style="background:none;border:none;color:var(--muted);cursor:pointer;font-size:16px;line-height:1;">✕</button>
+    </div>
+    <textarea id="nostack-skill-task" placeholder="Task for this skill…" rows="2" style="width:100%;padding:6px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:.78rem;resize:vertical;font-family:inherit;box-sizing:border-box;margin-bottom:6px;"></textarea>
+    <button onclick="runNostackSkill()" style="padding:6px 14px;border:none;border-radius:7px;background:#6366f1;color:#fff;font-size:.72rem;font-weight:600;cursor:pointer;">Run</button>
+    <div id="nostack-skill-result" style="margin-top:6px;font-size:.7rem;"></div>
+  </div>
+</div>
+
 <!-- ── Task History Panel (Sprint K) ── -->
 <div id="task-history-panel" style="position:fixed;bottom:80px;left:18px;width:480px;max-height:560px;background:var(--surface);border:1px solid var(--border);border-radius:14px;display:none;flex-direction:column;z-index:42;box-shadow:0 8px 40px rgba(0,0,0,.45);">
   <!-- Header -->
@@ -2394,5 +2432,6 @@ init();
 
   <script src="/static/js/panels/task-history.js"></script>
   <script src="/static/js/panels/live-trace.js"></script>
+  <script src="/static/js/panels/nostack.js"></script>
 </body>
 </html>

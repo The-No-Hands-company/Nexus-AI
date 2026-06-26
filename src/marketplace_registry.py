@@ -145,8 +145,8 @@ async def invoke_custom_tool(tool_id: str, args: dict) -> dict:
 
 
 def _is_async(fn: Any) -> bool:
-    import asyncio
-    return asyncio.iscoroutinefunction(fn)
+    import inspect
+    return inspect.iscoroutinefunction(fn)
 
 
 # ── Marketplace connectors ────────────────────────────────────────────────────
