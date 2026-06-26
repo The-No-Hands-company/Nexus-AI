@@ -1,11 +1,93 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 function App() {
+  const [activeTab, setActiveTab] = useState('chat');
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [imagePrompt, setImagePrompt] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isGeneratingImage, setIsGeneratingImage] = useState(false);
+
+  const [skills, setSkills] = useState([]);
+  const [skillsLoading, setSkillsLoading] = useState(false);
+  const [skillsError, setSkillsError] = useState(null);
+  const [selectedSkill, setSelectedSkill] = useState(null);
+  const [skillTaskInput, setSkillTaskInput] = useState('');
+  const [skillResult, setSkillResult] = useState(null);
+  const [skillRunning, setSkillRunning] = useState(false);
+  const [skillRunError, setSkillRunError] = useState(null);
+
+  const [sprintTask, setSprintTask] = useState('');
+  const [sprintSkills, setSprintSkills] = useState('');
+  const [sprintRunning, setSprintRunning] = useState(false);
+  const [sprintResult, setSprintResult] = useState(null);
+  const [sprintError, setSprintError] = useState(null);
+
+  const fetchSkills = async () => {
+    setSkillsLoading(true);
+    setSkillsError(null);
+    try {
+      const response = await fetch('/nostack/skills');
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      const data = await response.json();
+      setSkills(Array.isArray(data) ? data : data.skills || []);
+    } catch (error) {
+      setSkillsError(error.message);
+    } finally {
+      setSkillsLoading(false);
+    }
+  };
+
+  const runSkill = async () => {
+    if (!skillTaskInput.trim() || !selectedSkill) return;
+    setSkillRunning(true);
+    setSkillRunError(null);
+    setSkillResult(null);
+    try {
+      const response = await fetch(`/nostack/skills/${selectedSkill.name}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: skillTaskInput })
+      });
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      const data = await response.json();
+      setSkillResult(data);
+    } catch (error) {
+      setSkillRunError(error.message);
+    } finally {
+      setSkillRunning(false);
+    }
+  };
+
+  const runSprint = async () => {
+    if (!sprintTask.trim() || !sprintSkills.trim()) return;
+    setSprintRunning(true);
+    setSprintError(null);
+    setSprintResult(null);
+    try {
+      const response = await fetch('/nostack/sprint', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          task: sprintTask,
+          skills: sprintSkills.split(',').map(s => s.trim()).filter(Boolean)
+        })
+      });
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      const data = await response.json();
+      setSprintResult(data);
+    } catch (error) {
+      setSprintError(error.message);
+    } finally {
+      setSprintRunning(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === 'team' && skills.length === 0 && !skillsLoading && !skillsError) {
+      fetchSkills();
+    }
+  }, [activeTab]);
 
   const sendMessage = async () => {
     if (!input.trim()) return;
@@ -22,7 +104,6 @@ function App() {
     setIsLoading(true);
 
     try {
-      // Call Nexus AI backend API
       const response = await fetch('/v1/chat/completions', {
         method: 'POST',
         headers: {
@@ -73,7 +154,6 @@ function App() {
     setIsGeneratingImage(true);
     
     try {
-      // Call Nexus AI agent API for image generation
       const response = await fetch('/v1/agent', {
         method: 'POST',
         headers: {
@@ -91,14 +171,13 @@ function App() {
 
       const data = await response.json();
       
-      // Add the generated image to the chat
       const aiMessage = {
         id: Date.now() + 1,
         text: data.result || 'Image generated successfully',
         sender: 'assistant',
         timestamp: new Date(),
         isImage: true,
-        imageData: data.result // This would contain the base64 image data
+        imageData: data.result
       };
 
       setMessages(prev => [...prev, aiMessage]);
@@ -131,92 +210,214 @@ function App() {
     <div className="App">
       <header className="App-header">
         <h1>Nexus AI Assistant</h1>
+        <div className="header-tabs">
+          <button
+            className={`header-tab ${activeTab === 'chat' ? 'active' : ''}`}
+            onClick={() => setActiveTab('chat')}
+          >
+            Chat
+          </button>
+          <button
+            className={`header-tab ${activeTab === 'image' ? 'active' : ''}`}
+            onClick={() => setActiveTab('image')}
+          >
+            Image
+          </button>
+          <button
+            className={`header-tab ${activeTab === 'team' ? 'active' : ''}`}
+            onClick={() => setActiveTab('team')}
+          >
+            Team
+          </button>
+        </div>
       </header>
       <main>
-        <div className="chat-container">
-          <div className="chat-messages">
-            {messages.map(message => (
-              <div 
-                key={message.id} 
-                className={`message ${message.sender} ${message.isImage ? 'image-message' : ''}`}
+        {(activeTab === 'chat' || activeTab === 'image') && (
+          <div className="chat-container">
+            <div className="chat-messages">
+              {messages.map(message => (
+                <div 
+                  key={message.id} 
+                  className={`message ${message.sender} ${message.isImage ? 'image-message' : ''}`}
+                >
+                  <div className="message-content">
+                    {message.isImage ? (
+                      <>
+                        <img 
+                          src={`data:image/png;base64,${message.imageData}`} 
+                          alt="Generated image"
+                          className="generated-image"
+                        />
+                        <p>{message.text}</p>
+                      </>
+                    ) : (
+                      <>
+                        <p>{message.text}</p>
+                        {message.timestamp && <small className="message-time">
+                          {message.timestamp.toLocaleTimeString()}
+                        </small>}
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="chat-input-container">
+              {activeTab === 'chat' ? (
+                <textarea
+                  value={input}
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  placeholder="Type a message to Nexus AI..."
+                  rows={2}
+                  disabled={isLoading}
+                />
+              ) : (
+                <input
+                  type="text"
+                  value={imagePrompt}
+                  onChange={(e) => setImagePrompt(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  placeholder="Describe the image you want to generate..."
+                  disabled={isGeneratingImage}
+                />
+              )}
+              
+              <div className="button-group">
+                {activeTab === 'chat' ? (
+                  <button 
+                    onClick={sendMessage}
+                    disabled={isLoading || !input.trim()}
+                  >
+                    {isLoading ? 'Sending...' : 'Send'}
+                  </button>
+                ) : (
+                  <button 
+                    onClick={generateImage}
+                    disabled={isGeneratingImage || !imagePrompt.trim()}
+                  >
+                    {isGeneratingImage ? 'Generating...' : 'Generate Image'}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'team' && (
+          <div className="team-container">
+            <div className="sprint-section">
+              <h2>Run Sprint</h2>
+              <p className="section-desc">Orchestrate multiple skills to complete a complex task.</p>
+              <textarea
+                className="sprint-input"
+                value={sprintTask}
+                onChange={(e) => setSprintTask(e.target.value)}
+                placeholder="Describe the task..."
+                rows={2}
+                disabled={sprintRunning}
+              />
+              <input
+                type="text"
+                className="sprint-input"
+                value={sprintSkills}
+                onChange={(e) => setSprintSkills(e.target.value)}
+                placeholder="Skills (comma-separated, e.g. architect, coder, reviewer)"
+                disabled={sprintRunning}
+              />
+              <button
+                className="sprint-btn"
+                onClick={runSprint}
+                disabled={sprintRunning || !sprintTask.trim() || !sprintSkills.trim()}
               >
-                <div className="message-content">
-                  {message.isImage ? (
-                    <>
-                      <img 
-                        src={`data:image/png;base64,${message.imageData}`} 
-                        alt="Generated image"
-                        className="generated-image"
-                      />
-                      <p>{message.text}</p>
-                    </>
-                  ) : (
-                    <>
-                      <p>{message.text}</p>
-                      {message.timestamp && <small className="message-time">
-                        {message.timestamp.toLocaleTimeString()}
-                      </small>}
-                    </>
+                {sprintRunning ? 'Running Sprint...' : 'Run Sprint'}
+              </button>
+              {sprintError && <div className="error-message">{sprintError}</div>}
+              {sprintResult && (
+                <div className="result-panel">
+                  <pre>{JSON.stringify(sprintResult, null, 2)}</pre>
+                </div>
+              )}
+            </div>
+
+            <div className="skills-section">
+              <h2>Available Skills</h2>
+              {skillsLoading && <div className="loading">Loading skills...</div>}
+              {skillsError && <div className="error-message">{skillsError}</div>}
+              {!skillsLoading && !skillsError && skills.length === 0 && (
+                <p className="no-skills">No skills found.</p>
+              )}
+              {!skillsLoading && !skillsError && (
+                <div className="skills-grid">
+                  {skills.map(skill => (
+                    <div
+                      key={skill.name}
+                      className="skill-card"
+                      onClick={() => {
+                        setSelectedSkill(skill);
+                        setSkillTaskInput('');
+                        setSkillResult(null);
+                        setSkillRunError(null);
+                      }}
+                    >
+                      <div className="skill-card-header">
+                        <h3>{skill.name}</h3>
+                        {skill.command && <code className="skill-command">{skill.command}</code>}
+                      </div>
+                      {skill.description && <p className="skill-desc">{skill.description}</p>}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {selectedSkill && (
+              <div className="modal-overlay" onClick={() => { setSelectedSkill(null); }}>
+                <div className="modal-content" onClick={e => e.stopPropagation()}>
+                  <div className="modal-header">
+                    <h2>{selectedSkill.name}</h2>
+                    <button className="modal-close" onClick={() => { setSelectedSkill(null); }}>&times;</button>
+                  </div>
+                  {selectedSkill.command && (
+                    <code className="modal-command">{selectedSkill.command}</code>
+                  )}
+                  {selectedSkill.description && (
+                    <p className="modal-desc">{selectedSkill.description}</p>
+                  )}
+                  <textarea
+                    className="modal-input"
+                    value={skillTaskInput}
+                    onChange={(e) => setSkillTaskInput(e.target.value)}
+                    placeholder="Enter your task..."
+                    rows={3}
+                    disabled={skillRunning}
+                  />
+                  <div className="modal-buttons">
+                    <button
+                      className="btn-primary"
+                      onClick={runSkill}
+                      disabled={skillRunning || !skillTaskInput.trim()}
+                    >
+                      {skillRunning ? 'Running...' : 'Run'}
+                    </button>
+                    <button
+                      className="btn-secondary"
+                      onClick={() => { setSelectedSkill(null); }}
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                  {skillRunError && <div className="error-message">{skillRunError}</div>}
+                  {skillResult && (
+                    <div className="result-panel">
+                      <pre>{JSON.stringify(skillResult, null, 2)}</pre>
+                    </div>
                   )}
                 </div>
               </div>
-            ))}
-          </div>
-          <div className="chat-input-container">
-            <div className="input-tabs">
-              <button 
-                className={`tab-button ${!isGeneratingImage ? 'active' : ''}`}
-                onClick={() => setIsGeneratingImage(false)}
-              >
-                Chat
-              </button>
-              <button 
-                className={`tab-button ${isGeneratingImage ? 'active' : ''}`}
-                onClick={() => setIsGeneratingImage(true)}
-              >
-                Generate Image
-              </button>
-            </div>
-            
-            {!isGeneratingImage ? (
-              <textarea
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="Type a message to Nexus AI..."
-                rows={2}
-                disabled={isLoading}
-              />
-            ) : (
-              <input
-                type="text"
-                value={imagePrompt}
-                onChange={(e) => setImagePrompt(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="Describe the image you want to generate..."
-                disabled={isGeneratingImage}
-              />
             )}
-            
-            <div className="button-group">
-              {!isGeneratingImage ? (
-                <button 
-                  onClick={sendMessage}
-                  disabled={isLoading || !input.trim()}
-                >
-                  {isLoading ? 'Sending...' : 'Send'}
-                </button>
-              ) : (
-                <button 
-                  onClick={generateImage}
-                  disabled={isGeneratingImage || !imagePrompt.trim()}
-                >
-                  {isGeneratingImage ? 'Generating...' : 'Generate Image'}
-                </button>
-              )}
-            </div>
           </div>
-        </div>
+        )}
       </main>
     </div>
   );
