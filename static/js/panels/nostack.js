@@ -16,7 +16,12 @@ function closeNostackPanel() {
 }
 
 function esc(s) {
-  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 async function loadNostackSkills() {
@@ -30,14 +35,39 @@ async function loadNostackSkills() {
       list.innerHTML = '<div style="color:var(--muted);font-size:.72rem;padding:8px 4px;">No skills found.</div>';
       return;
     }
-    list.innerHTML = _nostackSkills.map((s) =>
-      '<div onclick="showNostackSkillDetail(\'' + esc(s.name) + '\')" style="border:1px solid var(--border);border-radius:7px;padding:7px 9px;background:var(--surface2);cursor:pointer;transition:background .15s;" onmouseenter="this.style.background=\'var(--surface)\'" onmouseleave="this.style.background=\'var(--surface2)\'">' +
-        '<div style="font-size:.74rem;font-weight:600;color:var(--text);">' + esc(s.name) + '</div>' +
-        '<div style="font-size:.65rem;color:var(--muted);margin-top:1px;">' + esc(s.description || "No description") + '</div>' +
-      '</div>'
-    ).join("");
-  } catch (_) {
-    list.innerHTML = '<div style="color:var(--red);font-size:.72rem;padding:8px 4px;">Failed to load skills.</div>';
+    list.innerHTML = "";
+    _nostackSkills.forEach((s) => {
+      const item = document.createElement("div");
+      item.style.border = "1px solid var(--border)";
+      item.style.borderRadius = "7px";
+      item.style.padding = "7px 9px";
+      item.style.background = "var(--surface2)";
+      item.style.cursor = "pointer";
+      item.style.transition = "background .15s";
+
+      item.addEventListener("click", () => showNostackSkillDetail(s.name));
+      item.addEventListener("mouseenter", () => { item.style.background = "var(--surface)"; });
+      item.addEventListener("mouseleave", () => { item.style.background = "var(--surface2)"; });
+
+      const nameEl = document.createElement("div");
+      nameEl.style.fontSize = ".74rem";
+      nameEl.style.fontWeight = "600";
+      nameEl.style.color = "var(--text)";
+      nameEl.textContent = s.name;
+
+      const descEl = document.createElement("div");
+      descEl.style.fontSize = ".65rem";
+      descEl.style.color = "var(--muted)";
+      descEl.style.marginTop = "1px";
+      descEl.textContent = s.description || "No description";
+
+      item.appendChild(nameEl);
+      item.appendChild(descEl);
+      list.appendChild(item);
+    });
+  } catch (err) {
+    console.error("loadNostackSkills failed:", err);
+    list.innerHTML = '<div style="color:var(--red);font-size:.72rem;padding:8px 4px;">Failed to load skills. Please check your connection and try again.</div>';
   }
 }
 
@@ -59,6 +89,9 @@ async function runNostackSkill() {
   const result = document.getElementById("nostack-skill-result");
   result.innerHTML = '<span style="color:var(--muted);">Running…</span>';
   try {
+    // SECURITY: _nostackSelectedSkill is user-influenced; encodeURIComponent protects
+    // URL construction, but the backend must validate/allowlist this skill name and
+    // enforce authorization before execution.
     const r = await fetch(`/nostack/skills/${encodeURIComponent(_nostackSelectedSkill)}/run`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -71,8 +104,9 @@ async function runNostackSkill() {
     }
     const out = d.output || d.result || JSON.stringify(d, null, 2);
     result.innerHTML = '<pre style="margin:0;font-size:.68rem;color:#4a9;white-space:pre-wrap;">' + esc(out) + '</pre>';
-  } catch (e) {
-    result.innerHTML = '<span style="color:var(--red);">Request failed.</span>';
+  } catch (err) {
+    console.error("runNostackSkill failed:", err);
+    result.innerHTML = '<span style="color:var(--red);">Request failed. Please try again.</span>';
   }
 }
 
@@ -88,7 +122,27 @@ async function runNostackSprint() {
     return;
   }
   const skills = skillsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+
+  // Client-side input validation (defense-in-depth; backend also validates)
+  const maxSkills = 20;
+  const maxSkillLength = 64;
+  const skillPattern = /^[A-Za-z0-9_. -]+$/;
   const status = document.getElementById("nostack-sprint-status");
+
+  if (!skills.length) {
+    status.innerHTML = '<span style="color:var(--red);">Enter at least one valid skill.</span>';
+    return;
+  }
+  if (skills.length > maxSkills) {
+    status.innerHTML = '<span style="color:var(--red);">Too many skills. Maximum is ' + maxSkills + '.</span>';
+    return;
+  }
+  const invalidSkill = skills.find((s) => s.length > maxSkillLength || !skillPattern.test(s));
+  if (invalidSkill) {
+    status.innerHTML = '<span style="color:var(--red);">Invalid skill "' + esc(invalidSkill) + '". Use letters, numbers, spaces, ".", "_" or "-".</span>';
+    return;
+  }
+
   status.innerHTML = '<span style="color:var(--muted);">Running sprint…</span>';
   try {
     const r = await fetch("/nostack/sprint", {
@@ -103,7 +157,8 @@ async function runNostackSprint() {
     }
     const out = d.output || d.result || JSON.stringify(d, null, 2);
     status.innerHTML = '<pre style="margin:0;font-size:.68rem;color:#4a9;white-space:pre-wrap;">' + esc(out) + '</pre>';
-  } catch (e) {
-    status.innerHTML = '<span style="color:var(--red);">Request failed.</span>';
+  } catch (err) {
+    console.error("runNostackSprint failed:", err);
+    status.innerHTML = '<span style="color:var(--red);">Request failed. Please try again.</span>';
   }
 }
