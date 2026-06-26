@@ -161,10 +161,18 @@ def cancel_sprint(sprint_id: str) -> None:
 _SPRINT_LOCKS: dict[str, bool] = {}
 
 
-def run_sprint_background(sprint_id: str, task: str, skills: list[str]) -> SprintState:
+def run_sprint_background(sprint_id: str, task: str, skills: list[str],
+                          skill_timeout: float = 300.0) -> SprintState:
     """Run a sprint in the calling thread (intended for background use).
 
+    Args:
+        sprint_id: Unique sprint identifier.
+        task: The overall task description.
+        skills: Ordered list of skill names to run.
+        skill_timeout: Maximum seconds per skill (default 5 min). 0 = no limit.
+
     Returns the final SprintState after all skills have been run.
+    The sprint survives process restarts via resume_sprint().
     """
     from nostack.registry import run_skill
 
@@ -192,9 +200,27 @@ def run_sprint_background(sprint_id: str, task: str, skills: list[str]) -> Sprin
             )
 
             try:
-                run_result = run_skill(skill_name, task=enriched_task)
+                import threading as _threading
+                import concurrent.futures as _futures
+
+                run_result: dict = {}
+                error: str = ""
+
+                if skill_timeout > 0:
+                    with _futures.ThreadPoolExecutor(max_workers=1) as executor:
+                        future = executor.submit(run_skill, skill_name, task=enriched_task)
+                        try:
+                            run_result = future.result(timeout=skill_timeout)
+                        except _futures.TimeoutError:
+                            error = f"Skill timed out after {skill_timeout:.0f}s"
+                            future.cancel()
+                else:
+                    run_result = run_skill(skill_name, task=enriched_task)
+
                 result_content = run_result.get("result", "") if isinstance(run_result, dict) else str(run_result)
-                status = "failed" if run_result.get("error") else "completed"
+                status = "failed" if (error or run_result.get("error")) else "completed"
+                if error and isinstance(run_result, dict):
+                    run_result["error"] = error
             except Exception as exc:
                 result_content = ""
                 run_result = {"error": str(exc)}
@@ -216,6 +242,21 @@ def run_sprint_background(sprint_id: str, task: str, skills: list[str]) -> Sprin
         if state.status != "cancelled":
             state.status = "completed"
             state.save()
+    except Exception as exc:
+        # Crash handler: if the sprint loop itself dies, mark as crashed
+        # so it can be diagnosed and optionally resumed.
+        try:
+            state.status = "crashed"
+            state.results.append({
+                "skill": "__sprint_crash__",
+                "result": "",
+                "status": "failed",
+                "error": f"Sprint crashed: {str(exc)[:500]}",
+            })
+            state.save()
+        except Exception:
+            pass
+        raise
     finally:
         _SPRINT_LOCKS.pop(sprint_id, None)
 

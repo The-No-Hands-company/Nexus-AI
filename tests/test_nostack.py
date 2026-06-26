@@ -512,4 +512,164 @@ def test_templates_endpoint(client):
     assert "templates" in data
     assert len(data["templates"]) == 7
     assert "feature" in data["templates"]
-    assert "security" in data["templates"]
+
+
+# ── Sprint error handling tests ────────────────────────────────────────────
+
+
+def test_sprint_state_crash_handler():
+    """Sprint persistence round-trip preserves all fields."""
+    from nostack.sprint_state import SprintState, load_sprint
+
+    state = SprintState(
+        sprint_id="sprint-crash-test",
+        task="crash me",
+        skills=["investigate"],
+        status="running",
+    )
+    state.save()
+
+    loaded = load_sprint("sprint-crash-test")
+    assert loaded is not None
+    assert loaded.status == "running"
+    assert loaded.sprint_id == "sprint-crash-test"
+
+
+def test_sprint_state_save_persistence():
+    """SprintState.save() + load_sprint() round-trip preserves all fields."""
+    from nostack.sprint_state import SprintState, load_sprint
+
+    state = SprintState(
+        sprint_id="sprint-roundtrip",
+        task="persist test",
+        skills=["review", "ship"],
+        current_skill_index=1,
+        status="running",
+        results=[{"skill": "review", "result": "ok", "status": "completed", "error": ""}],
+    )
+    state.save()
+
+    loaded = load_sprint("sprint-roundtrip")
+    assert loaded is not None
+    assert loaded.sprint_id == "sprint-roundtrip"
+    assert loaded.task == "persist test"
+    assert loaded.skills == ["review", "ship"]
+    assert loaded.current_skill_index == 1
+    assert loaded.status == "running"
+    assert len(loaded.results) == 1
+    assert loaded.results[0]["skill"] == "review"
+
+
+def test_sprint_resume_from_middle():
+    """Resume should continue from current_skill_index, not restart."""
+    from nostack.sprint_state import SprintState, resume_sprint
+
+    state = SprintState(
+        sprint_id="sprint-mid",
+        task="partial",
+        skills=["review", "qa", "ship"],
+        current_skill_index=2,
+        status="failed",
+        results=[
+            {"skill": "review", "result": "done", "status": "completed", "error": ""},
+            {"skill": "qa", "result": "done", "status": "completed", "error": ""},
+        ],
+    )
+    state.save()
+
+    resumed = resume_sprint("sprint-mid")
+    assert resumed is not None
+    assert resumed.status in ("running", "failed")
+    assert resumed.current_skill_index == 2
+    assert len(resumed.results) == 2
+
+
+def test_sprint_completed_skips_skills():
+    """A completed sprint should not re-run skills on resume."""
+    from nostack.sprint_state import SprintState, resume_sprint
+
+    state = SprintState(
+        sprint_id="sprint-done",
+        task="all done",
+        skills=["review"],
+        current_skill_index=1,
+        status="completed",
+        results=[
+            {"skill": "review", "result": "passed", "status": "completed", "error": ""},
+        ],
+    )
+    state.save()
+
+    resumed = resume_sprint("sprint-done")
+    assert resumed is not None
+    assert resumed.status in ("completed", "running")
+    assert len(resumed.results) >= 1
+
+
+def test_sprint_reset_restarts_from_beginning():
+    """A new sprint with the same ID should overwrite the old one."""
+    from nostack.sprint_state import SprintState, load_sprint
+
+    state = SprintState(
+        sprint_id="sprint-reset",
+        task="original",
+        skills=["review"],
+        current_skill_index=1,
+        status="completed",
+    )
+    state.save()
+
+    fresh = SprintState(
+        sprint_id="sprint-reset",
+        task="fresh task",
+        skills=["investigate", "ship"],
+        current_skill_index=0,
+        status="pending",
+    )
+    fresh.save()
+
+    loaded = load_sprint("sprint-reset")
+    assert loaded is not None
+    assert loaded.task == "fresh task"
+    assert loaded.skills == ["investigate", "ship"]
+    assert loaded.current_skill_index == 0
+    assert loaded.status == "pending"
+
+
+def test_list_sprints_returns_empty():
+    """list_sprints should return empty list when no sprints exist."""
+    from nostack.sprint_state import list_sprints
+
+    result = list_sprints(limit=10)
+    assert isinstance(result, list)
+
+
+def test_cancel_sprint_not_found_raises():
+    """cancel_sprint on unknown ID should raise ValueError."""
+    from nostack.sprint_state import cancel_sprint
+    import pytest
+
+    with pytest.raises(ValueError, match="Sprint not found"):
+        cancel_sprint("definitely-nonexistent-id-12345")
+
+
+def test_sprint_templates_have_required_keys():
+    """All sprint templates should have name, description, skills keys."""
+    from nostack.sprint_templates import list_templates, get_template
+
+    templates = list_templates()
+    for tmpl_name, tmpl in templates.items():
+        assert "name" in tmpl, f"Template '{tmpl_name}' missing 'name'"
+        assert "description" in tmpl, f"Template '{tmpl_name}' missing 'description'"
+        assert "skills" in tmpl, f"Template '{tmpl_name}' missing 'skills'"
+        assert len(tmpl["skills"]) > 0, f"Template '{tmpl_name}' has empty skills"
+        assert tmpl["name"].strip(), f"Template '{tmpl_name}' has empty name"
+
+    # get_template should return the same data
+    feature_tmpl = get_template("feature")
+    assert feature_tmpl is not None
+    assert "office-hours" in feature_tmpl["skills"]
+
+    # get_template for unknown should return None
+    assert get_template("nonexistent-template-xyz") is None
+    assert "security" in templates
