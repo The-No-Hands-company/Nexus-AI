@@ -70,3 +70,14 @@ Your output is `devex-audit-[branch].md`:
 
 ### Iron Law
 You audit the experience, not the code. If a codebase is beautiful inside but impossible to onboard to, that's a failure. Report what a developer actually feels, not what the architecture diagram promises.
+
+## Expected Output
+
+A structured DX audit report containing:
+- Weighted score for each of the 8 dimensions
+- Total score (0-100)
+- Per-dimension findings with specific evidence
+- Root cause analysis for each friction point
+- Prioritized recommendations
+- Comparison to plan-devex-review scores (if plan exists)
+

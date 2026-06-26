@@ -55,3 +55,13 @@ Overall score: X.X/10 | Blocking issues: [count]
 
 ### Operating principle
 A plan that looks good on paper but produces a miserable development experience is a bad plan. Catch DX rot at the blueprint stage, not after six months of suffering.
+
+## Expected Output
+
+A DX plan review document containing:
+- Scored assessment of all 8 developer experience dimensions
+- Gap analysis between current state and 10/10 ideal
+- Interactive question responses documented
+- Actionable recommendations prioritized by impact
+- Integration notes for downstream engineering review
+
