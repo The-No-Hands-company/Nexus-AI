@@ -212,3 +212,18 @@ def get_providers_cost_summary() -> List[Dict[str, Any]]:
             "capabilities": list(PROVIDER_CAPABILITIES.get(pid, [])),
         })
     return result
+
+
+def get_usage_daily(days: int = 7) -> List[Dict[str, Any]]:
+    """Return per-day usage aggregates for the last N days.
+
+    Compatibility wrapper that delegates to :func:`src.db.get_usage_daily`.
+    Each entry has ``date``, ``calls``, ``in_tok`` and ``out_tok`` keys.
+    Returns an empty list when the DB is unavailable.
+    """
+    try:
+        from .db import get_usage_daily as db_get_usage_daily
+        return db_get_usage_daily(days=days)
+    except Exception:
+        logger.warning("Failed to fetch daily usage", exc_info=True)
+        return []

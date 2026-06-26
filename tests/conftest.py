@@ -1,5 +1,11 @@
+import os
+import tempfile
+import uuid as _uuid
 import warnings
 import logging
+
+# Use a unique DB for each test session to avoid collisions between runs.
+os.environ["DB_PATH"] = os.path.join(tempfile.gettempdir(), f"nexus_test_{os.getpid()}_{_uuid.uuid4().hex[:8]}.db")
 
 # Silence known third-party warning on Python 3.14+ from langsmith's
 # optional pydantic.v1 compatibility layer. This warning is benign for
@@ -33,6 +39,22 @@ for logger_name in ("httpcore", "httpx", "huggingface_hub", "huggingface_hub.uti
 import pytest
 from fastapi.testclient import TestClient
 from src.app import app
+
+# Ensure projects table exists early (lifespan init may be deferred).
+from src.db import init_projects_table
+init_projects_table()
+
+
+@pytest.fixture(autouse=True)
+def _ensure_projects_table():
+    """Ensure projects table exists before every test.
+
+    The lifespan context manager initialises tables asynchronously and may
+    not have run yet when TestClient is used outside of a live server.
+    Additionally, some test modules may drop or modify tables, so we
+    recreate them here to prevent cascading failures.
+    """
+    init_projects_table()
 
 
 @pytest.fixture

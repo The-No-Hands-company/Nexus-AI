@@ -55,13 +55,13 @@ def test_usage_webhook_push(monkeypatch):
     monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
 
     cfg = client.post(
-        "/usage/webhook",
+        "/admin/usage/webhook",
         json={"enabled": True, "url": "https://example.com/usage-hook", "secret": "test-secret"},  # pragma: allowlist secret
     )
     assert cfg.status_code == 200
     assert cfg.json().get("ok") is True
 
-    pushed = client.post("/usage/webhook/push?days=1")
+    pushed = client.post("/admin/usage/webhook/push?days=1")
     assert pushed.status_code == 200
     assert pushed.json().get("ok") is True
     assert captured.get("url") == "https://example.com/usage-hook"

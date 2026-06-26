@@ -272,7 +272,7 @@ def clear_session(sid: str):
     history = sessions.get(sid, [])
     if history:
         try:
-            summary = summarize_history(history, call_llm_with_fallback)
+            summary = summarize_history(history, call_llm=call_llm_with_fallback)
             if summary:
                 add_memory(
                     summary,
@@ -356,7 +356,7 @@ async def save_chat(request: Request):
                   "updated_at":now,"messages":history}
     db_save_chat(cid, title, created, now, history)
     def _bg():
-        summary = summarize_history(history, call_llm_with_fallback)
+        summary = summarize_history(history, call_llm=call_llm_with_fallback)
         if summary: add_memory(summary)
     threading.Thread(target=_bg, daemon=True).start()
     return {"chat_id":cid,"title":chats[cid]["title"]}

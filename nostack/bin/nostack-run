@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""
+nostack-run — Run a nostack skill against the local Nexus AI agent.
+
+Usage:
+  nostack-run <skill-name>
+  nostack-run --list
+  nostack-run --help
+
+Examples:
+  nostack-run office-hours
+  nostack-run review --provider openai --model gpt-4
+  nostack-run codex --local
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+from pathlib import Path
+
+
+def _find_skill_file(name: str) -> Path | None:
+    clean = name.strip().lstrip("/").replace(".md", "")
+
+    search_dirs: list[Path] = []
+
+    nostack_home = Path.home() / ".nexus" / "nostack" / "skills"
+    if nostack_home.is_dir():
+        search_dirs.append(nostack_home)
+
+    project_dir = _project_root()
+    if project_dir is not None:
+        project_skills = project_dir / "nostack" / "skills"
+        if project_skills.is_dir():
+            search_dirs.append(project_skills)
+
+    env_dir = os.getenv("NOSTACK_SKILLS_DIR")
+    if env_dir:
+        env_path = Path(env_dir)
+        if env_path.is_dir():
+            search_dirs.append(env_path)
+
+    for skills_dir in search_dirs:
+        candidates = [
+            skills_dir / f"{clean}.md",
+            skills_dir / f"{clean.removesuffix('.md')}.md",
+        ]
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate
+
+    return None
+
+
+def _project_root() -> Path | None:
+    d = Path.cwd()
+    for _ in range(10):
+        if (d / "nostack").is_dir() or (d / "src" / "agents").is_dir():
+            return d
+        if d.parent == d:
+            return None
+        d = d.parent
+    return None
+
+
+def _parse_skill(filepath: Path) -> tuple[str, str, str] | None:
+    """Return (command, role, system_prompt)."""
+    try:
+        text = filepath.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+
+    import re
+
+    lines = text.split("\n")
+    command = ""
+    role = ""
+    system_prompt_lines: list[str] = []
+    in_system_prompt = False
+
+    for line in lines:
+        if line.startswith("# Skill:") or line.startswith("# skill:"):
+            m = re.search(r"/\s*(\S+)", line)
+            if m:
+                command = m.group(1)
+        elif line.startswith("## Role:") or line.startswith("## role:"):
+            role = line.split(":", 1)[1].strip()
+        elif re.match(r"^## System Prompt", line, re.IGNORECASE):
+            in_system_prompt = True
+        elif in_system_prompt:
+            if re.match(r"^##\s+(Expected Output|Dependencies|Constraints)", line):
+                in_system_prompt = False
+            else:
+                system_prompt_lines.append(line)
+
+    if not command or not role:
+        return None
+
+    system_prompt = "\n".join(system_prompt_lines).strip()
+    return (f"/{command}", role, system_prompt)
+
+
+def _list_skills() -> list[tuple[str, str, str]]:
+    results: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+
+    search_dirs: list[Path] = []
+
+    nostack_home = Path.home() / ".nexus" / "nostack" / "skills"
+    if nostack_home.is_dir():
+        search_dirs.append(nostack_home)
+
+    project_dir = _project_root()
+    if project_dir is not None:
+        project_skills = project_dir / "nostack" / "skills"
+        if project_skills.is_dir() and project_skills != nostack_home:
+            search_dirs.append(project_skills)
+
+    env_dir = os.getenv("NOSTACK_SKILLS_DIR")
+    if env_dir:
+        env_path = Path(env_dir)
+        if env_path.is_dir() and env_path not in search_dirs:
+            search_dirs.append(env_path)
+
+    for skills_dir in reversed(search_dirs):
+        for md_file in sorted(skills_dir.glob("*.md")):
+            skill_name = md_file.stem
+            if skill_name in seen:
+                continue
+            seen.add(skill_name)
+
+            parsed = _parse_skill(md_file)
+            if parsed is not None:
+                results.append((skill_name, parsed[0], parsed[1]))
+
+    results.sort(key=lambda x: x[0])
+    return results
+
+
+def _load_sdk_client(base_url: str, api_key: str) -> object | None:
+    try:
+        sys.path.insert(0, str(_project_root() / "sdk" / "python"))
+        from nexus_ai_sdk import NexusAIClient
+
+        return NexusAIClient(base_url=base_url, api_key=api_key, timeout_s=120)
+    except ImportError:
+        return None
+
+
+def _agent_payload(task: str, system_prompt: str, provider: str, model: str) -> dict:
+    full_task = f"{system_prompt}\n\n---\n\nUser task: {task}"
+    payload: dict = {"task": full_task}
+    if provider:
+        payload["provider"] = provider
+    if model:
+        payload["model"] = model
+    return payload
+
+
+def _run_via_sdk(
+    client: object,
+    task: str,
+    system_prompt: str,
+    provider: str = "",
+    model: str = "",
+) -> dict:
+    full_task = f"{system_prompt}\n\n---\n\nUser task: {task}"
+    return client.run_agent(full_task)
+
+
+def _run_via_requests(
+    base_url: str,
+    api_key: str,
+    task: str,
+    system_prompt: str,
+    provider: str = "",
+    model: str = "",
+) -> dict:
+    import json
+
+    try:
+        import requests
+    except ImportError:
+        print("ERROR: 'requests' library is required. Install with: pip install requests")
+        sys.exit(1)
+
+    full_task = f"{system_prompt}\n\n---\n\nUser task: {task}"
+    payload: dict = {"task": full_task}
+    if provider:
+        payload["provider"] = provider
+    if model:
+        payload["model"] = model
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    url = f"{base_url.rstrip('/')}/v1/agent"
+
+    try:
+        resp = requests.post(url, json=payload, headers=headers, timeout=120)
+        resp.raise_for_status()
+        return resp.json()
+    except requests.exceptions.ConnectionError:
+        print(f"ERROR: Cannot connect to Nexus AI at {base_url}")
+        print("Make sure the server is running (e.g., 'python main.py' or 'uvicorn src.app:app').")
+        sys.exit(1)
+    except requests.exceptions.Timeout:
+        print("ERROR: Request timed out after 120 seconds.")
+        sys.exit(1)
+    except requests.exceptions.HTTPError as e:
+        body = ""
+        try:
+            body = e.response.text[:500]
+        except Exception:
+            pass
+        print(f"ERROR: Server returned {e.response.status_code}: {body}")
+        sys.exit(1)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="nostack-run",
+        description="Run a nostack skill against the local Nexus AI agent.",
+    )
+    parser.add_argument(
+        "skill",
+        nargs="?",
+        help="Name of the skill to run (e.g., office-hours, review, codex)",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="List all available nostack skills and exit",
+    )
+    parser.add_argument(
+        "--local",
+        action="store_true",
+        help="Print the system prompt locally without calling the API",
+    )
+    parser.add_argument(
+        "--provider",
+        default=os.getenv("NOSTACK_PROVIDER", ""),
+        help="AI provider to use (e.g., groq, openai, ollama)",
+    )
+    parser.add_argument(
+        "--model",
+        default=os.getenv("NOSTACK_MODEL", ""),
+        help="AI model to use (e.g., gpt-4, llama-3.1-70b)",
+    )
+    parser.add_argument(
+        "--base-url",
+        default=os.getenv("NEXUS_BASE_URL", "http://localhost:8000"),
+        help="Nexus AI server base URL (default: http://localhost:8000)",
+    )
+    parser.add_argument(
+        "--api-key",
+        default=os.getenv("NEXUS_API_KEY", ""),
+        help="Nexus AI API key (if authentication is required)",
+    )
+    parser.add_argument(
+        "--task",
+        default="",
+        help="Additional task context to send along with the skill prompt",
+    )
+
+    args = parser.parse_args()
+
+    if args.list or not args.skill:
+        skills = _list_skills()
+        if not skills:
+            print("No nostack skills found.")
+            print(f"Run 'nostack/setup' first to install skills to ~/.nexus/nostack/skills/")
+            sys.exit(1)
+
+        print(f"Available nostack skills ({len(skills)}):")
+        print()
+        for name, command, role in skills:
+            print(f"  {command:<28s} {role}")
+        print()
+        print("Usage: nostack-run <skill-name>")
+        print("Example: nostack-run office-hours")
+        return
+
+    skill_file = _find_skill_file(args.skill)
+    if skill_file is None:
+        print(f"ERROR: Skill '{args.skill}' not found.")
+        skills = _list_skills()
+        if skills:
+            print()
+            print("Available skills:")
+            for name, command, _ in skills:
+                print(f"  {command}")
+        sys.exit(1)
+
+    parsed = _parse_skill(skill_file)
+    if parsed is None:
+        print(f"ERROR: Failed to parse skill file: {skill_file}")
+        sys.exit(1)
+
+    command, role, system_prompt = parsed
+
+    print(f"==> nostack {command} — {role}")
+    print()
+
+    task = args.task if args.task else "Proceed with your methodology."
+
+    if args.local:
+        print("--- System Prompt ---")
+        print(system_prompt)
+        print()
+        print("--- Task ---")
+        print(task)
+        return
+
+    base_url = args.base_url
+    api_key = args.api_key
+
+    provider = args.provider
+    model = args.model
+
+    print(f"  Connecting to {base_url}")
+    print(f"  Provider: {provider or 'auto'}")
+    print(f"  Model:    {model or 'auto'}")
+    print()
+
+    project_root = _project_root()
+    client = None
+    if project_root is not None:
+        client = _load_sdk_client(base_url, api_key)
+
+    if client is not None:
+        print("  [SDK] Using Nexus AI Python SDK")
+        result = _run_via_sdk(client, task, system_prompt, provider, model)
+    else:
+        print("  [HTTP] Using requests (SDK not available)")
+        result = _run_via_requests(base_url, api_key, task, system_prompt, provider, model)
+
+    print()
+    print("--- Agent Response ---")
+    output = result.get("result", result.get("data", str(result)))
+    print(output)
+
+    used_provider = result.get("provider", "unknown")
+    used_model = result.get("model", "unknown")
+    if used_provider:
+        print()
+        print(f"[Provider: {used_provider} | Model: {used_model}]")
+
+
+if __name__ == "__main__":
+    main()

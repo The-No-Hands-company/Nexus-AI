@@ -575,6 +575,14 @@ def _load_rate_limit_settings() -> dict:
     return {"mode": mode, "per_minute": per_minute, "per_day": per_day}
 
 
+def _init_rate_limit_settings() -> None:
+    loaded = _load_rate_limit_settings()
+    _rate_limit_settings.update(loaded)
+
+
+_init_rate_limit_settings()
+
+
 def _evaluate_rate_limit(principal: str, tokens_requested: int = 0) -> dict:
     now = time.time()
     minute_limit = int(_rate_limit_settings.get("per_minute", 60))

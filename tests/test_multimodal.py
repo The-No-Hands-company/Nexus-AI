@@ -73,7 +73,8 @@ def test_smart_order_for_vision_promotes_ollama(monkeypatch):
 def test_v1_chat_completions_vision_path():
     """Route should accept multipart content with image_url and not crash."""
     mock_resp = {"role": "assistant", "content": "I see a cat."}
-    with patch("src.api.routes.call_llm_with_fallback", return_value=(mock_resp, "ollama")):
+    with patch("src.routes.v1._resolve_provider_order_from_model", return_value=["ollama"]), \
+         patch("src.routes.v1.call_llm_with_fallback", return_value=(mock_resp, "ollama")):
         resp = client.post("/v1/chat/completions", json={
             "model": "llava",
             "messages": [
@@ -97,7 +98,7 @@ def test_v1_chat_completions_vision_path():
 def test_agent_post_with_images():
     """POST /agent with images= should invoke vision fast-path."""
     mock_resp = {"role": "assistant", "content": "Dog detected."}
-    with patch("src.api.routes.call_llm_with_fallback", return_value=(mock_resp, "ollama")):
+    with patch("src.routes.agent.call_llm_with_fallback", return_value=(mock_resp, "ollama")):
         resp = client.post("/agent", json={
             "task": "Describe this image",
             "images": [{"url": "https://example.com/dog.jpg"}],
@@ -112,7 +113,7 @@ def test_agent_post_with_b64_images():
     """POST /agent with base64 images should build data URL and call vision LLM."""
     mock_resp = {"role": "assistant", "content": "Cat photo."}
     b64 = base64.b64encode(b"FAKEIMAGEDATA").decode()
-    with patch("src.api.routes.call_llm_with_fallback", return_value=(mock_resp, "claude")):
+    with patch("src.routes.agent.call_llm_with_fallback", return_value=(mock_resp, "claude")):
         resp = client.post("/agent", json={
             "task": "What is in this image?",
             "images": [{"b64": b64, "mime_type": "image/jpeg"}],
@@ -123,7 +124,7 @@ def test_agent_post_with_b64_images():
 
 def test_agent_post_without_images_uses_normal_path():
     """POST /agent without images= should use run_agent_task normally."""
-    with patch("src.api.routes.run_agent_task", return_value={
+    with patch("src.routes.agent.run_agent_task", return_value={
         "result": "42", "provider": "ollama", "model": "llama3", "history": []
     }):
         resp = client.post("/agent", json={"task": "What is 6 × 7?"})

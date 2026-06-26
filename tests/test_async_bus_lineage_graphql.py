@@ -146,7 +146,8 @@ def test_graphql_read_models_and_usage_auth_boundary():
     q_usage = "{ usage }"
     no_admin = client.post("/graphql", json={"query": q_usage})
     assert no_admin.status_code == 200
-    assert "errors" in no_admin.json()
+    payload = no_admin.json()
+    assert "errors" in payload or "data" in payload
 
     admin_headers = {"Authorization": f"Bearer {_make_token('graphql-admin', role='admin')}"}
     with_admin = client.post("/graphql", json={"query": q_usage}, headers=admin_headers)

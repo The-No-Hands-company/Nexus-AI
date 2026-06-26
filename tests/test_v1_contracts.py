@@ -1227,13 +1227,13 @@ class TestWebhookAndGistContracts(unittest.TestCase):
         admin_headers = {"Authorization": f"Bearer {_make_token('gist_admin', role='admin')}"}
 
         with patch("src.gist_backup.restore_from_gist", return_value=True) as mock_restore:
-            restore_resp = client.post("/backup/gist/restore", headers=admin_headers)
+            restore_resp = client.post("/admin/backup/gist/restore", headers=admin_headers)
         self.assertEqual(restore_resp.status_code, 200)
         self.assertTrue(restore_resp.json().get("restored"))
         mock_restore.assert_called_once()
 
         with patch("src.gist_backup.push_now") as mock_push:
-            push_resp = client.post("/backup/gist/push", headers=admin_headers)
+            push_resp = client.post("/admin/backup/gist/push", headers=admin_headers)
         self.assertEqual(push_resp.status_code, 200)
         self.assertTrue(push_resp.json().get("ok"))
         mock_push.assert_called_once()
@@ -3417,10 +3417,10 @@ class TestSprintF(unittest.TestCase):
 
     # ── Specialist agent registry ──────────────────────────────────────────
 
-    def test_list_agents_returns_all_eight(self):
+    def test_list_agents_returns_all_builtins(self):
         from src.agents import list_agents
         agents = list_agents()
-        self.assertEqual(len(agents), 8, "Expected exactly 8 built-in specialist agents")
+        self.assertGreaterEqual(len(agents), 8, "Expected at least 8 built-in specialist agents")
         ids = [a["id"] for a in agents]
         for expected in ("architect", "security_auditor", "debugger", "data_scientist",
                          "ui_ux_designer", "documentation_writer", "product_manager",
@@ -5445,7 +5445,7 @@ class TestAdvancedReasoning(unittest.TestCase):
     _HYP_CONC_RESP = {"content": ('{"conclusion":"H1 most likely","best_hypothesis_id":1,'  
         '"uncertainty":"low","next_steps":["step1"],"overall_confidence":0.75}')}
 
-    @patch("src.routes.agent.call_llm_with_fallback")
+    @patch("src.routes.reasoning.call_llm_with_fallback")
     def test_hypothesis_returns_expected_shape(self, mock_llm):
         mock_llm.side_effect = [
             (self._HYP_GEN_RESP,  "gen"),
@@ -5466,7 +5466,7 @@ class TestAdvancedReasoning(unittest.TestCase):
         self.assertIn("providers", data)
         self.assertIsInstance(data["hypotheses_tested"], list)
 
-    @patch("src.routes.agent.call_llm_with_fallback")
+    @patch("src.routes.reasoning.call_llm_with_fallback")
     def test_hypothesis_each_result_has_verdict(self, mock_llm):
         mock_llm.side_effect = [
             (self._HYP_GEN_RESP,  "gen"),
@@ -5484,7 +5484,7 @@ class TestAdvancedReasoning(unittest.TestCase):
             self.assertIn("verdict", h)
             self.assertIn("confidence", h)
 
-    @patch("src.routes.agent.call_llm_with_fallback")
+    @patch("src.routes.reasoning.call_llm_with_fallback")
     def test_hypothesis_overall_confidence_in_range(self, mock_llm):
         mock_llm.side_effect = [
             (self._HYP_GEN_RESP,  "gen"),
@@ -5501,7 +5501,7 @@ class TestAdvancedReasoning(unittest.TestCase):
         self.assertGreaterEqual(conf, 0.0)
         self.assertLessEqual(conf, 1.0)
 
-    @patch("src.routes.agent.call_llm_with_fallback")
+    @patch("src.routes.reasoning.call_llm_with_fallback")
     def test_hypothesis_max_clamped(self, mock_llm):
         # 99 -> clamped to 8: 1 gen + 8 test + 1 conc = 10 calls
         mock_llm.side_effect = (

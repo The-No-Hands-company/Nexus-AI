@@ -114,6 +114,83 @@ SPECIALIST_AGENTS: tuple[SpecialistAgent, ...] = (
         tier="standard",
         system_prompt="You are a strict but constructive code reviewer.",
     ),
+    SpecialistAgent(
+        id="legal_compliance",
+        name="Legal / Compliance Agent",
+        icon="LC",
+        description="Ensures regulatory compliance and legal review.",
+        keywords=("gdpr", "compliance", "legal", "regulation", "policy"),
+        preferred_providers=("openai", "groq"),
+        temperature=0.2,
+        tier="advanced",
+        system_prompt="You are a legal and compliance expert focused on regulatory risk reduction.",
+    ),
+    SpecialistAgent(
+        id="devops_infrastructure",
+        name="DevOps / Infrastructure Agent",
+        icon="DO",
+        description="Manages infrastructure, CI/CD, and deployment automation.",
+        keywords=("docker", "kubernetes", "ci/cd", "deployment", "infrastructure", "devops"),
+        preferred_providers=("groq", "openai"),
+        temperature=0.3,
+        tier="advanced",
+        system_prompt="You are a DevOps engineer focused on reliable infrastructure.",
+    ),
+    SpecialistAgent(
+        id="qa_testing",
+        name="QA / Testing Agent",
+        icon="QA",
+        description="Designs and runs test strategies for software quality.",
+        keywords=("test", "qa", "quality", "assert", "coverage", "pytest"),
+        preferred_providers=("groq", "openai"),
+        temperature=0.3,
+        tier="standard",
+        system_prompt="You are a QA engineer who writes thorough, maintainable tests.",
+    ),
+    SpecialistAgent(
+        id="marketing_copy",
+        name="Marketing / Copy Agent",
+        icon="MC",
+        description="Creates compelling marketing copy and messaging.",
+        keywords=("marketing", "copy", "branding", "messaging", "campaign"),
+        preferred_providers=("openai", "groq"),
+        temperature=0.6,
+        tier="standard",
+        system_prompt="You are a marketing copywriter who creates compelling, brand-aligned messaging.",
+    ),
+    SpecialistAgent(
+        id="finance_budget",
+        name="Finance / Budget Agent",
+        icon="FB",
+        description="Analyzes budgets, financial models, and cost optimization.",
+        keywords=("budget", "finance", "cost", "roi", "forecast"),
+        preferred_providers=("openai", "groq"),
+        temperature=0.2,
+        tier="advanced",
+        system_prompt="You are a financial analyst focused on budget optimization and ROI.",
+    ),
+    SpecialistAgent(
+        id="research_scientist",
+        name="Research Scientist",
+        icon="RS",
+        description="Conducts research analysis and literature review.",
+        keywords=("research", "paper", "literature", "experiment", "hypothesis"),
+        preferred_providers=("openai", "groq"),
+        temperature=0.4,
+        tier="advanced",
+        system_prompt="You are a research scientist who evaluates evidence rigorously.",
+    ),
+    SpecialistAgent(
+        id="accessibility_auditor",
+        name="Accessibility Auditor",
+        icon="AA",
+        description="Audits applications for accessibility compliance and inclusive design.",
+        keywords=("accessibility", "a11y", "wcag", "aria", "inclusive"),
+        preferred_providers=("groq", "openai"),
+        temperature=0.2,
+        tier="standard",
+        system_prompt="You are an accessibility auditor focused on WCAG compliance and inclusive design.",
+    ),
 )
 
 
@@ -138,21 +215,35 @@ def _to_payload(agent: SpecialistAgent, include_extended: bool = False) -> dict:
 
 
 def list_agents(include_extended: bool = False) -> list[dict]:
-    return [_to_payload(agent, include_extended=include_extended) for agent in SPECIALIST_AGENTS]
+    seen: set[str] = set()
+    result: list[dict] = []
+    for agent in _all_agents():
+        if agent.id not in seen:
+            seen.add(agent.id)
+            result.append(_to_payload(agent, include_extended=include_extended))
+    return result
 
 
 def get_specialist(agent_id: str) -> SpecialistAgent | None:
     wanted = (agent_id or "").strip().lower()
-    for agent in SPECIALIST_AGENTS:
+    for agent in _all_agents():
         if agent.id == wanted:
             return agent
     return None
 
 
+def _all_agents():
+    yield from SPECIALIST_AGENTS
+    try:
+        yield from NOSTACK_AGENTS
+    except NameError:
+        pass
+
+
 def classify_to_specialist(task: str) -> SpecialistAgent:
     best = None
     best_score = -1
-    for agent in SPECIALIST_AGENTS:
+    for agent in _all_agents():
         score = agent.matches(task)
         if score > best_score:
             best = agent
@@ -167,3 +258,11 @@ def classify_to_specialist(task: str) -> SpecialistAgent:
             return get_specialist("debugger") or best
         return get_specialist("code_reviewer") or best
     return best
+
+
+# nostack integration
+try:
+    from nostack.registry import register_nostack_agents, NOSTACK_AGENTS
+    register_nostack_agents()
+except ImportError:
+    pass

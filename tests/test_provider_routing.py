@@ -95,7 +95,7 @@ class TestProviderHealth:
             assert "benchmarks" in provider, f"Provider health missing 'benchmarks'"
             
             # Validate status
-            assert provider["status"] in ("ready", "rate_limited", "unconfigured"), \
+            assert provider["status"] in ("ready", "rate_limited", "unconfigured", "circuit_open", "demoted"), \
                 f"Invalid status: {provider['status']}"
             
             # Validate benchmarks

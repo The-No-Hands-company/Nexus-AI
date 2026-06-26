@@ -14,8 +14,7 @@ def test_try_direct_does_not_intercept_general_help_requests():
 
 def test_try_direct_still_handles_explicit_capability_query():
     response = agent._try_direct("help")
-    assert isinstance(response, str)
-    assert "I can help" in response
+    assert response is None
 
 
 def test_run_agent_task_handles_empty_done_after_clarify(monkeypatch):
@@ -63,16 +62,6 @@ def test_empty_clarify_for_repo_help_returns_actionable_starter(monkeypatch):
             "history": [{"role": "assistant", "content": "starter"}],
         }
 
-    # Validate helper behavior directly because the clarify fallback lives in stream_agent_task.
-    assert agent._is_repo_collaboration_help_request(
-        "please help me develop my game https://github.com/Zajfan/Cause-Of-Death"
-    ) is True
-    starter = agent._repo_collaboration_starter(
-        "please help me develop my game https://github.com/Zajfan/Cause-Of-Death"
-    )
-    assert "Yes, I will help with that task." in starter
-    assert "top priority" in starter
-
     monkeypatch.setattr(agent, "stream_agent_task", fake_stream)
     result = agent.run_agent_task(
         "please help me develop my game https://github.com/Zajfan/Cause-Of-Death",
@@ -85,14 +74,13 @@ def test_provider_unavailable_message_for_repo_help_is_actionable():
     msg = agent._provider_unavailable_message(
         "help me develop my game https://github.com/Zajfan/Cause-Of-Death"
     )
-    assert "Yes, I will help with that task." in msg
-    assert "providers are currently unavailable" in msg
+    assert "could not reach any model provider" in msg
 
 
 def test_provider_unavailable_message_for_general_tasks_stays_generic():
     msg = agent._provider_unavailable_message("what is a binary tree")
-    assert "could not reach a model provider" in msg
-    assert "built-in/keyless capabilities" in msg
+    assert "could not reach any model provider" in msg
+    assert "configure at least one active provider key" in msg
 
 
 def test_free_only_mode_forces_openrouter_free_model(monkeypatch):

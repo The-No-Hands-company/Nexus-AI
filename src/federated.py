@@ -17,6 +17,13 @@ from .feature_flags import is_enabled
 _ROUNDS_KEY = "federated.rounds.v1"
 _HOOKS_KEY = "federated.fallback_hooks.v1"
 
+# Module-level federation toggle. Defaults to off; callers and tests may
+# override this (e.g. via monkeypatch) to exercise enabled code paths.
+FEDERATED_ENABLED = False
+FEDERATED_SERVER = ""
+FEDERATED_TOKEN = ""
+_total_privacy_budget_used = 0.0
+
 
 @dataclass
 class FederatedRoundResult:
@@ -26,6 +33,8 @@ class FederatedRoundResult:
     submitted: bool
     message: str = ""
     latency_ms: int = 0
+    local_samples: int = 0
+    federated_server: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -35,6 +44,8 @@ class FederatedRoundResult:
             "submitted": bool(self.submitted),
             "message": self.message,
             "latency_ms": int(self.latency_ms),
+            "local_samples": int(self.local_samples),
+            "federated_server": str(self.federated_server),
         }
 
 
@@ -125,6 +136,14 @@ def get_fallback_hook_summary(limit: int = 200, since_ts: float = 0.0) -> dict[s
     }
 
 
+def _sample_is_empty(sample: Any) -> bool:
+    if not isinstance(sample, dict):
+        return True
+    inp = str(sample.get("input", "") or "").strip()
+    out = str(sample.get("output", "") or "").strip()
+    return inp == "" and out == ""
+
+
 def compute_and_submit_update(samples: list[Any], global_round: int) -> FederatedRoundResult:
     enabled = is_enabled(ENABLE_FEDERATED_LLM, default=False)
     if not enabled:
@@ -137,22 +156,34 @@ def compute_and_submit_update(samples: list[Any], global_round: int) -> Federate
             message="Federated LLM is disabled by feature flag.",
         )
 
-    started = time.time()
     sample_count = len(samples) if isinstance(samples, list) else 0
-    if sample_count <= 0:
+    valid_samples = [s for s in (samples if isinstance(samples, list) else []) if not _sample_is_empty(s)]
+    if sample_count <= 0 or len(valid_samples) == 0:
         return FederatedRoundResult(
             status="failed",
             global_round=int(global_round),
             samples_seen=0,
             submitted=False,
-            message="samples must be a non-empty list",
+            message="samples must be a non-empty list with non-empty content",
         )
 
+    if FEDERATED_ENABLED and not FEDERATED_SERVER:
+        return FederatedRoundResult(
+            status="local_only",
+            global_round=int(global_round),
+            samples_seen=int(len(valid_samples)),
+            submitted=False,
+            message="federation is enabled but no remote server configured — local-only mode",
+            local_samples=int(len(valid_samples)),
+            federated_server=str(FEDERATED_SERVER),
+        )
+
+    started = time.time()
     latency_ms = int((time.time() - started) * 1000)
     payload = {
         "ts": time.time(),
         "global_round": int(global_round),
-        "samples_seen": int(sample_count),
+        "samples_seen": int(len(valid_samples)),
         "status": "submitted",
         "latency_ms": latency_ms,
     }
@@ -160,7 +191,7 @@ def compute_and_submit_update(samples: list[Any], global_round: int) -> Federate
     return FederatedRoundResult(
         status="submitted",
         global_round=int(global_round),
-        samples_seen=int(sample_count),
+        samples_seen=int(len(valid_samples)),
         submitted=True,
         message="federated update accepted",
         latency_ms=latency_ms,

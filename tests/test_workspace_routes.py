@@ -13,10 +13,18 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import pytest
 from src.app import app
+from src.db import init_projects_table
 
+init_projects_table()
 
 client = TestClient(app)
+
+
+@pytest.fixture(autouse=True)
+def _ensure_projects_table():
+    init_projects_table()
 
 
 def _create_project(name: str = "Workspace Test Project") -> str:

@@ -2447,6 +2447,11 @@ async def update_rate_limit_settings(request: Request):
     }
     _rate_limit_settings.update(updated)
     db_save_pref("rate_limit_settings", json.dumps(updated))
+    try:
+        from ..routes._helpers import _rate_limit_settings as _hlp_rate_settings
+        _hlp_rate_settings.update(updated)
+    except Exception:
+        pass
     return dict(_rate_limit_settings)
 
 
@@ -6309,7 +6314,6 @@ def swarm_health():
 
 @router.post("/swarm/pause")
 def swarm_pause():
-    """Pause the swarm — signals agents to stop accepting new tasks."""
     global _swarm_paused
     _swarm_paused = True
     return {"paused": True, "message": "Swarm paused. Existing tasks will complete."}
@@ -6317,193 +6321,10 @@ def swarm_pause():
 
 @router.post("/swarm/resume")
 def swarm_resume():
-    """Resume the swarm after a pause."""
     global _swarm_paused
     _swarm_paused = False
     return {"paused": False, "message": "Swarm resumed."}
 
-
-# ── Blueprint execution, export, and import ───────────────────────────────────
-
-@router.post("/architecture/blueprints/{name}/execute")
-async def execute_architecture_blueprint(name: str, request: Request):
-    """Execute a blueprint — spawn the specialist agents it defines.
-
-    Publishes a task message on the agent bus for each agent role in the
-    blueprint's agent_layer.  Returns a list of dispatched task message IDs.
-
-    POST body (optional):
-        task     — override task description sent to each agent
-        version  — specific blueprint version to execute (default: latest)
-    """
-    body: dict = {}
-    try:
-        body = await request.json()
-    except Exception:
-        body = {}
-
-    version = int(body.get("version", 0)) or None
-    task    = str(body.get("task") or "Execute blueprint workflow").strip()
-
-    from ..db import load_architecture_blueprint
-    blueprint = load_architecture_blueprint(name, version=version)
-    if not blueprint:
-        return _api_error(f"Blueprint '{name}' not found", "not_found", 404)
-
-    if _swarm_paused:
-        return _api_error("Swarm is paused — resume before executing blueprints", "swarm_paused", 409)
-
-    from ..agent_bus import post_message
-    snapshot  = blueprint.get("snapshot", {})
-    agent_ids = [a.get("id") for a in snapshot.get("agent_layer", []) if a.get("id")]
-
-    if not agent_ids:
-        return _api_error("Blueprint has no agents to execute", "empty_blueprint", 422)
-
-    dispatched = []
-    for agent_id in agent_ids:
-        msg = post_message(
-            from_id = "blueprint_executor",
-            to_id   = agent_id,
-            content = task,
-            topic   = f"blueprint:{name}",
-        )
-        dispatched.append({"agent_id": agent_id, "msg_id": msg.msg_id})
-
-    return {
-        "blueprint":  name,
-        "version":    blueprint.get("version"),
-        "task":       task,
-        "dispatched": dispatched,
-        "count":      len(dispatched),
-    }
-
-
-@router.get("/architecture/blueprints/{name}/export")
-def export_architecture_blueprint(name: str, version: int = 0):
-    """Export a blueprint as a portable JSON file (downloadable).
-
-    Query params:
-        version — specific version to export (0 = latest)
-    """
-    from ..db import load_architecture_blueprint
-    blueprint = load_architecture_blueprint(name, version=version if version > 0 else None)
-    if not blueprint:
-        return _api_error(f"Blueprint '{name}' not found", "not_found", 404)
-
-    payload   = json.dumps(blueprint, indent=2).encode()
-    safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in name)
-    filename  = f"blueprint_{safe_name}_v{blueprint.get('version', 1)}.json"
-    return Response(
-        content    = payload,
-        media_type = "application/json",
-        headers    = {"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-# NOTE: /architecture/blueprints/import must be registered before
-# /architecture/blueprints/{name} to avoid {name} capturing "import".
-# (FastAPI registers routes in order, so this is handled in app.py include_router.)
-@router.post("/architecture/blueprints/import", status_code=201)
-async def import_architecture_blueprint(request: Request):
-    """Import a previously exported blueprint JSON.
-
-    POST body: the full blueprint JSON object (as exported by GET …/export).
-    Optional override keys:
-        name  — rename the blueprint on import
-        notes — override notes field
-    """
-    body: dict = {}
-    try:
-        body = await request.json()
-    except Exception:
-        return _api_error("Invalid JSON body", "validation_error", 422)
-
-    # Accept either the full export envelope or a raw snapshot
-    if "snapshot" in body:
-        name     = str(body.get("name") or "imported").strip() or "imported"
-        notes    = str(body.get("notes") or "").strip()
-        snapshot = body["snapshot"]
-    else:
-        # Treat the whole body as the snapshot
-        name     = str(body.get("name") or "imported").strip() or "imported"
-        notes    = ""
-        snapshot = body
-
-    if not isinstance(snapshot, dict):
-        return _api_error("'snapshot' must be a JSON object", "validation_error", 422)
-
-    from ..db import save_architecture_blueprint
-    created = save_architecture_blueprint(name=name, snapshot=snapshot, notes=notes)
-    return {"blueprint": created, "status": "imported"}
-
-
-# ── Swarm health and control ──────────────────────────────────────────────────
-
-# Module-level swarm pause flag
-_swarm_paused: bool = False
-
-
-@router.get("/swarm/health")
-def swarm_health():
-    """Return a health summary of all known agents in the swarm.
-
-    Uses the activity log to classify each agent as idle, busy, or errored
-    based on recent events.
-    """
-    from ..agent_bus import all_agents, get_bus
-    bus = get_bus()
-
-    # Derive agent states from the last N activity events
-    recent = activity_log[-200:]
-    agent_state: dict[str, str] = {}
-    for event in reversed(recent):
-        agent_id = str(event.get("agent") or event.get("agent_id") or "")
-        if not agent_id or agent_id in agent_state:
-            continue
-        event_type = str(event.get("type") or "").lower()
-        if "error" in event_type or "fail" in event_type:
-            agent_state[agent_id] = "errored"
-        elif "start" in event_type or "run" in event_type:
-            agent_state[agent_id] = "busy"
-        else:
-            agent_state[agent_id] = "idle"
-
-    # Also include agents with messages in bus inbox
-    for aid in all_agents():
-        if aid not in agent_state:
-            unread = bus.unread_count(aid)
-            agent_state[aid] = "busy" if unread > 0 else "idle"
-
-    counts: dict[str, int] = {"idle": 0, "busy": 0, "errored": 0, "unknown": 0}
-    for state in agent_state.values():
-        counts[state if state in counts else "unknown"] += 1
-
-    return {
-        "paused":  _swarm_paused,
-        "agents":  [{"id": aid, "state": state} for aid, state in agent_state.items()],
-        "summary": counts,
-        "total":   len(agent_state),
-    }
-
-
-@router.post("/swarm/pause")
-def swarm_pause():
-    """Pause the swarm — signals agents to stop accepting new tasks."""
-    global _swarm_paused
-    _swarm_paused = True
-    return {"paused": True, "message": "Swarm paused. Existing tasks will complete."}
-
-
-@router.post("/swarm/resume")
-def swarm_resume():
-    """Resume the swarm after a pause."""
-    global _swarm_paused
-    _swarm_paused = False
-    return {"paused": False, "message": "Swarm resumed."}
-
-
-# ── Blueprint execution, export, and import ───────────────────────────────────
 
 @router.post("/architecture/blueprints/{name}/execute")
 async def execute_architecture_blueprint(name: str, request: Request):

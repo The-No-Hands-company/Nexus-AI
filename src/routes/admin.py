@@ -153,7 +153,7 @@ def usage_webhook_push(request: Request, days: int = 1):
     if not url:
         return _api_error("usage webhook URL is not configured", "invalid_request", 400)
 
-    from ..usage_tracking import usage_stats
+    from ..routes.workspace import usage_stats
     payload = usage_stats(days=max(1, min(int(days), 365)), username="")
     body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
 

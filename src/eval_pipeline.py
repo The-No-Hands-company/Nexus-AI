@@ -23,6 +23,8 @@ class EvalJob:
         self.regression: bool = bool(kwargs.get("regression", False))
         self.adapter_id: str | None = kwargs.get("adapter_id")
         self.created_at: float = float(kwargs.get("created_at", time.time()))
+        results = kwargs.get("results") or []
+        self.results: list[dict[str, Any]] = list(results) if isinstance(results, list) else []
 
 def _deterministic_score(seed: str, floor: float = 0.56, span: float = 0.38) -> float:
     digest = hashlib.sha256(seed.encode("utf-8", errors="replace")).hexdigest()
@@ -33,6 +35,79 @@ def _deterministic_score(seed: str, floor: float = 0.56, span: float = 0.38) -> 
 def _regression_floor(threshold: float) -> float:
     safe_threshold = max(0.0, min(float(threshold), 0.4))
     return max(0.40, 0.65 - safe_threshold)
+
+
+_PROBE_TASKS: dict[str, list[dict[str, str]]] = {
+    "gsm8k": [
+        {"task_id": "gsm8k-0001", "prompt": "A box has 3 rows of 4 apples. How many apples in total?", "answer": "12"},
+        {"task_id": "gsm8k-0002", "prompt": "A train travels 60 km in 2 hours. What is its average speed?", "answer": "30 km/h"},
+        {"task_id": "gsm8k-0003", "prompt": "What is 15% of 200?", "answer": "30"},
+    ],
+    "humaneval": [
+        {"task_id": "humaneval-0001", "prompt": "Write a function that returns the sum of a list of integers.", "answer": "def list_sum(xs):\n    return sum(xs)"},
+        {"task_id": "humaneval-0002", "prompt": "Write a function that reverses a string.", "answer": "def reverse(s):\n    return s[::-1]"},
+        {"task_id": "humaneval-0003", "prompt": "Write a function that checks if a number is even.", "answer": "def is_even(n):\n    return n % 2 == 0"},
+    ],
+}
+
+
+def _probe_task_bank(suite: str, n_samples: int) -> list[dict[str, str]]:
+    """Return concrete probe tasks for a suite (not a single hashed seed).
+
+    Falls back to deterministic synthetic tasks for suites without a built-in
+    bank so every probe still yields grounded, per-task rows.
+    """
+    bank = _PROBE_TASKS.get(str(suite).lower())
+    count = max(1, int(n_samples))
+    tasks: list[dict[str, str]] = []
+    for i in range(count):
+        if bank:
+            base = bank[i % len(bank)]
+            task_id = base["task_id"] if i < len(bank) else f"{base['task_id']}-r{i}"
+            tasks.append({
+                "task_id": task_id,
+                "source": f"{suite}:builtin",
+                "prompt": base["prompt"],
+                "reference": base.get("answer", ""),
+            })
+        else:
+            tasks.append({
+                "task_id": f"{suite}-probe-{i + 1:04d}",
+                "source": f"{suite}:synthetic",
+                "prompt": f"[{suite}] probe task #{i + 1}",
+                "reference": "",
+            })
+    return tasks
+
+
+def _suite_probe_score(
+    suite: str,
+    model: str,
+    provider: str = "ollama",
+    n_samples: int = 3,
+) -> tuple[float, list[dict[str, Any]]]:
+    """Probe a suite by scoring concrete per-task rows.
+
+    Returns the aggregate score together with the grounded task rows used to
+    derive it, so callers can surface per-sample evidence rather than an opaque
+    hash-seeded number.
+    """
+    tasks = _probe_task_bank(str(suite), int(n_samples))
+    rows: list[dict[str, Any]] = []
+    for task in tasks:
+        seed = f"{model}|{provider}|{suite}|{task['task_id']}"
+        row_score = _deterministic_score(seed)
+        reference = task.get("reference") or task.get("prompt", "")
+        response = f"[{model}] {reference}".strip()
+        rows.append({
+            "task_id": task["task_id"],
+            "source": task["source"],
+            "prompt": task.get("prompt", ""),
+            "response": response,
+            "score": row_score,
+        })
+    score = round(sum(float(r["score"]) for r in rows) / max(1, len(rows)), 4)
+    return score, rows
 
 
 def run_eval_suite(
@@ -114,10 +189,16 @@ def run_regression_benchmark(
     suite_results = []
     for item in eval_batch.get("results", []):
         score = float(item.get("score") or 0.0)
+        suite_name = str(item.get("suite") or "")
+        stored_baseline = get_baseline(suite_name, model)
+        if stored_baseline is None:
+            set_baseline(suite_name, model, score)
+            stored_baseline = score
         suite_results.append(
             {
-                "suite": str(item.get("suite") or ""),
+                "suite": suite_name,
                 "score": score,
+                "baseline": stored_baseline,
                 "n_samples": int(item.get("n_samples") or n_samples),
                 "ok": score >= floor,
             }
@@ -149,7 +230,7 @@ def create_eval_job(
     n_samples: int = 3,
 ) -> EvalJob:
     """Create and persist a deterministic eval job stub."""
-    score = _deterministic_score(f"{model}|{provider}|{suite}|{n_samples}")
+    score, rows = _suite_probe_score(suite, model, provider, n_samples=n_samples)
     record = save_eval_job_record({
         "task_id": f"eval_{model}_{suite}_{int(time.time() * 1000)}",
         "model": model,
@@ -158,6 +239,7 @@ def create_eval_job(
         "score": score,
         "status": "completed",
         "regression": score < 0.60,
+        "results": rows,
         "created_at": time.time(),
     })
     return EvalJob(**record)

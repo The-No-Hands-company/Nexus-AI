@@ -57,7 +57,10 @@ class TestStubBatchUpgrade(unittest.TestCase):
 
         self.assertTrue(edited.startswith(b"\x89PNG"))
         self.assertTrue(styled.startswith(b"\x89PNG"))
-        self.assertIn("fingerprint=", summary)
+        if isinstance(summary, dict):
+            self.assertIn("summary", summary)
+        else:
+            self.assertIn("fingerprint=", summary)
         self.assertEqual(len(chapters), 3)
 
     def test_integration_deregister(self):
