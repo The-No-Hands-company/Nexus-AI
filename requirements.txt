@@ -4,7 +4,7 @@ uvicorn[standard]==0.34.0
 requests==2.32.3
 duckduckgo-search==8.1.1
 pymupdf==1.24.5
-yt-dlp==2024.11.18
+yt-dlp==2026.6.9
 pypdf==4.3.1
 youtube-transcript-api==1.2.4
 PyJWT>=2.8.0
