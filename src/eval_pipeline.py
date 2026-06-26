@@ -343,6 +343,10 @@ def run_adapter_proof_report(
         "regression_threshold": float(regression_threshold),
         "gate_passed": bool(passes_gate),
         "passes": bool(passes_gate),
+        "promotion_gate": {
+            "allowed": bool(passes_gate),
+            "reason": None if passes_gate else "Improvement threshold not met or too many regressions",
+        },
         "suite_results": benchmark.get("suite_results", []),
     }
     return save_adapter_proof_report(report)

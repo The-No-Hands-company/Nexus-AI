@@ -27,6 +27,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
 contextBridge.exposeInMainWorld('NexusAPI', {
     getBackendUrl: () => ipcRenderer.invoke('get-backend-url'),
     setBackendUrl: (url) => ipcRenderer.send('set-backend-url', url),
+    checkHealth: () => ipcRenderer.invoke('check-backend-health'),
 
     // nostack skill API
     listSkills: () => ipcRenderer.invoke('nostack-list-skills'),

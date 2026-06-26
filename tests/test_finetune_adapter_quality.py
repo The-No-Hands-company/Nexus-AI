@@ -34,7 +34,6 @@ def _eval_task(suite: str, score: float) -> EvalTask:
     return task
 
 
-@pytest.mark.xfail(reason="Adapter proof pipeline needs investigation - baseline scoring may have changed")
 def test_adapter_proof_report_persists_and_allows_promotion(monkeypatch):
     _seed_adapter("pytest-proof-adapter")
 
@@ -42,11 +41,13 @@ def test_adapter_proof_report_persists_and_allows_promotion(monkeypatch):
         selected = list(suites or ["gsm8k", "arc"])
         score = 0.66 if adapter_id else 0.58
         jobs = [_eval_task(suite, score) for suite in selected]
+        results = [{"suite": suite, "score": score} for suite in selected]
         return {
             "model": model,
             "provider": provider,
             "adapter_id": adapter_id,
             "suites": selected,
+            "results": results,
             "jobs": jobs,
             "average_score": score,
             "regressions": 0,
@@ -83,11 +84,13 @@ def test_adapter_promotion_is_blocked_when_proof_fails(monkeypatch):
         selected = list(suites or ["gsm8k"])
         score = 0.40 if adapter_id else 0.58
         jobs = [_eval_task(suite, score) for suite in selected]
+        results = [{"suite": suite, "score": score} for suite in selected]
         return {
             "model": model,
             "provider": provider,
             "adapter_id": adapter_id,
             "suites": selected,
+            "results": results,
             "jobs": jobs,
             "average_score": score,
             "regressions": 0,

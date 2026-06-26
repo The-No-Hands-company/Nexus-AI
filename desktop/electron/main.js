@@ -92,6 +92,12 @@ const createWindow = () => {
 };
 
 async function loadApp() {
+  const rendererPath = path.join(__dirname, 'renderer', 'index.html');
+  if (fs.existsSync(rendererPath)) {
+    mainWindow.loadFile(rendererPath);
+    return;
+  }
+
   const backendAlive = await checkBackend();
   if (backendAlive) {
     mainWindow.loadURL(backendUrl);
@@ -436,6 +442,17 @@ ipcMain.handle('nexus-agent-task', async (_event, task, images) => {
   try {
     return await nexusRequest('POST', '/agent', { task: task || '', images: images || [] });
   } catch (e) { return { error: e.message }; }
+});
+
+ipcMain.handle('check-backend-health', async () => {
+  try {
+    const alive = await checkBackend();
+    if (!alive) return { connected: false };
+    const info = await nexusRequest('GET', '/health');
+    return { connected: true, info: info || {} };
+  } catch (e) {
+    return { connected: false, error: e.message };
+  }
 });
 
 process.on('uncaughtException', (err) => {
