@@ -5,19 +5,87 @@ nostack-run — Run a nostack skill against the local Nexus AI agent.
 Usage:
   nostack-run <skill-name>
   nostack-run --list
+  nostack-run --suggest "task description"
+  nostack-run --health
+  nostack-run --sprint "task" --skills "skill1,skill2,skill3"
   nostack-run --help
 
 Examples:
   nostack-run office-hours
   nostack-run review --provider openai --model gpt-4
   nostack-run codex --local
+  nostack-run --suggest "I need a code review for my pull request"
+  nostack-run --sprint "Build a login page" --skills "office-hours,review,qa"
 """
 from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
+import textwrap
+import time
 from pathlib import Path
+
+SKILL_CATEGORIES: dict[str, list[str]] = {
+    "Planning": [
+        "office-hours",
+        "plan-ceo-review",
+        "plan-eng-review",
+        "plan-design-review",
+        "plan-devex-review",
+    ],
+    "Design": [
+        "design-consultation",
+        "design-shotgun",
+        "design-html",
+        "design-review",
+        "devex-review",
+    ],
+    "Build & Review": [
+        "autoplan",
+        "review",
+        "investigate",
+        "codex",
+    ],
+    "Test & Ship": [
+        "qa",
+        "qa-only",
+        "ship",
+        "land-and-deploy",
+        "canary",
+        "benchmark",
+    ],
+    "Security & Docs": [
+        "cso",
+        "document-release",
+        "document-generate",
+    ],
+    "Reflection": [
+        "retro",
+        "learn",
+    ],
+    "Power Tools": [
+        "careful",
+        "freeze",
+        "guard",
+        "unfreeze",
+        "spec",
+        "diagram",
+        "make-pdf",
+    ],
+}
+
+
+def _project_root() -> Path | None:
+    d = Path.cwd()
+    for _ in range(10):
+        if (d / "nostack").is_dir() or (d / "src" / "agents").is_dir():
+            return d
+        if d.parent == d:
+            return None
+        d = d.parent
+    return None
 
 
 def _find_skill_file(name: str) -> Path | None:
@@ -50,17 +118,6 @@ def _find_skill_file(name: str) -> Path | None:
             if candidate.is_file():
                 return candidate
 
-    return None
-
-
-def _project_root() -> Path | None:
-    d = Path.cwd()
-    for _ in range(10):
-        if (d / "nostack").is_dir() or (d / "src" / "agents").is_dir():
-            return d
-        if d.parent == d:
-            return None
-        d = d.parent
     return None
 
 
@@ -99,6 +156,68 @@ def _parse_skill(filepath: Path) -> tuple[str, str, str] | None:
 
     system_prompt = "\n".join(system_prompt_lines).strip()
     return (f"/{command}", role, system_prompt)
+
+
+def _load_all_skills() -> list[tuple[str, str, str, str, str]]:
+    """Return (skill_name, command, role, description, tier)."""
+    results: list[tuple[str, str, str, str, str]] = []
+    seen: set[str] = set()
+
+    search_dirs: list[Path] = []
+
+    nostack_home = Path.home() / ".nexus" / "nostack" / "skills"
+    if nostack_home.is_dir():
+        search_dirs.append(nostack_home)
+
+    project_dir = _project_root()
+    if project_dir is not None:
+        project_skills = project_dir / "nostack" / "skills"
+        if project_skills.is_dir() and project_skills != nostack_home:
+            search_dirs.append(project_skills)
+
+    env_dir = os.getenv("NOSTACK_SKILLS_DIR")
+    if env_dir:
+        env_path = Path(env_dir)
+        if env_path.is_dir() and env_path not in search_dirs:
+            search_dirs.append(env_path)
+
+    for skills_dir in reversed(search_dirs):
+        for md_file in sorted(skills_dir.glob("*.md")):
+            skill_name = md_file.stem
+            if skill_name in seen:
+                continue
+            seen.add(skill_name)
+
+            parsed = _parse_skill(md_file)
+            if parsed is not None:
+                command, role, system_prompt = parsed
+                description = _extract_description(md_file.read_text(encoding="utf-8"))
+            else:
+                command = f"/{skill_name}"
+                role = skill_name.replace("-", " ").title()
+                description = f"Run the {skill_name} skill."
+
+            tier = _guess_tier(skill_name)
+            results.append((skill_name, command, role, description, tier))
+
+    results.sort(key=lambda x: x[0])
+    return results
+
+
+def _extract_description(content: str) -> str:
+    for line in content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("# "):
+            first = stripped[2:].strip()
+            if not first.startswith("Skill:") and not first.startswith("skill:"):
+                return first
+    return ""
+
+
+def _guess_tier(skill_name: str) -> str:
+    advanced = {"review", "codex", "cso", "autoplan", "plan-ceo-review",
+                "plan-eng-review", "design-consultation", "canary"}
+    return "advanced" if skill_name in advanced else "standard"
 
 
 def _list_skills() -> list[tuple[str, str, str]]:
@@ -182,7 +301,7 @@ def _run_via_requests(
     try:
         import requests
     except ImportError:
-        print("ERROR: 'requests' library is required. Install with: pip install requests")
+        _print_error("'requests' library is required. Install with: pip install requests")
         sys.exit(1)
 
     full_task = f"{system_prompt}\n\n---\n\nUser task: {task}"
@@ -203,11 +322,11 @@ def _run_via_requests(
         resp.raise_for_status()
         return resp.json()
     except requests.exceptions.ConnectionError:
-        print(f"ERROR: Cannot connect to Nexus AI at {base_url}")
-        print("Make sure the server is running (e.g., 'python main.py' or 'uvicorn src.app:app').")
+        _print_error(f"Cannot connect to Nexus AI at {base_url}")
+        _print_error("Make sure the server is running (e.g., 'python main.py' or 'uvicorn src.app:app').")
         sys.exit(1)
     except requests.exceptions.Timeout:
-        print("ERROR: Request timed out after 120 seconds.")
+        _print_error("Request timed out after 120 seconds.")
         sys.exit(1)
     except requests.exceptions.HTTPError as e:
         body = ""
@@ -215,14 +334,492 @@ def _run_via_requests(
             body = e.response.text[:500]
         except Exception:
             pass
-        print(f"ERROR: Server returned {e.response.status_code}: {body}")
+        _print_error(f"Server returned {e.response.status_code}: {body}")
         sys.exit(1)
+
+
+def _api_request(
+    method: str,
+    path: str,
+    base_url: str,
+    api_key: str,
+    body: dict | None = None,
+    timeout: int = 30,
+) -> tuple[int, dict | str]:
+    try:
+        import requests  # noqa: F811
+    except ImportError:
+        _print_error("'requests' library is required. Install with: pip install requests")
+        sys.exit(1)
+
+    url = f"{base_url.rstrip('/')}{path}"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        if method == "GET":
+            resp = requests.get(url, headers=headers, timeout=timeout)
+        elif method == "POST":
+            resp = requests.post(url, json=body, headers=headers, timeout=timeout)
+        else:
+            return 405, f"Unsupported method: {method}"
+
+        try:
+            data = resp.json()
+        except Exception:
+            data = resp.text[:1000]
+
+        return resp.status_code, data
+    except requests.exceptions.ConnectionError:
+        return 503, f"Cannot connect to Nexus AI at {base_url}"
+    except requests.exceptions.Timeout:
+        return 504, "Request timed out."
+    except Exception as exc:
+        return 500, str(exc)
+
+
+def _print_error(msg: str) -> None:
+    sys.stderr.write(f"\033[31mERROR: {msg}\033[0m\n")
+
+
+def _spinner(stop_event: dict) -> None:
+    frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    i = 0
+    while not stop_event.get("done", False):
+        sys.stderr.write(f"\r  {frames[i % len(frames)]} Running...")
+        sys.stderr.flush()
+        time.sleep(0.1)
+        i += 1
+    sys.stderr.write("\r" + " " * 30 + "\r")
+    sys.stderr.flush()
+
+
+def _wrap_text(text: str, width: int | None = None) -> str:
+    if width is None:
+        width = shutil.get_terminal_size().columns - 4
+    return "\n".join(textwrap.fill(line, width) if line else "" for line in text.split("\n"))
+
+
+# ── Skill Suggestions ────────────────────────────────────────────────────────
+
+
+def cmd_suggest(task: str, base_url: str, api_key: str) -> int:
+    task = task.strip()
+    if not task:
+        _print_error("Task description is required for --suggest")
+        return 1
+
+    status, data = _api_request("POST", "/nostack/skills/classify", base_url, api_key,
+                                body={"task": task, "limit": 5})
+
+    if status == 503:
+        return _suggest_offline(task)
+
+    if status != 200:
+        err = data.get("error", str(data)) if isinstance(data, dict) else str(data)
+        _print_error(f"Classification failed ({status}): {err}")
+        return 1
+
+    skills = data.get("skills", [])
+    if not skills:
+        print("No matching skills found for your task.")
+        return 0
+
+    print()
+    print("\033[1mTop Skill Matches:\033[0m")
+    print()
+    for s in skills:
+        score = s.get("score", 0)
+        bar = "█" * min(score, 10) + "░" * max(0, 10 - score)
+        name = s.get("name", s.get("command", "?"))
+        cmd = s.get("command", "?")
+        desc = s.get("description", "")
+        print(f"  \033[1m{cmd:<24s}\033[0m [{bar}]  score={score}")
+        print(f"    \033[90m{name} — {desc}\033[0m")
+        print()
+
+    suggested_template = data.get("suggested_template")
+    sprint_template = data.get("sprint_template", [])
+    if suggested_template and sprint_template:
+        print(f"\033[1m⭐ Suggested Sprint Template:\033[0m \033[33m{suggested_template}\033[0m")
+        print(f"   Skills: {' → '.join(sprint_template)}")
+        print()
+        skill_list = ",".join(sprint_template)
+        print(f"  \033[32mnostack-run --sprint \"{task}\" --skills \"{skill_list}\"\033[0m")
+        print()
+    elif skills:
+        top_names = [s.get("command", "").lstrip("/") for s in skills[:3]]
+        skill_list = ",".join(top_names)
+        print(f"\033[90mTry: nostack-run --sprint \"{task}\" --skills \"{skill_list}\"\033[0m")
+        print()
+
+    return 0
+
+
+def _suggest_offline(task: str) -> int:
+    try:
+        sys.path.insert(0, str(_project_root()))
+        from nostack.registry import classify_and_suggest
+
+        result = classify_and_suggest(task, limit=5)
+    except ImportError:
+        _print_error("Cannot run classification: server not available and nostack registry not importable.")
+        return 1
+
+    skills = result.get("skills", [])
+    if not skills:
+        print("No matching skills found for your task.")
+        return 0
+
+    print()
+    print("\033[1mTop Skill Matches (offline):\033[0m")
+    print()
+    for s in skills:
+        score = s.get("score", 0)
+        bar = "█" * min(score, 10) + "░" * max(0, 10 - score)
+        name = s.get("name", s.get("command", "?"))
+        cmd = s.get("command", "?")
+        desc = s.get("description", "")
+        print(f"  \033[1m{cmd:<24s}\033[0m [{bar}]  score={score}")
+        print(f"    \033[90m{name} — {desc}\033[0m")
+        print()
+
+    suggested_template = result.get("suggested_template")
+    sprint_template = result.get("sprint_template", [])
+    if suggested_template and sprint_template:
+        print(f"\033[1m⭐ Suggested Sprint Template:\033[0m \033[33m{suggested_template}\033[0m")
+        print(f"   Skills: {' → '.join(sprint_template)}")
+        print()
+        print(f"  \033[32mnostack-run --sprint \"{task}\" --skills \"{','.join(sprint_template)}\"\033[0m")
+        print()
+    elif skills:
+        top_names = [s.get("command", "").lstrip("/") for s in skills[:3]]
+        print(f"\033[90mTry: nostack-run --sprint \"{task}\" --skills \"{','.join(top_names)}\"\033[0m")
+        print()
+
+    return 0
+
+
+# ── Formatted List ────────────────────────────────────────────────────────────
+
+
+def cmd_list() -> int:
+    skills = _load_all_skills()
+    if not skills:
+        print("No nostack skills found.")
+        print("Run 'nostack/setup' first to install skills to ~/.nexus/nostack/skills/")
+        return 1
+
+    skill_map: dict[str, tuple[str, str, str, str, str]] = {}
+    for s in skills:
+        skill_map[s[0]] = s
+
+    catalogued: set[str] = set()
+
+    print()
+    print(f"\033[1mNostack Virtual Team — {len(skills)} Specialist Agents\033[0m")
+    print()
+
+    for category, names in SKILL_CATEGORIES.items():
+        members = []
+        for name in names:
+            s = skill_map.get(name)
+            if s:
+                members.append(s)
+                catalogued.add(name)
+
+        if not members:
+            continue
+
+        icon = {
+            "Planning": "\033[34m◈\033[0m",
+            "Design": "\033[35m✦\033[0m",
+            "Build & Review": "\033[36m◆\033[0m",
+            "Test & Ship": "\033[32m▶\033[0m",
+            "Security & Docs": "\033[31m◉\033[0m",
+            "Reflection": "\033[33m◉\033[0m",
+            "Power Tools": "\033[37m◆\033[0m",
+        }.get(category, "•")
+
+        print(f"  {icon} \033[1m{category}\033[0m")
+        for name, command, role, description, tier in members:
+            tier_mark = "\033[33m⚡\033[0m" if tier == "advanced" else "  "
+            print(f"     {tier_mark} \033[1m{command:<26s}\033[0m \033[90m{role}\033[0m")
+        print()
+
+    uncatalogued = [skill_map[n] for n in skill_map if n not in catalogued]
+    if uncatalogued:
+        print("  \033[1mOther\033[0m")
+        for name, command, role, description, tier in uncatalogued:
+            print(f"     \033[1m{command:<26s}\033[0m \033[90m{role}\033[0m")
+        print()
+
+    print(f"Usage: nostack-run <skill-name>")
+    print(f"Example: nostack-run office-hours")
+    return 0
+
+
+# ── Better Run Output ─────────────────────────────────────────────────────────
+
+
+def cmd_run(
+    skill: str,
+    base_url: str,
+    api_key: str,
+    provider: str,
+    model: str,
+    task: str,
+    local: bool,
+) -> int:
+    skill_file = _find_skill_file(skill)
+    if skill_file is None:
+        _print_error(f"Skill '{skill}' not found.")
+        skills = _list_skills()
+        if skills:
+            print()
+            print("Available skills:")
+            for name, command, _ in skills:
+                print(f"  {command}")
+        return 1
+
+    parsed = _parse_skill(skill_file)
+    if parsed is None:
+        _print_error(f"Failed to parse skill file: {skill_file}")
+        return 1
+
+    command, role, system_prompt = parsed
+
+    content = skill_file.read_text(encoding="utf-8")
+    description = _extract_description(content)
+
+    print()
+    print(f"  \033[1m{command}\033[0m — \033[33m{role}\033[0m")
+    if description:
+        print(f"  \033[90m{_wrap_text(description, 60)}\033[0m")
+    print()
+
+    user_task = task if task else "Proceed with your methodology."
+
+    if local:
+        print("--- System Prompt ---")
+        print(system_prompt)
+        print()
+        print("--- Task ---")
+        print(user_task)
+        return 0
+
+    print(f"  \033[90mConnecting to {base_url}\033[0m")
+    print(f"  \033[90mProvider: {provider or 'auto'}  |  Model: {model or 'auto'}\033[0m")
+
+    project_root = _project_root()
+    client = None
+    if project_root is not None:
+        client = _load_sdk_client(base_url, api_key)
+
+    if client is not None:
+        print("  \033[90m[SDK] Using Nexus AI Python SDK\033[0m")
+    else:
+        print("  \033[90m[HTTP] Using requests (SDK not available)\033[0m")
+
+    print()
+
+    stop_event: dict = {"done": False}
+    spinner_thread = None
+    try:
+        import threading
+        spinner_thread = threading.Thread(target=_spinner, args=(stop_event,), daemon=True)
+        spinner_thread.start()
+    except Exception:
+        pass
+
+    try:
+        if client is not None:
+            result = _run_via_sdk(client, user_task, system_prompt, provider, model)
+        else:
+            result = _run_via_requests(base_url, api_key, user_task, system_prompt, provider, model)
+    finally:
+        stop_event["done"] = True
+        if spinner_thread is not None:
+            spinner_thread.join(timeout=0.5)
+
+    if isinstance(result, dict) and result.get("error"):
+        _print_error(result["error"])
+        return 1
+
+    print()
+    print("━━━ Agent Response ━━━")
+    output = result.get("result", result.get("data", str(result)))
+    print(_wrap_text(output))
+
+    used_provider = result.get("provider", "unknown")
+    used_model = result.get("model", "unknown")
+    if used_provider:
+        print()
+        print(f"  \033[90m[Provider: {used_provider} | Model: {used_model}]\033[0m")
+
+    return 0
+
+
+# ── Health Check ──────────────────────────────────────────────────────────────
+
+
+def cmd_health(base_url: str, api_key: str) -> int:
+    print(f"\n  \033[90mChecking Nexus AI health at {base_url}...\033[0m")
+    sys.stdout.flush()
+
+    status, data = _api_request("GET", "/health", base_url, api_key, timeout=10)
+
+    if status == 503:
+        _print_error(f"Cannot connect to Nexus AI at {base_url}")
+        _print_error("Make sure the server is running (e.g., 'python main.py' or 'uvicorn src.app:app').")
+        return 1
+
+    if status != 200:
+        err = data.get("detail", data.get("error", str(data))) if isinstance(data, dict) else str(data)
+        _print_error(f"Health check failed ({status}): {err}")
+        return 1
+
+    health_status = data.get("status", "unknown") if isinstance(data, dict) else "error"
+    provider = data.get("provider", "unknown") if isinstance(data, dict) else "unknown"
+
+    if health_status == "healthy":
+        print(f"  \033[32m● Healthy\033[0m")
+    else:
+        print(f"  \033[31m● {health_status}\033[0m")
+
+    print(f"  Provider: {provider}")
+
+    deep_status, deep_data = _api_request("GET", "/health/deep", base_url, api_key, timeout=10)
+    if deep_status == 200 and isinstance(deep_data, dict):
+        print()
+        print("  \033[1mDeep Health:\033[0m")
+        for key in ("db", "redis"):
+            val = deep_data.get(key, "")
+            icon = "\033[32m●\033[0m" if val == "ok" else "\033[31m●\033[0m"
+            print(f"    {icon} {key}: {val}")
+
+    print()
+    return 0
+
+
+# ── Sprint Run ────────────────────────────────────────────────────────────────
+
+
+def cmd_sprint(task: str, skills_str: str, base_url: str, api_key: str) -> int:
+    task = task.strip()
+    skills_str = skills_str.strip()
+
+    if not task:
+        _print_error("Task description is required (--sprint \"your task\")")
+        return 1
+    if not skills_str:
+        _print_error("Skills list is required (--skills \"skill1,skill2\")")
+        return 1
+
+    skills = [s.strip() for s in skills_str.split(",") if s.strip()]
+    if not skills:
+        _print_error("Skills list is required (--skills \"skill1,skill2\")")
+        return 1
+
+    print()
+    print(f"  \033[1mNostack Sprint\033[0m")
+    print(f"  \033[90mTask: {_wrap_text(task, 60)}\033[0m")
+    print(f"  \033[90mSkills ({len(skills)}): {' → '.join(skills)}\033[0m")
+    print()
+
+    body = {"task": task, "skills": skills}
+    status, data = _api_request("POST", "/nostack/sprint", base_url, api_key,
+                                body=body, timeout=15)
+
+    if status == 503:
+        _print_error(f"Cannot connect to Nexus AI at {base_url}")
+        _print_error("Sprint requires a running server. Start with: python main.py")
+        return 1
+
+    if status != 200:
+        err = data.get("detail", data.get("error", str(data))) if isinstance(data, dict) else str(data)
+        _print_error(f"Sprint failed ({status}): {err}")
+        return 1
+
+    sprint_id = data.get("sprint_id", "unknown")
+    total = data.get("total_skills", len(skills))
+
+    print(f"  \033[32mSprint started!\033[0m")
+    print(f"  Sprint ID: \033[1m{sprint_id}\033[0m")
+    print()
+
+    name_width = max(len(s) for s in skills) if skills else 10
+    last_results = 0
+
+    for step in range(1, total + 1):
+        time.sleep(2)
+
+        s, pdata = _api_request("GET", f"/nostack/sprint/{sprint_id}", base_url, api_key, timeout=10)
+
+        if s != 200:
+            continue
+
+        results = pdata.get("results", []) if isinstance(pdata, dict) else []
+        sprint_status = pdata.get("status", "running") if isinstance(pdata, dict) else "running"
+
+        for idx in range(last_results, len(results)):
+            r = results[idx]
+            skill_name = r.get("skill", "?")
+            skill_status = r.get("status", "?")
+            err = r.get("error", "")
+
+            if skill_status == "completed":
+                print(f"  \033[32m✓\033[0m /{skill_name:<{name_width}}  done")
+            elif skill_status == "failed":
+                print(f"  \033[31m✗\033[0m /{skill_name:<{name_width}}  failed")
+                if err:
+                    print(f"     \033[31m{_wrap_text(err, 60)}\033[0m")
+            else:
+                dots = "." * ((step - 1) % 4 + 1)
+                print(f"  \033[33m○\033[0m /{skill_name:<{name_width}}  running{dots}")
+
+        last_results = len(results)
+
+        if sprint_status in ("completed", "cancelled", "crashed"):
+            break
+
+    final_s, final_data = _api_request("GET", f"/nostack/sprint/{sprint_id}", base_url, api_key, timeout=10)
+    if final_s == 200 and isinstance(final_data, dict):
+        final_status = final_data.get("status", "?")
+        if final_status == "completed":
+            print(f"\n  \033[32mSprint completed successfully.\033[0m")
+            return 0
+        elif final_status == "crashed":
+            print(f"\n  \033[31mSprint crashed.\033[0m")
+            return 1
+        elif final_status == "cancelled":
+            print(f"\n  \033[33mSprint cancelled.\033[0m")
+            return 1
+
+    print(f"\n  \033[32mSprint in progress.\033[0m")
+    print(f"  Check status: \033[90mnostack-run --sprint-status {sprint_id}\033[0m")
+    return 0
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="nostack-run",
         description="Run a nostack skill against the local Nexus AI agent.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=textwrap.dedent("""\
+            Examples:
+              nostack-run office-hours
+              nostack-run review --provider openai --model gpt-4
+              nostack-run codex --local
+              nostack-run --list
+              nostack-run --suggest "I need a code review for my PR"
+              nostack-run --sprint "Build a login page" --skills "office-hours,review,qa"
+              nostack-run --health
+        """),
     )
     parser.add_argument(
         "skill",
@@ -232,7 +829,27 @@ def main() -> None:
     parser.add_argument(
         "--list",
         action="store_true",
-        help="List all available nostack skills and exit",
+        help="List all available nostack skills grouped by category",
+    )
+    parser.add_argument(
+        "--suggest", "-s",
+        metavar="TASK",
+        help="Suggest skills for a task description",
+    )
+    parser.add_argument(
+        "--health",
+        action="store_true",
+        help="Check Nexus AI server health",
+    )
+    parser.add_argument(
+        "--sprint",
+        metavar="TASK",
+        help="Run a sprint — a chain of skills (requires --skills)",
+    )
+    parser.add_argument(
+        "--skills",
+        metavar="SKILLS",
+        help="Comma-separated skills for a sprint (e.g., 'office-hours,review,qa')",
     )
     parser.add_argument(
         "--local",
@@ -267,86 +884,30 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.list or not args.skill:
-        skills = _list_skills()
-        if not skills:
-            print("No nostack skills found.")
-            print(f"Run 'nostack/setup' first to install skills to ~/.nexus/nostack/skills/")
-            sys.exit(1)
-
-        print(f"Available nostack skills ({len(skills)}):")
-        print()
-        for name, command, role in skills:
-            print(f"  {command:<28s} {role}")
-        print()
-        print("Usage: nostack-run <skill-name>")
-        print("Example: nostack-run office-hours")
-        return
-
-    skill_file = _find_skill_file(args.skill)
-    if skill_file is None:
-        print(f"ERROR: Skill '{args.skill}' not found.")
-        skills = _list_skills()
-        if skills:
-            print()
-            print("Available skills:")
-            for name, command, _ in skills:
-                print(f"  {command}")
-        sys.exit(1)
-
-    parsed = _parse_skill(skill_file)
-    if parsed is None:
-        print(f"ERROR: Failed to parse skill file: {skill_file}")
-        sys.exit(1)
-
-    command, role, system_prompt = parsed
-
-    print(f"==> nostack {command} — {role}")
-    print()
-
-    task = args.task if args.task else "Proceed with your methodology."
-
-    if args.local:
-        print("--- System Prompt ---")
-        print(system_prompt)
-        print()
-        print("--- Task ---")
-        print(task)
-        return
-
     base_url = args.base_url
     api_key = args.api_key
 
-    provider = args.provider
-    model = args.model
+    if args.health:
+        sys.exit(cmd_health(base_url, api_key))
 
-    print(f"  Connecting to {base_url}")
-    print(f"  Provider: {provider or 'auto'}")
-    print(f"  Model:    {model or 'auto'}")
-    print()
+    if args.suggest:
+        sys.exit(cmd_suggest(args.suggest, base_url, api_key))
 
-    project_root = _project_root()
-    client = None
-    if project_root is not None:
-        client = _load_sdk_client(base_url, api_key)
+    if args.sprint:
+        sys.exit(cmd_sprint(args.sprint, args.skills or "", base_url, api_key))
 
-    if client is not None:
-        print("  [SDK] Using Nexus AI Python SDK")
-        result = _run_via_sdk(client, task, system_prompt, provider, model)
-    else:
-        print("  [HTTP] Using requests (SDK not available)")
-        result = _run_via_requests(base_url, api_key, task, system_prompt, provider, model)
+    if args.list or not args.skill:
+        sys.exit(cmd_list())
 
-    print()
-    print("--- Agent Response ---")
-    output = result.get("result", result.get("data", str(result)))
-    print(output)
-
-    used_provider = result.get("provider", "unknown")
-    used_model = result.get("model", "unknown")
-    if used_provider:
-        print()
-        print(f"[Provider: {used_provider} | Model: {used_model}]")
+    sys.exit(cmd_run(
+        args.skill,
+        base_url,
+        api_key,
+        args.provider,
+        args.model,
+        args.task,
+        args.local,
+    ))
 
 
 if __name__ == "__main__":

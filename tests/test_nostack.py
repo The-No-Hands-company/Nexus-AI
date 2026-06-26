@@ -98,6 +98,20 @@ def test_get_skill_endpoint(client):
     assert "Six Forcing Questions" in data["system_prompt"]
 
 
+def test_nostack_health_endpoint(client):
+    response = client.get("/nostack/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["skills_loaded"] >= 30
+    assert isinstance(data["skills_available"], list)
+    assert isinstance(data["templates_available"], list)
+    assert isinstance(data["active_sprints"], int)
+    assert isinstance(data["sprint_ids"], list)
+    assert isinstance(data["registry_registered"], bool)
+    assert isinstance(data["uptime_seconds"], (int, float))
+
+
 def test_get_skill_endpoint_404(client):
     response = client.get("/nostack/skills/nonexistent")
     assert response.status_code == 200

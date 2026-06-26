@@ -1923,6 +1923,65 @@ def _import_nostack():
     return list_skill_names, get_skill_agent, get_skill_prompt, run_skill, classify_and_suggest
 
 
+_NOSTACK_HEALTH_START_TS = time.time()
+
+
+@router.get("/nostack/health")
+def nostack_health():
+    """Report nostack subsystem health: skills, templates, active sprints, registration."""
+    uptime_seconds = round(time.time() - _NOSTACK_HEALTH_START_TS, 2)
+    try:
+        list_skill_names, *_ = _import_nostack()
+        _, _, list_sprints_fn, _, _, _, list_templates_fn, _ = _import_nostack_sprint()
+    except ImportError:
+        return {
+            "status": "not_installed",
+            "skills_loaded": 0,
+            "skills_available": [],
+            "templates_available": [],
+            "active_sprints": 0,
+            "sprint_ids": [],
+            "registry_registered": False,
+            "uptime_seconds": uptime_seconds,
+        }
+
+    skills_available = list(list_skill_names())
+
+    try:
+        templates_available = list(list_templates_fn().keys())
+    except Exception:
+        templates_available = []
+
+    active_sprints: list[str] = []
+    try:
+        for state in list_sprints_fn(limit=200):
+            if getattr(state, "status", "") in ("running", "pending"):
+                active_sprints.append(state.sprint_id)
+    except Exception:
+        active_sprints = []
+
+    registry_registered = False
+    try:
+        from ..agents.registry import list_agents
+        registry_registered = any(
+            str(a.get("id", "")).startswith("nostack-")
+            for a in list_agents(include_extended=False)
+        )
+    except Exception:
+        registry_registered = False
+
+    return {
+        "status": "healthy" if len(skills_available) > 0 else "degraded",
+        "skills_loaded": len(skills_available),
+        "skills_available": skills_available,
+        "templates_available": templates_available,
+        "active_sprints": len(active_sprints),
+        "sprint_ids": active_sprints,
+        "registry_registered": registry_registered,
+        "uptime_seconds": uptime_seconds,
+    }
+
+
 @router.get("/nostack/skills")
 def list_nostack_skills():
     """List all available nostack virtual team skills."""
