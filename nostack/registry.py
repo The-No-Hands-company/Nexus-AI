@@ -446,6 +446,52 @@ def get_skill_agent(skill_name: str) -> SpecialistAgent | None:
     return None
 
 
+def classify_task(task: str, limit: int = 5) -> list[dict]:
+    """Given a task description, return the best-matching nostack skills.
+
+    Uses keyword-based scoring from the SpecialistAgent registry.
+    Returns a list of {name, command, score, description} sorted by relevance.
+    """
+    task_lower = (task or "").lower()
+    scored = []
+    for agent in NOSTACK_AGENTS:
+        score = agent.matches(task)
+        if score > 0:
+            scored.append({
+                "name": agent.name,
+                "command": f"/{agent.id.replace('nostack-', '', 1)}",
+                "score": score,
+                "description": agent.description,
+            })
+    scored.sort(key=lambda x: x["score"], reverse=True)
+    return scored[:max(1, min(limit, 20))]
+
+
+def classify_and_suggest(task: str, limit: int = 3) -> dict:
+    """Classify a task and suggest skills + a sprint template.
+
+    Returns {skills: [...], suggested_template: str | None, sprint_template: [...]}
+    """
+    matches = classify_task(task, limit=limit * 2)
+    top = matches[:limit]
+    top_names = {m["command"] for m in top}
+
+    from nostack.sprint_templates import SPRINT_TEMPLATES
+    best_template = None
+    best_overlap = 0
+    for tmpl_name, tmpl_skills in SPRINT_TEMPLATES.items():
+        overlap = len(set(tmpl_skills) & top_names)
+        if overlap > best_overlap:
+            best_overlap = overlap
+            best_template = tmpl_name
+
+    return {
+        "skills": top,
+        "suggested_template": best_template if best_overlap >= 2 else None,
+        "sprint_template": SPRINT_TEMPLATES.get(best_template, []) if best_template else [],
+    }
+
+
 def run_skill(skill_name: str, task: str = "", history: list | None = None,
               provider: str = "", model: str = "") -> dict:
     """Run a nostack skill against the Nexus AI agent pipeline.

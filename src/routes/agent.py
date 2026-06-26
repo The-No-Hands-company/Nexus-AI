@@ -1919,15 +1919,15 @@ def _import_nostack():
         sys.path.insert(0, str(root))
     if str(nostack_path.parent) not in sys.path:
         sys.path.insert(0, str(nostack_path.parent))
-    from nostack.registry import list_skill_names, get_skill_agent, get_skill_prompt, run_skill
-    return list_skill_names, get_skill_agent, get_skill_prompt, run_skill
+    from nostack.registry import list_skill_names, get_skill_agent, get_skill_prompt, run_skill, classify_and_suggest
+    return list_skill_names, get_skill_agent, get_skill_prompt, run_skill, classify_and_suggest
 
 
 @router.get("/nostack/skills")
 def list_nostack_skills():
     """List all available nostack virtual team skills."""
     try:
-        list_skill_names, get_skill_agent, _, _ = _import_nostack()
+        list_skill_names, get_skill_agent, *_ = _import_nostack()
         skills = []
         for name in list_skill_names():
             agent = get_skill_agent(name)
@@ -1941,6 +1941,36 @@ def list_nostack_skills():
         return {"skills": skills, "total": len(skills)}
     except ImportError:
         return {"skills": [], "total": 0, "error": "nostack not installed"}
+
+
+@router.post("/nostack/skills/classify")
+async def classify_nostack_task(request: Request):
+    """Given a task description, recommend the best nostack skills.
+
+    POST body:
+        task  — the task description
+        limit — max skills to return (default 5)
+
+    Returns matching skills with scores and an optional sprint template.
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    task = body.get("task", "")
+    limit = int(body.get("limit", 5))
+
+    if not task:
+        return _api_error("task is required", "validation_error", 422)
+
+    try:
+        _, _, _, _, classify_fn = _import_nostack()
+        result = classify_fn(task, limit=limit)
+        return result
+    except ImportError:
+        return {"skills": [], "suggested_template": None, "error": "nostack not installed"}
 
 
 @router.post("/nostack/skills/{skill_name}/run")
@@ -1958,7 +1988,7 @@ async def run_nostack_skill(skill_name: str, request: Request):
     model = body.get("model", "")
 
     try:
-        _, _, _, run_skill = _import_nostack()
+        *_, run_skill = _import_nostack()
         result = run_skill(skill_name, task=task, history=history,
                           provider=provider, model=model)
         return result
@@ -1970,7 +2000,7 @@ async def run_nostack_skill(skill_name: str, request: Request):
 def get_nostack_skill_prompt(skill_name: str):
     """Get the full system prompt for a nostack skill."""
     try:
-        _, get_skill_agent, get_skill_prompt, _ = _import_nostack()
+        _, get_skill_agent, get_skill_prompt, *_ = _import_nostack()
         prompt = get_skill_prompt(skill_name)
         agent = get_skill_agent(skill_name)
         if prompt is None:
