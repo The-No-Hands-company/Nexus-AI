@@ -166,7 +166,7 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "electron": "^36.9.5",
+    "electron": "^42.5.0",
     "electron-builder": "^26.15.3"
   }
 }
