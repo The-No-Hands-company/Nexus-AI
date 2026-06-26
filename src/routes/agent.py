@@ -227,6 +227,73 @@ async def agent_live_stream():
     )
 
 
+@router.get("/nostack/skills/{skill_name}/stream")
+async def nostack_skill_sse(skill_name: str, task: str = ""):
+    """SSE stream for nostack skill execution.
+
+    Query params: task — the task description.
+
+    Streams: data: {"type":"start"} → data: {"type":"done","result":"..."}
+    """
+    if not task:
+        return _api_error("task query param is required", "validation_error", 422)
+
+    try:
+        _, _, get_skill_prompt_fn, run_skill, _ = _import_nostack()
+    except ImportError:
+        return _api_error("nostack not installed", "not_installed", 500)
+
+    prompt = get_skill_prompt_fn(skill_name)
+    if prompt is None:
+        return _api_error(f"Skill not found: {skill_name}", "not_found", 404)
+
+    import threading, queue, json as _json
+
+    result_queue: queue.Queue = queue.Queue()
+
+    def run_in_thread():
+        try:
+            res = run_skill(skill_name, task=task)
+            result_queue.put(("done", res))
+        except Exception as exc:
+            result_queue.put(("error", str(exc)))
+
+    thread = threading.Thread(target=run_in_thread, daemon=True)
+    thread.start()
+
+    async def _generate():
+        yield f"data: {_json.dumps({'type': 'start', 'skill': skill_name, 'task': task})}\n\n"
+        import time as _time
+        while thread.is_alive():
+            try:
+                item = result_queue.get(timeout=0.1)
+                typ, payload = item
+                if typ == "done":
+                    content = payload.get("result", "") if isinstance(payload, dict) else str(payload)
+                    yield f"data: {_json.dumps({'type': 'done', 'skill': skill_name, 'result': content[:4000]})}\n\n"
+                elif typ == "error":
+                    yield f"data: {_json.dumps({'type': 'error', 'message': payload[:500]})}\n\n"
+                return
+            except queue.Empty:
+                pass
+            await asyncio.sleep(0.5)
+        # If thread exited without putting to queue
+        try:
+            item = result_queue.get_nowait()
+            typ, payload = item
+            if typ == "done":
+                content = payload.get("result", "") if isinstance(payload, dict) else str(payload)
+                yield f"data: {_json.dumps({'type': 'done', 'skill': skill_name, 'result': content[:4000]})}\n\n"
+        except queue.Empty:
+            yield f"data: {_json.dumps({'type': 'done', 'skill': skill_name, 'result': ''})}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @router.post("/agent")
 async def agent_post(request: Request):
     data   = await _read_json_body(request, "invalid JSON body for /agent")
@@ -1364,6 +1431,89 @@ async def consume_agent_inbox_ws(websocket: WebSocket, agent_id: str):
                 continue
     except WebSocketDisconnect:
         return
+
+
+@router.websocket("/nostack/skills/{skill_name}/stream")
+async def nostack_skill_stream(websocket: WebSocket, skill_name: str):
+    """WebSocket streaming endpoint for nostack skill execution.
+
+    Client sends: {"task": "what to do"}
+    Server streams: {"type":"start"}, {"type":"progress","content":"..."}, {"type":"done","result":"..."}
+    """
+    await websocket.accept()
+    try:
+        data = await asyncio.wait_for(websocket.receive_json(), timeout=30.0)
+        task = str(data.get("task", "")).strip()
+        if not task:
+            await websocket.send_json({"type": "error", "message": "task is required"})
+            await websocket.close()
+            return
+
+        await websocket.send_json({"type": "start", "skill": skill_name, "task": task})
+
+        try:
+            _, _, get_skill_prompt_fn, run_skill, _ = _import_nostack()
+        except ImportError:
+            await websocket.send_json({"type": "error", "message": "nostack not installed"})
+            await websocket.close()
+            return
+
+        prompt = get_skill_prompt_fn(skill_name)
+        if prompt is None:
+            await websocket.send_json({"type": "error", "message": f"Skill not found: {skill_name}"})
+            await websocket.close()
+            return
+
+        await websocket.send_json({"type": "progress", "content": f"Running /{skill_name}…"})
+
+        import threading
+
+        result_container: dict = {}
+
+        def run_in_thread():
+            try:
+                res = run_skill(skill_name, task=task)
+                result_container["result"] = res
+            except Exception as exc:
+                result_container["error"] = str(exc)
+
+        thread = threading.Thread(target=run_in_thread, daemon=True)
+        thread.start()
+
+        # Poll for completion, sending heartbeat every 2s
+        while thread.is_alive():
+            try:
+                await asyncio.wait_for(
+                    asyncio.get_event_loop().run_in_executor(None, thread.join, 2.0),
+                    timeout=2.5,
+                )
+            except asyncio.TimeoutError:
+                await websocket.send_json({"type": "heartbeat"})
+
+        thread.join(timeout=1.0)
+
+        if "error" in result_container:
+            await websocket.send_json({
+                "type": "error",
+                "message": result_container["error"],
+            })
+        else:
+            result = result_container.get("result", {})
+            content = result.get("result", "") if isinstance(result, dict) else str(result)
+            await websocket.send_json({
+                "type": "done",
+                "skill": skill_name,
+                "result": content[:4000],
+            })
+    except asyncio.TimeoutError:
+        await websocket.send_json({"type": "error", "message": "Timeout waiting for task"})
+    except WebSocketDisconnect:
+        return
+    except Exception as exc:
+        try:
+            await websocket.send_json({"type": "error", "message": str(exc)[:500]})
+        except Exception:
+            pass
 
 
 @router.get("/agents/bus/{agent_id}")
