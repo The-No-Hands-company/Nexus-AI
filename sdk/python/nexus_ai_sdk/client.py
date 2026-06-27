@@ -166,3 +166,45 @@ class NexusAIClient:
         data = self._request("GET", f"/agent/runs?limit={limit}")
         items = data.get("items") or data.get("runs") or []
         return AgentListing(total=int(data.get("total") or len(items)), items=items, raw=data)
+
+    # ── nostack methods ────────────────────────────────────────────────────
+
+    def list_nostack_skills(self) -> dict[str, Any]:
+        """List all available nostack virtual team skills."""
+        return self._request("GET", "/nostack/skills")
+
+    def get_nostack_skill(self, name: str) -> dict[str, Any]:
+        """Get the full system prompt for a nostack skill."""
+        return self._request("GET", f"/nostack/skills/{name}")
+
+    def run_nostack_skill(self, name: str, task: str) -> dict[str, Any]:
+        """Run a nostack skill with the given task."""
+        return self._request("POST", f"/nostack/skills/{name}/run", {"task": task})
+
+    def classify_nostack_task(self, task: str, limit: int = 5) -> dict[str, Any]:
+        """Recommend nostack skills for a task description."""
+        return self._request("POST", "/nostack/skills/classify", {"task": task, "limit": limit})
+
+    def run_nostack_sprint(self, task: str, skills: list[str]) -> dict[str, Any]:
+        """Start a nostack sprint (runs asynchronously in background)."""
+        return self._request("POST", "/nostack/sprint", {"task": task, "skills": skills})
+
+    def get_nostack_sprint(self, sprint_id: str) -> dict[str, Any]:
+        """Check the status of a nostack sprint."""
+        return self._request("GET", f"/nostack/sprint/{sprint_id}")
+
+    def resume_nostack_sprint(self, sprint_id: str) -> dict[str, Any]:
+        """Resume a failed or interrupted sprint from where it left off."""
+        return self._request("POST", f"/nostack/sprint/{sprint_id}/resume")
+
+    def cancel_nostack_sprint(self, sprint_id: str) -> dict[str, Any]:
+        """Cancel a running nostack sprint."""
+        return self._request("DELETE", f"/nostack/sprint/{sprint_id}")
+
+    def list_nostack_sprints(self, limit: int = 20) -> dict[str, Any]:
+        """List recent nostack sprints."""
+        return self._request("GET", f"/nostack/sprints?limit={limit}")
+
+    def nostack_health(self) -> dict[str, Any]:
+        """Check nostack system health."""
+        return self._request("GET", "/nostack/health")

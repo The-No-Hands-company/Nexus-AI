@@ -204,6 +204,38 @@ class AsyncNexusAIClient:
     async def health(self) -> dict[str, Any]:
         return await self._request("GET", "/health")
 
+    # ── nostack methods ────────────────────────────────────────────────────
+
+    async def list_nostack_skills(self) -> dict[str, Any]:
+        return await self._request("GET", "/nostack/skills")
+
+    async def get_nostack_skill(self, name: str) -> dict[str, Any]:
+        return await self._request("GET", f"/nostack/skills/{name}")
+
+    async def run_nostack_skill(self, name: str, task: str) -> dict[str, Any]:
+        return await self._request("POST", f"/nostack/skills/{name}/run", {"task": task})
+
+    async def classify_nostack_task(self, task: str, limit: int = 5) -> dict[str, Any]:
+        return await self._request("POST", "/nostack/skills/classify", {"task": task, "limit": limit})
+
+    async def run_nostack_sprint(self, task: str, skills: list[str]) -> dict[str, Any]:
+        return await self._request("POST", "/nostack/sprint", {"task": task, "skills": skills})
+
+    async def get_nostack_sprint(self, sprint_id: str) -> dict[str, Any]:
+        return await self._request("GET", f"/nostack/sprint/{sprint_id}")
+
+    async def resume_nostack_sprint(self, sprint_id: str) -> dict[str, Any]:
+        return await self._request("POST", f"/nostack/sprint/{sprint_id}/resume")
+
+    async def cancel_nostack_sprint(self, sprint_id: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/nostack/sprint/{sprint_id}")
+
+    async def list_nostack_sprints(self, limit: int = 20) -> dict[str, Any]:
+        return await self._request("GET", f"/nostack/sprints?limit={limit}")
+
+    async def nostack_health(self) -> dict[str, Any]:
+        return await self._request("GET", "/nostack/health")
+
     async def close(self) -> None:
         if self._http:
             await self._http.aclose()
