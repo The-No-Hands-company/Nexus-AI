@@ -262,4 +262,46 @@ export class NexusAIClient {
   updateComplianceConfig(config: Record<string, unknown>): Promise<Record<string, unknown>> {
     return this.request("PUT", "/admin/compliance", config);
   }
+
+  // ── nostack methods ─────────────────────────────────────────────────────
+
+  listNostackSkills(): Promise<Record<string, unknown>> {
+    return this.request("GET", "/nostack/skills");
+  }
+
+  getNostackSkill(name: string): Promise<Record<string, unknown>> {
+    return this.request("GET", `/nostack/skills/${name}`);
+  }
+
+  runNostackSkill(name: string, task: string): Promise<Record<string, unknown>> {
+    return this.request("POST", `/nostack/skills/${name}/run`, { task });
+  }
+
+  classifyNostackTask(task: string, limit = 5): Promise<Record<string, unknown>> {
+    return this.request("POST", "/nostack/skills/classify", { task, limit });
+  }
+
+  runNostackSprint(task: string, skills: string[]): Promise<Record<string, unknown>> {
+    return this.request("POST", "/nostack/sprint", { task, skills });
+  }
+
+  getNostackSprint(sprintId: string): Promise<Record<string, unknown>> {
+    return this.request("GET", `/nostack/sprint/${sprintId}`);
+  }
+
+  resumeNostackSprint(sprintId: string): Promise<Record<string, unknown>> {
+    return this.request("POST", `/nostack/sprint/${sprintId}/resume`);
+  }
+
+  cancelNostackSprint(sprintId: string): Promise<Record<string, unknown>> {
+    return this.request("DELETE", `/nostack/sprint/${sprintId}`);
+  }
+
+  listNostackSprints(limit = 20): Promise<Record<string, unknown>> {
+    return this.request("GET", `/nostack/sprints?limit=${limit}`);
+  }
+
+  nostackHealth(): Promise<Record<string, unknown>> {
+    return this.request("GET", "/nostack/health");
+  }
 }
