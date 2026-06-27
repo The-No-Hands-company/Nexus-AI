@@ -2353,6 +2353,14 @@ init();
     </div>
     <div id="nostack-sprint-status" style="margin-top:6px;font-size:.7rem;color:var(--muted);min-height:18px;"></div>
   </div>
+  <!-- Suggest section -->
+  <div style="padding:8px 14px;border-bottom:1px solid var(--border);flex-shrink:0;">
+    <div style="display:flex;gap:6px;align-items:center;">
+      <input id="nostack-suggest-input" placeholder="Describe your task — get skill suggestions…" style="flex:1;padding:6px 9px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:.72rem;box-sizing:border-box;" onkeypress="if(event.key==='Enter')suggestNostackSkills()" />
+      <button onclick="suggestNostackSkills()" style="padding:6px 12px;border:none;border-radius:7px;background:var(--muted);color:#111;font-size:.68rem;font-weight:600;cursor:pointer;white-space:nowrap;">Suggest</button>
+    </div>
+    <div id="nostack-suggest-result" style="margin-top:4px;min-height:0;"></div>
+  </div>
   <!-- Skills list -->
   <div style="padding:8px 10px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;justify-content:space-between;">
     <span style="font-size:.7rem;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.05em;">🛠 Skills</span>

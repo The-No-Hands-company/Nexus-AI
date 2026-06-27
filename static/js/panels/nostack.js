@@ -162,3 +162,37 @@ async function runNostackSprint() {
     status.innerHTML = '<span style="color:var(--red);">Request failed. Please try again.</span>';
   }
 }
+
+async function suggestNostackSkills() {
+  const input = document.getElementById("nostack-suggest-input");
+  const result = document.getElementById("nostack-suggest-result");
+  const task = input.value.trim();
+  if (!task) return;
+
+  result.innerHTML = '<span style="color:var(--muted);font-size:.72rem;">Analyzing…</span>';
+  try {
+    const r = await fetch("/nostack/skills/classify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ task }),
+    });
+    const d = await r.json();
+    if (!d.skills || !d.skills.length) {
+      result.innerHTML = '<span style="color:var(--muted);font-size:.72rem;">No matching skills found.</span>';
+      return;
+    }
+    let html = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">';
+    for (const s of d.skills) {
+      html += '<span style="padding:3px 8px;border-radius:12px;background:var(--surface2);font-size:.7rem;cursor:pointer" onclick="showNostackSkillDetail(\'' + esc(s.command.replace("/","")) + '\')" title="' + esc(s.description) + '">' + esc(s.command) + ' (' + s.score + ')</span>';
+    }
+    html += '</div>';
+    if (d.suggested_template && d.sprint_template && d.sprint_template.length) {
+      html += '<div style="margin-top:6px;font-size:.68rem;color:var(--muted)">Template: <b>' + esc(d.suggested_template) + '</b> → ' + d.sprint_template.map(function(s){return '/'+s}).join(', ') + '</div>';
+      html += '<div style="margin-top:4px;font-size:.65rem;color:#6366f1;cursor:pointer" onclick="document.getElementById(\'nostack-suggest-input\').value=\'' + esc(task) + '\';document.getElementById(\'nostack-sprint-skills\').value=\'' + d.sprint_template.join(",") + '\'">Click to load as sprint →</div>';
+    }
+    result.innerHTML = html;
+  } catch (err) {
+    console.error("suggestNostackSkills failed:", err);
+    result.innerHTML = '<span style="color:var(--red);font-size:.72rem;">Failed to analyze task.</span>';
+  }
+}

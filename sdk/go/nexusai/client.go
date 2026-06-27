@@ -117,3 +117,66 @@ func (c *Client) BenchmarkDatasetHistory(dataset string, limit int) (map[string]
 	err := c.do(http.MethodGet, path, nil, &out)
 	return out, err
 }
+
+// ── nostack methods ─────────────────────────────────────────────────────
+
+func (c *Client) ListNostackSkills() (map[string]any, error) {
+	out := map[string]any{}
+	err := c.do(http.MethodGet, "/nostack/skills", nil, &out)
+	return out, err
+}
+
+func (c *Client) GetNostackSkill(name string) (map[string]any, error) {
+	out := map[string]any{}
+	err := c.do(http.MethodGet, "/nostack/skills/"+name, nil, &out)
+	return out, err
+}
+
+func (c *Client) RunNostackSkill(name, task string) (map[string]any, error) {
+	out := map[string]any{}
+	err := c.do(http.MethodPost, "/nostack/skills/"+name+"/run", map[string]any{"task": task}, &out)
+	return out, err
+}
+
+func (c *Client) ClassifyNostackTask(task string, limit int) (map[string]any, error) {
+	out := map[string]any{}
+	err := c.do(http.MethodPost, "/nostack/skills/classify", map[string]any{"task": task, "limit": limit}, &out)
+	return out, err
+}
+
+func (c *Client) RunNostackSprint(task string, skills []string) (map[string]any, error) {
+	out := map[string]any{}
+	err := c.do(http.MethodPost, "/nostack/sprint", map[string]any{"task": task, "skills": skills}, &out)
+	return out, err
+}
+
+func (c *Client) GetNostackSprint(sprintID string) (map[string]any, error) {
+	out := map[string]any{}
+	err := c.do(http.MethodGet, "/nostack/sprint/"+sprintID, nil, &out)
+	return out, err
+}
+
+func (c *Client) ResumeNostackSprint(sprintID string) (map[string]any, error) {
+	out := map[string]any{}
+	err := c.do(http.MethodPost, "/nostack/sprint/"+sprintID+"/resume", nil, &out)
+	return out, err
+}
+
+func (c *Client) CancelNostackSprint(sprintID string) (map[string]any, error) {
+	out := map[string]any{}
+	err := c.do(http.MethodDelete, "/nostack/sprint/"+sprintID, nil, &out)
+	return out, err
+}
+
+func (c *Client) ListNostackSprints(limit int) (map[string]any, error) {
+	path := fmt.Sprintf("/nostack/sprints?limit=%d", limit)
+	out := map[string]any{}
+	err := c.do(http.MethodGet, path, nil, &out)
+	return out, err
+}
+
+func (c *Client) NostackHealth() (map[string]any, error) {
+	out := map[string]any{}
+	err := c.do(http.MethodGet, "/nostack/health", nil, &out)
+	return out, err
+}
