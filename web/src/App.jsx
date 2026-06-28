@@ -23,6 +23,10 @@ function App() {
   const [sprintResult, setSprintResult] = useState(null);
   const [sprintError, setSprintError] = useState(null);
 
+  const [suggestTask, setSuggestTask] = useState('');
+  const [suggestResult, setSuggestResult] = useState(null);
+  const [suggestLoading, setSuggestLoading] = useState(false);
+
   const fetchSkills = async () => {
     setSkillsLoading(true);
     setSkillsError(null);
@@ -56,6 +60,26 @@ function App() {
       setSkillRunError(error.message);
     } finally {
       setSkillRunning(false);
+    }
+  };
+
+  const classifyTask = async () => {
+    if (!suggestTask.trim()) return;
+    setSuggestLoading(true);
+    setSuggestResult(null);
+    try {
+      const response = await fetch('/nostack/skills/classify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task: suggestTask })
+      });
+      if (!response.ok) throw new Error(`API error: ${response.status}`);
+      const data = await response.json();
+      setSuggestResult(data);
+    } catch (error) {
+      setSuggestResult({ error: error.message });
+    } finally {
+      setSuggestLoading(false);
     }
   };
 
@@ -306,6 +330,43 @@ function App() {
 
         {activeTab === 'team' && (
           <div className="team-container">
+            <div className="sprint-section" style={{ marginBottom: '1.5rem', padding: '1rem', borderRadius: '8px', background: 'var(--surface2)', border: '1px solid var(--border)' }}>
+              <h2 style={{ margin: '0 0 0.25rem', fontSize: '0.9rem' }}>Suggest Skills</h2>
+              <p className="section-desc" style={{ margin: '0 0 0.5rem' }}>Describe your task and get skill recommendations.</p>
+              <div style={{ display: 'flex', gap: '0.5rem' }}>
+                <input
+                  type="text"
+                  value={suggestTask}
+                  onChange={(e) => setSuggestTask(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && classifyTask()}
+                  placeholder="e.g. audit my codebase for security..."
+                  disabled={suggestLoading}
+                  style={{ flex: 1, padding: '0.5rem 0.75rem', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--surface)', color: 'var(--text)', fontSize: '0.85rem' }}
+                />
+                <button onClick={classifyTask} disabled={suggestLoading || !suggestTask.trim()}
+                  style={{ padding: '0.5rem 1rem', borderRadius: '6px', border: 'none', background: '#6366f1', color: '#fff', fontWeight: 600, cursor: 'pointer', fontSize: '0.85rem' }}>
+                  {suggestLoading ? '…' : 'Suggest'}
+                </button>
+              </div>
+              {suggestResult && !suggestResult.error && (
+                <div style={{ marginTop: '0.5rem' }}>
+                  <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.35rem' }}>
+                    {suggestResult.skills?.map(s => (
+                      <span key={s.command} onClick={() => { setSelectedSkill(s); setSkillTaskInput(''); }}
+                        style={{ padding: '0.25rem 0.6rem', borderRadius: '12px', background: 'var(--surface)', border: '1px solid var(--border)', fontSize: '0.75rem', cursor: 'pointer' }}>
+                        {s.command} ({s.score})
+                      </span>
+                    ))}
+                  </div>
+                  {suggestResult.suggested_template && (
+                    <div style={{ marginTop: '0.35rem', fontSize: '0.7rem', color: 'var(--muted)' }}>
+                      Template: <b>{suggestResult.suggested_template}</b> → {suggestResult.sprint_template?.map(s => '/' + s).join(', ')}
+                    </div>
+                  )}
+                </div>
+              )}
+              {suggestResult?.error && <div style={{ marginTop: '0.35rem', fontSize: '0.75rem', color: 'var(--red)' }}>{suggestResult.error}</div>}
+            </div>
             <div className="sprint-section">
               <h2>Run Sprint</h2>
               <p className="section-desc">Orchestrate multiple skills to complete a complex task.</p>

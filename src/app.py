@@ -328,13 +328,13 @@ def create_app() -> FastAPI:
                 status_code=406,
             )
 
-        if _SHUTDOWN_SIGNAL and request.url.path not in (
-            "/health",
-            "/health/live",
-            "/health/ready",
-            "/health/deep",
-            "/metrics",
-        ):
+        _shutdown_exempt = (
+            request.url.path == "/health"
+            or request.url.path.startswith("/health/")
+            or request.url.path == "/metrics"
+            or request.url.path.startswith("/nostack/health")
+        )
+        if _SHUTDOWN_SIGNAL and not _shutdown_exempt:
             from fastapi.responses import JSONResponse
 
             return JSONResponse(
