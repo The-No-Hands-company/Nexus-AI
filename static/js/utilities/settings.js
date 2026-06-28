@@ -77,9 +77,10 @@ function populateSettings(cfg,providers,safetySettings={}){
 }
 
 async function loadSettingsModal(){
-  const [cfg,safety]=await Promise.all([
+  const [cfg,safety,keyStatus]=await Promise.all([
     fetch('/settings').then(r=>r.json()).catch(()=>({})),
     fetch('/safety/profiles').then(r=>r.json()).catch(()=>({active:'standard',profiles:{}})),
+    fetch('/settings/provider-keys').then(r=>r.json()).catch(()=>({provider_keys:{}})),
   ]);
   populateSettings(cfg, window._providerCache||[], {
     safety_profile:safety.active||cfg.safety_profile||'standard',
@@ -87,6 +88,47 @@ async function loadSettingsModal(){
     profiles:safety.profiles||{},
     policy:(safety.profiles||{})[safety.active||cfg.safety_profile||'standard']||{},
   });
+  populateProviderKeys(keyStatus.provider_keys||{});
+}
+
+function populateProviderKeys(keyStatus) {
+  const container = document.getElementById('s-provider-keys');
+  if (!container) return;
+  const providers = window._providerCache || [];
+  container.innerHTML = providers
+    .filter(p => p.id !== 'auto')
+    .map(p => {
+      const has = keyStatus[p.id]?.has_key;
+      const source = keyStatus[p.id]?.source;
+      return '<div style="display:flex;align-items:center;gap:6px">' +
+        '<span style="min-width:90px;font-size:.73rem;font-weight:500;color:var(--text)">' + (p.label || p.id) + '</span>' +
+        '<input type="password" id="pk-' + p.id + '" placeholder="' + (source === 'env' ? '(from environment)' : (has ? '(key stored)' : 'API key…')) + '"' +
+        ' style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:.73rem;"' +
+        ' onchange="document.getElementById(\'pk-status-' + p.id + '\').textContent=\'\'" />' +
+        '<span id="pk-status-' + p.id + '" style="font-size:.65rem;color:var(--muted);min-width:50px">' +
+          (source === 'env' ? '🔒 env' : (has ? '✓ stored' : '')) +
+        '</span>' +
+        '</div>';
+    }).join('');
+}
+
+async function saveProviderKeys() {
+  const providers = (window._providerCache || []).filter(p => p.id !== 'auto');
+  for (const p of providers) {
+    const input = document.getElementById('pk-' + p.id);
+    if (!input) continue;
+    const val = input.value.trim();
+    if (!val && !input.placeholder.includes('stored') && !input.placeholder.includes('environment')) continue;
+    try {
+      await fetch('/settings/provider-keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: p.id, key: val })
+      });
+      const st = document.getElementById('pk-status-' + p.id);
+      if (st) st.textContent = val ? '✓ saved' : '✗ removed';
+    } catch (_) {}
+  }
 }
 
 async function openSettings(){
@@ -95,6 +137,7 @@ async function openSettings(){
 }
 function closeSettings(){document.getElementById('settings-overlay').classList.remove('open')}
 async function saveSettings(){
+  await saveProviderKeys();
   const resp=await fetch('/settings',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({

@@ -8,7 +8,26 @@ from typing import Iterator
 
 
 def get_secret(name: str, default: str = "") -> str:
-    return os.getenv(name, default)
+    """Get a secret. Checks env var first, then stored provider key in DB."""
+    env_val = os.getenv(name, "")
+    if env_val:
+        return env_val
+    # Fall back to stored provider key (set via Settings UI)
+    from .db import load_pref
+    stored = load_pref(f"nexus.provider_key.{name}", "")
+    return stored.strip() if stored else default
+
+
+def save_secret(name: str, value: str) -> None:
+    """Store a secret in the database (used for provider API keys)."""
+    from .db import save_pref
+    save_pref(f"nexus.provider_key.{name}", value)
+
+
+def delete_secret(name: str) -> None:
+    """Remove a stored secret."""
+    from .db import save_pref
+    save_pref(f"nexus.provider_key.{name}", "")
 
 
 def inject_request_credentials(header_or_secret_names: dict[str, str] | list[str] | tuple, secret_names: list[str] | None = None):

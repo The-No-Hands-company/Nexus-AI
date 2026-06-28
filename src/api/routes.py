@@ -18,7 +18,7 @@ from fastapi import Request, HTTPException, APIRouter
 from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSONResponse, Response
 
 router = APIRouter()
-from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_provider_health, get_free_provider_diagnostics, get_config, update_config, call_llm_with_fallback, get_session_dir, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, _push_safety_event, AllProvidersExhausted)
+from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_provider_health, get_free_provider_diagnostics, get_config, update_config, call_llm_with_fallback, get_session_dir, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, _push_safety_event, AllProvidersExhausted, PROVIDERS, _provider_secret_name)
 from ..approvals import list_tool_approvals, decide_tool_approval
 from ..auth import JWT_SECRET, JWT_ALGO, JWT_EXPIRE_H, MULTI_USER
 from ..scheduler import (
@@ -2379,9 +2379,77 @@ async def post_settings(request: Request):
                            strict_confidence_threshold=data.get("strict_confidence_threshold"),
                            strict_evidence_threshold=data.get("strict_evidence_threshold"))
     new_profile = _config.get("safety_profile", "standard")
+    # Handle provider API keys if present
+    provider_keys = data.get("provider_keys") or {}
+    if isinstance(provider_keys, dict):
+        from ..secrets_manager import save_secret, delete_secret
+        for provider_id, key_value in provider_keys.items():
+            provider_cfg = PROVIDERS.get(str(provider_id).lower())
+            if provider_cfg:
+                env_key = _provider_secret_name(provider_cfg)
+                if env_key:
+                    if key_value and str(key_value).strip():
+                        save_secret(env_key, str(key_value).strip())
+                    else:
+                        delete_secret(env_key)
+
     if data.get("safety_profile") and new_profile != prev_profile:
         _push_safety_event("profile_change", {"scope": "global", "from": prev_profile, "to": new_profile})
     return result
+
+
+@router.get("/settings/provider-keys")
+def get_provider_keys():
+    """Return which providers have stored API keys (never return the actual key values)."""
+    from ..secrets_manager import get_secret
+    keys_status = {}
+    for pid, cfg in PROVIDERS.items():
+        env_key = cfg.get("env_key", "")
+        if env_key:
+            has_env = bool(os.getenv(env_key, "").strip())
+            has_stored = bool(get_secret(env_key, "").strip())
+            keys_status[pid] = {
+                "has_key": has_env or has_stored,
+                "source": "env" if has_env else ("stored" if has_stored else "none"),
+            }
+    return {"provider_keys": keys_status, "total": len(keys_status)}
+
+
+@router.post("/settings/provider-keys")
+async def save_provider_key(request: Request):
+    """Save or delete a provider API key.
+
+    POST body: {"provider": "deepseek", "key": "sk-..."}
+    To delete, send an empty key string.
+    """
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+
+    provider_id = str(body.get("provider", "")).strip().lower()
+    key_value = str(body.get("key", "")).strip()
+
+    if not provider_id:
+        return _api_error("provider is required", "validation_error", 422)
+
+    provider_cfg = PROVIDERS.get(provider_id)
+    if not provider_cfg:
+        return _api_error(f"Unknown provider: {provider_id}", "not_found", 404)
+
+    env_key = _provider_secret_name(provider_cfg)
+    if not env_key:
+        return _api_error(f"Provider '{provider_id}' does not support API keys", "invalid_provider", 400)
+
+    from ..secrets_manager import save_secret, delete_secret
+
+    if key_value:
+        save_secret(env_key, key_value)
+        return {"provider": provider_id, "status": "saved", "has_key": True}
+    else:
+        delete_secret(env_key)
+        return {"provider": provider_id, "status": "deleted", "has_key": False}
 
 
 @router.get("/settings/safety")

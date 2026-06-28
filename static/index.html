@@ -55,6 +55,11 @@
       </div>
     </div>
     <div class="field">
+      <label>Provider API Keys</label>
+      <div class="modal-hint">Add API keys for paid providers. Keys are stored encrypted in the database. Leave empty to use environment variables or free-only mode.</div>
+      <div id="s-provider-keys" style="display:flex;flex-direction:column;gap:8px;"></div>
+    </div>
+    <div class="field">
       <label>Safety profile</label>
       <select id="s-safety-profile"></select>
       <div class="modal-hint" id="s-safety-hint">Choose how aggressively Nexus AI blocks destructive or high-stakes requests.</div>
