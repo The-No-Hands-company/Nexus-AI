@@ -88,15 +88,35 @@ async function loadSettingsModal(){
     profiles:safety.profiles||{},
     policy:(safety.profiles||{})[safety.active||cfg.safety_profile||'standard']||{},
   });
-  populateProviderKeys(keyStatus.provider_keys||{});
+  await populateProviderKeys(keyStatus.provider_keys||{});
 }
 
-function populateProviderKeys(keyStatus) {
+async function populateProviderKeys(keyStatus) {
   const container = document.getElementById('s-provider-keys');
   if (!container) return;
-  const providers = window._providerCache || [];
+
+  let providers = (window._providerCache && window._providerCache.length)
+    ? window._providerCache
+    : null;
+
+  if (!providers) {
+    try {
+      const r = await fetch('/providers');
+      const d = await r.json();
+      providers = d.providers || [];
+      window._providerCache = providers;
+    } catch (_) {
+      container.innerHTML = '<span style="color:var(--red);font-size:.72rem;">Could not load provider list.</span>';
+      return;
+    }
+  }
+
+  if (!providers.length) {
+    container.innerHTML = '<span style="color:var(--muted);font-size:.72rem;">Provider list not loaded yet. Close and reopen Settings.</span>';
+    return;
+  }
   container.innerHTML = providers
-    .filter(p => p.id !== 'auto')
+    .filter(p => p.id && p.id !== 'auto')
     .map(p => {
       const has = keyStatus[p.id]?.has_key;
       const source = keyStatus[p.id]?.source;
