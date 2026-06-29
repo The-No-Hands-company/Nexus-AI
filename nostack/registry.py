@@ -363,6 +363,17 @@ NOSTACK_AGENTS: tuple[SpecialistAgent, ...] = (
         tier="standard",
         system_prompt=_skill_prompt("spec.md"),
     ),
+    SpecialistAgent(
+        id="nostack-loop-engineer",
+        name="Loop Engineer",
+        icon="LE",
+        description="Autonomous loop controller — triages backlog, plans, implements, verifies, and ships features without human intervention using the nostack virtual team.",
+        keywords=("loop", "autonomous", "recursive", "orchestrate", "pipeline", "continuous", "devops", "cicd"),
+        preferred_providers=(),
+        temperature=0.3,
+        tier="advanced",
+        system_prompt=_skill_prompt("loop-engineer.md"),
+    ),
 )
 
 
