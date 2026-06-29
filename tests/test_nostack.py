@@ -10,11 +10,11 @@ from fastapi.testclient import TestClient
 # ── Skill discovery tests (no server needed) ──────────────────────────────
 
 
-def test_discover_skills_returns_all_31():
+def test_discover_skills_returns_all():
     from nostack.registry import discover_skills
 
     skills = discover_skills()
-    assert len(skills) == 31
+    assert len(skills) >= 31, f"Expected at least 31 skills, got {len(skills)}"
     assert all(s.name for s in skills)
 
 

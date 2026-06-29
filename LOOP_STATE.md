@@ -1,6 +1,8 @@
 # Nexus Loop State
 status: IDLE
+phase: triage
 current_target: none
-cycle_count: 0
-last_updated: 2026-06-29T15:00:00Z
+cycle: 0
+history: []
+targets_completed: []
 
