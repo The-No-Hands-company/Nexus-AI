@@ -245,80 +245,86 @@ Auto-generated from backlog triage by Nexus Loop Engine.
 # ── Phase 3: Implement — Write the code ──────────────────────────────────────
 
 def phase_implement(state: LoopState) -> dict[str, Any]:
-    """Execute the implementation.
-    
-    This phase uses the agent's tools to write code based on the spec.
-    For now, it identifies what needs to change and prepares the worktree.
-    """
-    print("  💻 PHASE: IMPLEMENT — Writing code...")
-    
-    # Create isolated worktree
-    worktree_name = f"{WORKTREE_PREFIX}/{state.target.lower().replace(' ', '-')[:40]}"
-    worktree_path = PROJECT_ROOT / worktree_name
-    
-    # Write project conventions to SKILL.md in the worktree
-    skill_content = f"""# Nexus AI Project Conventions
-## Looped on: {datetime.now(timezone.utc).isoformat()}
-## Target: {state.target}
+    """Execute implementation using the Nexus AI agent pipeline.
 
-### Code Standards
+    Reads the spec from the plan phase, builds a comprehensive task prompt
+    including project conventions and quality requirements, then calls
+    run_agent_task() to let the agent write code using its tools.
+    """
+    print("  💻 PHASE: IMPLEMENT — Agent writing code...")
+
+    spec_file = state.read().get("spec_file", "")
+    spec_content = ""
+    if spec_file:
+        try:
+            spec_content = Path(spec_file).read_text()[:4000]
+        except Exception:
+            pass
+
+    task = f"""You are implementing a feature for the Nexus AI codebase.
+
+## Feature
+{state.target}
+
+## Specification
+{spec_content if spec_content else 'Write code to implement the feature described above.'}
+
+## Project Conventions
 - Python 3.11+ with type hints
 - Test-first: every module needs a test file
 - Business logic in src/, routes in src/routes/, API in src/api/
 - Never bypass the safety pipeline
+- Use logging, not print()
+- All functions must have type hints and docstrings
+- Fix any ruff lint errors you find
+- Fix any bare except clauses (use 'except Exception')
+- Ensure all existing tests still pass after your changes
 
-### Quality Gates
-1. pytest tests/ — all must pass
-2. ruff check src/ — linting clean
-3. /review — staff engineer review
-4. /cso — OWASP + STRIDE security audit
-5. /ship — PR with coverage audit
+## Quality Requirements
+1. All code must pass ruff lint
+2. All functions must have type hints (-> Any at minimum)
+3. New code must have corresponding tests
+4. No bare except: clauses
+5. No print() statements (use logging)
+6. Follow existing code patterns in the codebase
 
-### Don't
-- Don't mix concerns across layers
-- Don't skip tests
-- Don't commit secrets
-- Don't force-push without approval
-"""
-    
-    # Since we're not actually running LLM code generation here,
-    # we simulate the implementation by identifying what files need changes
-    analysis = _analyze_implementation_needs(state.target)
-    
-    state.write(
-        phase="review",
-        implementation_analysis=analysis,
-        worktree=worktree_name,
-    )
-    
-    print(f"  📁 Implementation plan ready: {len(analysis.get('files_to_touch', []))} files identified")
-    return {"status": "implemented", "analysis": analysis}
+## Steps
+1. Read the relevant source files to understand the codebase
+2. Write the implementation code
+3. Write or update tests
+4. Run ruff to check for lint issues and fix them
+5. Run pytest to verify tests pass
+6. Report what you built and what files you changed"""
 
+    print(f"  🤖 Dispatching agent with task ({len(task)} chars)...")
 
-def _analyze_implementation_needs(target: str) -> dict[str, Any]:
-    """Analyze what files need to change for the target feature."""
-    # Simple keyword-based analysis
-    keywords = target.lower()
-    files: list[str] = []
-    
-    src_dir = PROJECT_ROOT / "src"
-    if "api" in keywords or "endpoint" in keywords or "route" in keywords:
-        files.append("src/api/routes.py")
-    if "agent" in keywords or "llm" in keywords or "model" in keywords:
-        files.append("src/agent.py")
-    if "ui" in keywords or "web" in keywords or "frontend" in keywords:
-        files.append("static/index.html")
-    if "test" in keywords:
-        files.append("tests/")
-    if "nostack" in keywords or "skill" in keywords:
-        files.append("nostack/registry.py")
-    if "db" in keywords or "database" in keywords or "sql" in keywords:
-        files.append("src/db.py")
-    
-    if not files:
-        files = ["src/agent.py", "src/api/routes.py", "tests/"]
-    
-    return {"target": target, "files_to_touch": files}
+    try:
+        from src.agent import run_agent_task
+        result = run_agent_task(task, history=[])
+        output = result.get("result", "") if isinstance(result, dict) else str(result)
+        provider = result.get("provider", "unknown") if isinstance(result, dict) else "unknown"
+
+        if output:
+            # Save implementation output
+            impl_path = PROJECT_ROOT / "specs" / f"{state.target.lower().replace(' ', '-')[:60]}-implementation.md"
+            impl_path.parent.mkdir(exist_ok=True)
+            impl_path.write_text(f"# Implementation: {state.target}\n## Provider: {provider}\n## Output\n\n{output}\n")
+
+        state.write(
+            phase="review",
+            implementation_result=output[:2000] if output else "",
+            provider=provider,
+            spec_file=spec_file,
+        )
+
+        print(f"  ✅ Agent implementation complete ({provider}) — {len(output)} chars output")
+        return {"status": "implemented", "provider": provider, "output_len": len(output)}
+
+    except Exception as exc:
+        print(f"  ⚠️  Agent call failed: {exc}")
+        # Fallback: mark for review anyway
+        state.write(phase="review", implementation_error=str(exc)[:500])
+        return {"status": "implemented_fallback", "error": str(exc)[:200]}
 
 
 # ── Phase 4: Review — Code review by separate agent ─────────────────────────
@@ -332,11 +338,10 @@ def phase_review(state: LoopState) -> dict[str, Any]:
     
     findings: list[dict[str, str]] = []
     
-    # Run ruff lint on the changed files
-    analysis = state.read().get("implementation_analysis", {})
-    if isinstance(analysis, str):
-        analysis = {}
-    files = analysis.get("files_to_touch", [])
+    # Check for basic issues in changed files — use implementation result if available
+    impl_result = state.read().get("implementation_result", "")
+    # Run ruff on src/ to find any new issues
+    files = ["src/", "nostack/"]
     
     for filepath in files:
         fullpath = PROJECT_ROOT / filepath
