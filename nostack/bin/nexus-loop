@@ -61,7 +61,7 @@ class LoopState:
                         data[key] = json.loads(val)
                     except (json.JSONDecodeError, TypeError):
                         data[key] = []
-                elif key == "cycle":
+                elif key == "cycle" or key == "retry_count":
                     try:
                         data[key] = int(val)
                     except (ValueError, TypeError):

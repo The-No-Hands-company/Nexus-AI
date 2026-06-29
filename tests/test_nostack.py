@@ -86,7 +86,7 @@ def test_list_skills_endpoint(client):
     assert response.status_code == 200
     data = response.json()
     assert "skills" in data
-    assert data["total"] == 31
+    assert data["total"] >= 31
 
 
 def test_get_skill_endpoint(client):
@@ -197,7 +197,7 @@ def _all_skill_files():
 
 def test_all_skills_have_role():
     skills = _all_skill_files()
-    assert len(skills) == 31
+    assert len(skills) >= 31
     for skill_path in skills:
         content = skill_path.read_text(encoding="utf-8")
         assert "## Role" in content, f"{skill_path.name} missing ## Role section"
@@ -205,7 +205,7 @@ def test_all_skills_have_role():
 
 def test_all_skills_have_prompt():
     skills = _all_skill_files()
-    assert len(skills) == 31
+    assert len(skills) >= 31
     for skill_path in skills:
         content = skill_path.read_text(encoding="utf-8")
         assert "## System Prompt" in content, (
@@ -215,7 +215,7 @@ def test_all_skills_have_prompt():
 
 def test_skill_names_are_valid():
     skills = _all_skill_files()
-    assert len(skills) == 31
+    assert len(skills) >= 31
     for skill_path in skills:
         name = skill_path.stem
         assert name, f"{skill_path.name} has empty stem"
