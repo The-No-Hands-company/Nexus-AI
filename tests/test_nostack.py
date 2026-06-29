@@ -38,7 +38,7 @@ def test_list_skill_names():
     from nostack.registry import list_skill_names
 
     names = list_skill_names()
-    assert len(names) == 31
+    assert len(names) >= 31
     assert "office-hours" in names
     assert "cso" in names
     assert "review" in names

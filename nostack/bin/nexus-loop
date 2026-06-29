@@ -413,7 +413,7 @@ def phase_qa(state: LoopState) -> dict[str, Any]:
     except FileNotFoundError:
         results["lint"] = "skipped"
     
-    all_pass = (results.get("tests") == "passed" and results.get("lint") != "failed")
+    all_pass = bool(results.get("tests") == "passed" and results.get("lint") != "failed")
     
     if not all_pass:
         state.write(phase="implement", qa_results=results, retry_count=state.read().get("retry_count", 0) + 1)
