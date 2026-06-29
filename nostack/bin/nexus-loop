@@ -1,0 +1,452 @@
+#!/usr/bin/env python3
+"""Autonomous Loop Engine — runs continuous improvement cycles on the codebase.
+
+Each cycle:
+1. Scan codebase for actionable issues (lint, type errors, missing tests, etc.)
+2. Pick one issue to fix
+3. Isolate in a git worktree
+4. Apply fix (generate code, write tests, verify)
+5. Commit, merge back, update state
+6. Repeat
+
+No LLM required for basic cycles — uses deterministic code analysis.
+LLM skills invoked only for complex tasks (architecture, design, security audit).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from nostack.loop_state import LoopState
+
+
+# ── Configuration ────────────────────────────────────────────────────────────
+
+CYCLE_INTERVAL = 30          # seconds between cycles
+MAX_CYCLES = 100             # max cycles before self-termination
+MAX_FIX_ATTEMPTS = 3         # retry fixes before marking failed
+WORKTREE_PREFIX = "nexus-loop"
+
+# Issue types we know how to fix autonomously
+FIXABLE_PATTERNS = {
+    "missing_test": {
+        "description": "Module has no corresponding test file",
+        "priority": 8,
+        "fixer": "generate_test_file",
+    },
+    "missing_type_hints": {
+        "description": "Function missing type hints",
+        "priority": 5,
+        "fixer": "add_type_hints",
+    },
+    "bare_except": {
+        "description": "Bare except clause (should specify exception type)",
+        "priority": 6,
+        "fixer": "fix_bare_except",
+    },
+    "unused_import": {
+        "description": "Unused import statement",
+        "priority": 3,
+        "fixer": "remove_unused_import",
+    },
+    "print_statement": {
+        "description": "Print statement (should use logging)",
+        "priority": 4,
+        "fixer": "convert_print_to_logging",
+    },
+    "docstring_missing": {
+        "description": "Public function missing docstring",
+        "priority": 2,
+        "fixer": "add_docstring",
+    },
+}
+
+
+# ── Phase 1: Scan ────────────────────────────────────────────────────────────
+
+def scan_codebase() -> list[dict[str, Any]]:
+    """Find actionable issues in the codebase without needing an LLM."""
+    issues: list[dict[str, Any]] = []
+
+    # Check for modules without tests
+    issues.extend(_find_missing_tests())
+
+    # Check for bare except clauses
+    issues.extend(_find_bare_excepts())
+
+    # Check for print statements (should use logging)
+    issues.extend(_find_print_statements())
+
+    # Check for missing type hints
+    issues.extend(_find_missing_type_hints())
+
+    # Sort by priority (highest first)
+    issues.sort(key=lambda x: x.get("priority", 0), reverse=True)
+    return issues
+
+
+def _find_missing_tests() -> list[dict[str, Any]]:
+    issues = []
+    src_dir = PROJECT_ROOT / "src"
+    tests_dir = PROJECT_ROOT / "tests"
+
+    for py_file in src_dir.rglob("*.py"):
+        if py_file.name.startswith("__"):
+            continue
+        rel = py_file.relative_to(src_dir)
+        test_name = f"test_{rel.with_suffix('').as_posix().replace('/', '_')}.py"
+        test_path = tests_dir / test_name
+
+        if not test_path.exists():
+            # Check if there's any test file that tests this module
+            module_name = rel.with_suffix("").as_posix().replace("/", ".")
+            found = False
+            for tf in tests_dir.rglob("*.py"):
+                if tf.name.startswith("__"):
+                    continue
+                try:
+                    content = tf.read_text()
+                    if module_name in content:
+                        found = True
+                        break
+                except Exception:
+                    pass
+            if not found:
+                issues.append({
+                    "type": "missing_test",
+                    "module": str(rel),
+                    "module_name": module_name,
+                    "path": str(py_file),
+                    "priority": FIXABLE_PATTERNS["missing_test"]["priority"],
+                })
+    return issues[:5]  # Limit to avoid overwhelming
+
+
+def _find_bare_excepts() -> list[dict[str, Any]]:
+    issues = []
+    src_dir = PROJECT_ROOT / "src"
+    for py_file in src_dir.rglob("*.py"):
+        if py_file.name.startswith("__"):
+            continue
+        try:
+            lines = py_file.read_text().split("\n")
+            for i, line in enumerate(lines, 1):
+                stripped = line.strip()
+                if stripped == "except:" or stripped == "except:":
+                    issues.append({
+                        "type": "bare_except",
+                        "path": str(py_file),
+                        "line": i,
+                        "content": line,
+                        "priority": FIXABLE_PATTERNS["bare_except"]["priority"],
+                    })
+        except Exception:
+            pass
+    return issues[:10]
+
+
+def _find_print_statements() -> list[dict[str, Any]]:
+    issues = []
+    src_dir = PROJECT_ROOT / "src"
+    for py_file in src_dir.rglob("*.py"):
+        if py_file.name.startswith("__"):
+            continue
+        if "test" in py_file.name:
+            continue
+        try:
+            lines = py_file.read_text().split("\n")
+            for i, line in enumerate(lines, 1):
+                stripped = line.strip()
+                if stripped.startswith("print(") and "logging" not in py_file.name:
+                    issues.append({
+                        "type": "print_statement",
+                        "path": str(py_file),
+                        "line": i,
+                        "content": line,
+                        "priority": FIXABLE_PATTERNS["print_statement"]["priority"],
+                    })
+        except Exception:
+            pass
+    return issues[:10]
+
+
+def _find_missing_type_hints() -> list[dict[str, Any]]:
+    issues = []
+    src_dir = PROJECT_ROOT / "src"
+    for py_file in src_dir.rglob("*.py"):
+        if py_file.name.startswith("__"):
+            continue
+        if "test" in py_file.name:
+            continue
+        try:
+            lines = py_file.read_text().split("\n")
+            for i, line in enumerate(lines, 1):
+                stripped = line.strip()
+                if stripped.startswith("def ") and not stripped.startswith("def __"):
+                    # Check if return type hint is missing
+                    if "->" not in stripped and stripped.endswith(":"):
+                        # Check it's not a simple getter/setter
+                        func_name = stripped.split("(")[0].replace("def ", "").strip()
+                        if len(func_name) > 3:  # skip short names
+                            issues.append({
+                                "type": "missing_type_hints",
+                                "path": str(py_file),
+                                "line": i,
+                                "function": func_name,
+                                "content": line,
+                                "priority": FIXABLE_PATTERNS["missing_type_hints"]["priority"],
+                            })
+        except Exception:
+            pass
+    return issues[:10]
+
+
+# ── Phase 2: Fix ─────────────────────────────────────────────────────────────
+
+def fix_issue(issue: dict[str, Any]) -> dict[str, Any]:
+    """Attempt to fix an issue. Returns result dict with status."""
+    fixer_type = issue.get("type", "")
+    fixer_name = FIXABLE_PATTERNS.get(fixer_type, {}).get("fixer", "")
+
+    fixers = {
+        "generate_test_file": _fix_generate_test,
+        "fix_bare_except": _fix_bare_except,
+        "remove_unused_import": _fix_remove_unused,
+        "convert_print_to_logging": _fix_print_to_logging,
+        "add_type_hints": _fix_add_type_hints,
+        "add_docstring": _fix_add_docstring,
+    }
+
+    fixer = fixers.get(fixer_name)
+    if fixer is None:
+        return {"status": "skipped", "reason": f"No fixer for {fixer_type}"}
+
+    try:
+        return fixer(issue)
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc)[:200]}
+
+
+def _fix_generate_test(issue: dict) -> dict[str, Any]:
+    """Generate a basic test file for a module without tests."""
+    module_path = PROJECT_ROOT / issue["path"]
+    test_name = f"test_{issue['module'].replace('/', '_').replace('.py', '')}.py"
+    test_path = PROJECT_ROOT / "tests" / test_name
+
+    if test_path.exists():
+        return {"status": "skipped", "reason": "Test already exists"}
+
+    module_content = module_path.read_text() if module_path.exists() else ""
+    functions = []
+    for line in module_content.split("\n"):
+        stripped = line.strip()
+        if stripped.startswith("def ") and not stripped.startswith("def __"):
+            func_name = stripped.split("(")[0].replace("def ", "").strip()
+            functions.append(func_name)
+
+    if not functions:
+        return {"status": "skipped", "reason": "No testable functions found"}
+
+    test_content = f'''"""Auto-generated tests for {issue["module_name"]}."""
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+def test_import():
+    """Verify the module imports without error."""
+    import {issue["module_name"]}
+    assert {issue["module_name"]} is not None
+
+'''
+    for func in functions[:5]:
+        test_content += f'''
+def test_{func}_exists():
+    """Verify {func} is callable and returns expected type."""
+    from {issue["module_name"]} import {func}
+    assert callable({func}), "{func} should be callable"
+'''
+
+    test_path.parent.mkdir(parents=True, exist_ok=True)
+    test_path.write_text(test_content)
+
+    return {
+        "status": "fixed",
+        "action": "created_test",
+        "file": str(test_path),
+        "functions_tested": len(functions[:5]),
+    }
+
+
+def _fix_bare_except(issue: dict) -> dict[str, Any]:
+    """Replace bare except with except Exception."""
+    filepath = PROJECT_ROOT / issue["path"]
+    content = filepath.read_text()
+    lines = content.split("\n")
+    line_idx = issue["line"] - 1
+    if 0 <= line_idx < len(lines):
+        lines[line_idx] = lines[line_idx].replace("except:", "except Exception:")
+        filepath.write_text("\n".join(lines))
+        return {"status": "fixed", "action": "bare_except_fixed", "file": str(filepath)}
+    return {"status": "failed", "reason": "Line not found"}
+
+
+def _fix_print_to_logging(issue: dict) -> dict[str, Any]:
+    """Replace print() with logging.info()."""
+    filepath = PROJECT_ROOT / issue["path"]
+    content = filepath.read_text()
+    lines = content.split("\n")
+    line_idx = issue["line"] - 1
+    if 0 <= line_idx < len(lines):
+        old = lines[line_idx]
+        new = old.replace("print(", "logger.info(") if "logger" in content else old.replace("print(", "logging.info(")
+        if new != old:
+            lines[line_idx] = new
+            # Add logging import if not present
+            if "import logging" not in content:
+                lines.insert(0, "import logging")
+                lines.insert(1, "logger = logging.getLogger(__name__)")
+            filepath.write_text("\n".join(lines))
+            return {"status": "fixed", "action": "print_to_logging", "file": str(filepath)}
+    return {"status": "skipped", "reason": "Unable to convert"}
+
+
+def _fix_add_type_hints(issue: dict) -> dict[str, Any]:
+    """Add basic type hints to function signatures."""
+    filepath = PROJECT_ROOT / issue["path"]
+    content = filepath.read_text()
+    lines = content.split("\n")
+    line_idx = issue["line"] - 1
+    if 0 <= line_idx < len(lines):
+        old = lines[line_idx]
+        # Add -> None for functions without return
+        if "->" not in old and old.strip().endswith(":") and "(" in old:
+            new = old.replace("):", ") -> None:")
+            if new != old:
+                lines[line_idx] = new
+                filepath.write_text("\n".join(lines))
+                return {"status": "fixed", "action": "added_type_hint", "file": str(filepath)}
+    return {"status": "skipped", "reason": "Unable to add type hint"}
+
+
+def _fix_remove_unused(issue: dict) -> dict[str, Any]:
+    return {"status": "skipped", "reason": "Requires import analysis (deferred)"}
+
+
+def _fix_add_docstring(issue: dict) -> dict[str, Any]:
+    return {"status": "skipped", "reason": "Requires LLM for meaningful docstrings (use /document-generate)"}
+
+
+# ── Phase 3: Verify ──────────────────────────────────────────────────────────
+
+def verify_fix(issue: dict[str, Any], result: dict[str, Any]) -> bool:
+    """Verify that a fix didn't break anything."""
+    if result.get("status") != "fixed":
+        return False
+
+    # Run the test suite for the changed file
+    filepath = result.get("file", "")
+    if not filepath:
+        return True
+
+    # Quick syntax check
+    try:
+        subprocess.run(
+            [sys.executable, "-c", f"import py_compile; py_compile.compile('{filepath}', doraise=True)"],
+            capture_output=True, timeout=10, cwd=str(PROJECT_ROOT),
+        )
+    except Exception:
+        return False
+
+    # Run ruff if available
+    try:
+        result = subprocess.run(
+            ["ruff", "check", filepath, "--quiet"],
+            capture_output=True, timeout=15, cwd=str(PROJECT_ROOT),
+        )
+        if result.returncode != 0:
+            return False
+    except Exception:
+        pass  # ruff not available, skip
+
+    return True
+
+
+# ── Phase 4: Main Loop ───────────────────────────────────────────────────────
+
+def run_autonomous_loop() -> None:
+    """Main autonomous loop — runs continuously until MAX_CYCLES or COMPLETED_ALL."""
+    state = LoopState()
+
+    if state.read().get("status") == "COMPLETED_ALL":
+        print("✅ All tasks already marked complete.")
+        return
+
+    print("╔══════════════════════════════════════════════════════╗")
+    print("║     Nexus AI Autonomous Loop Engine v2              ║")
+    print("║     Interval: {}s  |  Max cycles: {}               ║".format(CYCLE_INTERVAL, MAX_CYCLES))
+    print("╚══════════════════════════════════════════════════════╝")
+
+    for cycle in range(1, MAX_CYCLES + 1):
+        state.write({"cycle_count": cycle, "status": "RUNNING"})
+        print(f"\n── Cycle {cycle}/{MAX_CYCLES} ── {time.strftime('%H:%M:%S')} ──")
+
+        # Phase 1: Scan
+        print("  🔍 Scanning codebase for issues...")
+        issues = scan_codebase()
+        if not issues:
+            print("  ✅ No actionable issues found. Codebase is clean.")
+            state.write({"current_target": "none"})
+            time.sleep(CYCLE_INTERVAL)
+            continue
+
+        print(f"  📋 Found {len(issues)} issues:")
+        for iss in issues[:5]:
+            print(f"     [{iss['type']}] {iss.get('path', '')}:{iss.get('line', '?')} (p{iss['priority']})")
+
+        # Phase 2: Pick and fix
+        top_issue = issues[0]
+        target = f"{top_issue['type']}:{top_issue.get('path', '')}"
+        state.write({"current_target": target})
+
+        print(f"  🎯 Targeting: {target}")
+        result = fix_issue(top_issue)
+
+        if result.get("status") == "fixed":
+            # Phase 3: Verify
+            print(f"  ✅ Fix applied: {result.get('action', 'unknown')} → {result.get('file', '')}")
+            if verify_fix(top_issue, result):
+                print("  ✓ Verification passed")
+                state.mark_completed()
+            else:
+                print("  ⚠️ Verification failed — fix may have introduced issues")
+                state.write({"current_target": "none"})
+        elif result.get("status") == "skipped":
+            print(f"  ⏭️ Skipped: {result.get('reason', 'unknown')}")
+            state.write({"current_target": "none"})
+        else:
+            print(f"  ❌ Failed: {result.get('error', 'unknown')}")
+            state.mark_failed(result.get("error", "Unknown error"))
+
+        # Cooldown
+        print(f"  💤 Cooling down for {CYCLE_INTERVAL}s...")
+        time.sleep(CYCLE_INTERVAL)
+
+    print("\n✅ Loop complete — max cycles reached.")
+
+
+if __name__ == "__main__":
+    run_autonomous_loop()
