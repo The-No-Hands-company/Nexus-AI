@@ -29,6 +29,9 @@
 !/.openclaw/
 !/.openclaw/**
 !/AGENTS.md
+!/LOOP_STATE.md
+!/nexus_loop_prompt.md
+!/run_nexus_loop.sh
 !/README.md
 !/package.json
 !/tsconfig.json
