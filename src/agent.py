@@ -3511,6 +3511,7 @@ def call_llm_with_fallback(
     # Instead of trying providers one at a time, race 3 simultaneously.
     # The first to respond wins. Dramatically reduces worst-case latency.
     PARALLEL_BATCH = int(os.getenv("LLM_RACE_BATCH", "3"))
+    _race_timeout = int(os.getenv("LLM_CALL_TIMEOUT_S", "10"))
     _use_racing = PARALLEL_BATCH > 1 and not os.environ.get("LLM_SERIAL", "")
 
     if _use_racing:
@@ -3536,7 +3537,7 @@ def call_llm_with_fallback(
                     breaker = _provider_circuit(pid)
                     futures[executor.submit(breaker.call, _call_single, pid, messages, tools, system_prompt)] = pid
 
-                for future in as_completed(futures, timeout=max(15.0, _call_timeout * 1.5)):
+                for future in as_completed(futures, timeout=max(15.0, _race_timeout * 1.5)):
                     pid = futures[future]
                     try:
                         result = future.result(timeout=1.0)
