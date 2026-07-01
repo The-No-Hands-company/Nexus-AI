@@ -622,7 +622,7 @@ PROVIDERS: Dict[str, Dict] = {
     },
     "nvidia": {
         "label":"NVIDIA NIM","base_url":"https://integrate.api.nvidia.com/v1",
-        "env_key":"NVIDIA_API_KEY","default_model":"meta/llama-3.3-70b-instruct",
+        "env_key":"NVIDIA_API_KEY","default_model":"nvidia/nemotron-4-340b-instruct",
         "openai_compat":True,"opt_in":True,
         "free_tier":{"available":True,"cc_required":False,
                      "signup_url":"https://build.nvidia.com",
@@ -737,7 +737,7 @@ PROVIDERS: Dict[str, Dict] = {
     },
     "deepseek": {
         "label":"DeepSeek","base_url":"https://api.deepseek.com/v1",
-        "env_key":"DEEPSEEK_API_KEY","default_model":"deepseek-chat",
+        "env_key":"DEEPSEEK_API_KEY","default_model":"deepseek-reasoner",
         "openai_compat":True,"opt_in":True,
         "free_tier":{"available":True,"cc_required":False,
                      "signup_url":"https://platform.deepseek.com",
