@@ -88,48 +88,39 @@ async function loadSettingsModal(){
     profiles:safety.profiles||{},
     policy:(safety.profiles||{})[safety.active||cfg.safety_profile||'standard']||{},
   });
-  await populateProviderKeys(keyStatus.provider_keys||{});
+  populateProviderKeys(keyStatus.provider_keys||{});
 }
 
-async function populateProviderKeys(keyStatus) {
+function populateProviderKeys(keyStatus) {
   const container = document.getElementById('s-provider-keys');
   if (!container) return;
 
-  let providers = (window._providerCache && window._providerCache.length)
+  var providers = (window._providerCache && window._providerCache.length)
     ? window._providerCache
     : null;
 
-  if (!providers) {
-    try {
-      const r = await fetch('/providers');
-      const d = await r.json();
-      providers = d.providers || [];
-      window._providerCache = providers;
-    } catch (_) {
-      container.innerHTML = '<span style="color:var(--red);font-size:.72rem;">Could not load provider list.</span>';
-      return;
-    }
-  }
-
-  if (!providers.length) {
-    container.innerHTML = '<span style="color:var(--muted);font-size:.72rem;">Provider list not loaded yet. Close and reopen Settings.</span>';
+  if (!providers || !providers.length) {
+    container.innerHTML = '<span style="color:var(--muted);font-size:.72rem;">Loading providers...</span>';
     return;
   }
-  container.innerHTML = providers
-    .filter(p => p.id && p.id !== 'auto')
-    .map(p => {
-      const has = keyStatus[p.id]?.has_key;
-      const source = keyStatus[p.id]?.source;
-      return '<div style="display:flex;align-items:center;gap:6px">' +
-        '<span style="min-width:90px;font-size:.73rem;font-weight:500;color:var(--text)">' + (p.label || p.id) + '</span>' +
-        '<input type="password" id="pk-' + p.id + '" placeholder="' + (source === 'env' ? '(from environment)' : (has ? '(key stored)' : 'API key…')) + '"' +
-        ' style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:.73rem;"' +
-        ' onchange="document.getElementById(\'pk-status-' + p.id + '\').textContent=\'\'" />' +
-        '<span id="pk-status-' + p.id + '" style="font-size:.65rem;color:var(--muted);min-width:50px">' +
-          (source === 'env' ? '🔒 env' : (has ? '✓ stored' : '')) +
-        '</span>' +
-        '</div>';
-    }).join('');
+
+  var html = '';
+  for (var i = 0; i < providers.length; i++) {
+    var p = providers[i];
+    if (!p.id || p.id === 'auto') continue;
+    var has = keyStatus[p.id] ? keyStatus[p.id].has_key : false;
+    var source = keyStatus[p.id] ? keyStatus[p.id].source : 'none';
+    var placeholder = source === 'env' ? '(from environment)' : (has ? '(key stored)' : 'API key\u2026');
+    var statusText = source === 'env' ? '\uD83D\uDD12 env' : (has ? '\u2713 stored' : '');
+    html += '<div style="display:flex;align-items:center;gap:6px">'
+      + '<span style="min-width:90px;font-size:.73rem;font-weight:500;color:var(--text)">' + (p.label || p.id) + '</span>'
+      + '<input type="password" id="pk-' + p.id + '" placeholder="' + placeholder + '"'
+      + ' style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:.73rem;"'
+      + ' onchange="document.getElementById(\'pk-status-' + p.id + '\').textContent=\'\'" />'
+      + '<span id="pk-status-' + p.id + '" style="font-size:.65rem;color:var(--muted);min-width:50px">' + statusText + '</span>'
+      + '</div>';
+  }
+  container.innerHTML = html || '<span style="color:var(--muted);font-size:.72rem;">No providers configured.</span>';
 }
 
 async function saveProviderKeys() {

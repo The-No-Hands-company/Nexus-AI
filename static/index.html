@@ -1161,9 +1161,9 @@ async function init(){
     policy:(safety.profiles||{})[safety.active||cfg.safety_profile||'standard']||{},
   });
   // Pre-load provider key status so Settings modal shows inputs immediately
-  fetch('/settings/provider-keys').then(r=>r.json()).then(d=>{
+  fetch('/settings/provider-keys').then(r=>r.json()).then(function(d){
     if(typeof populateProviderKeys==='function') populateProviderKeys(d.provider_keys||{});
-  }).catch(()=>{});
+  }).catch(function(){});
   setInterval(refreshProviders, 15000);
   const profileNames = Object.keys(safety.profiles||{});
   if(!profileNames.length) profileNames.push('standard','strict','sandbox','research');
