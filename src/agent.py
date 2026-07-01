@@ -1644,72 +1644,48 @@ _recent_provider_hint: Dict[str, str] = {}
 def _smart_order(task: str, resources: Optional[Dict[str, Any]] = None) -> List[str]:
     pref = _config["provider"]
     _in_pytest = bool(os.getenv("PYTEST_CURRENT_TEST"))
-    # Keep routing deterministic in tests: ignore persistent demotion/circuit
-    # runtime state that may leak across test classes.
-    if _in_pytest:
-        avail = {pid for pid, cfg in PROVIDERS.items() if _has_key(cfg) and not _is_rate_limited(pid)}
-    else:
-        avail = {pid for pid, cfg in PROVIDERS.items() if _has_key(cfg) and not _provider_temporarily_unavailable(pid)}
-    # When no opt-in providers are configured, fall back to genuinely free/keyless
-    # providers only.  Never silently attempt paid providers without user consent.
-    if not avail:
-        avail = {pid for pid in _FREE_PROVIDERS if not _provider_temporarily_unavailable(pid)}
-    if not avail:
-        avail = set(_FREE_PROVIDERS)
-
-    # Keep test routing deterministic: ignore inherited FREE_ONLY_MODE env in pytest.
-    if FREE_ONLY_MODE and not _in_pytest:
-        free_avail = {pid for pid in avail if _is_provider_free_usable(pid, PROVIDERS.get(pid, {}))}
-        if free_avail:
-            avail = free_avail
-    complexity_profile = _build_complexity_profile(task)
-    complexity = complexity_profile["label"]
-    resource_hint = _resource_tier(resources or get_system_resources())
-
-    if resource_hint == "constrained":
-        tier_order = ["low", "medium", "high"]
-        low_medium = set(PROVIDER_TIERS["low"] + PROVIDER_TIERS["medium"])
-        avail = {pid for pid in avail if pid in low_medium}
-    elif resource_hint == "low":
-        tier_order = ["low", "medium", "high"]
-    else:
-        tier_order = ["high","medium","low"] if complexity=="high" else \
-                     ["medium","low","high"] if complexity=="medium" else ["low","medium","high"]
-
+    
+    # Separate providers into priority tiers:
+    # 1. Configured (user explicitly added API key) — use these first
+    # 2. Free/keyless — fast fallback, no cost
+    # 3. Opt-in with key — user opted in, has key configured
+    configured: set[str] = set()
+    free_providers: set[str] = set()
+    
+    for pid, cfg in PROVIDERS.items():
+        if _provider_temporarily_unavailable(pid) and not _in_pytest:
+            continue
+        if cfg.get("keyless", False):
+            free_providers.add(pid)
+        elif _provider_api_key(cfg):
+            configured.add(pid)
+    
+    # Build ordered list: configured first, then free
     ordered: List[str] = []
-    for tier in tier_order:
-        for pid in PROVIDER_TIERS[tier]:
-            if pid in avail and pid not in ordered: ordered.append(pid)
-    for pid in PROVIDERS:
-        if pid in avail and pid not in ordered: ordered.append(pid)
-
-    # Keep all configured non-rate-limited providers in the candidate list,
-    # even if transient availability state filtered them earlier. The runtime
-    # provider loop still applies temporary-unavailability checks before calls.
-    configured = [
-        pid
-        for pid, cfg in PROVIDERS.items()
-        if _has_key(cfg) and not _is_rate_limited(pid)
-    ]
+    
+    # If user has a preferred provider, put it first
+    if pref != "auto" and pref in PROVIDERS:
+        if pref in configured or pref in free_providers:
+            ordered.append(pref)
+    
+    # Add remaining configured providers
     for pid in configured:
         if pid not in ordered:
             ordered.append(pid)
-
-    if pref != "auto" and pref in ordered:
-        ordered.remove(pref); ordered.insert(0, pref)
-
-    # In auto mode, prioritize fully configured conversational providers first.
-    # Keep anonymous llm7 as a fallback because it often enforces tight limits.
-    if pref == "auto":
-        priority_front: List[str] = []
-        if "openrouter" in ordered and _provider_api_key(PROVIDERS.get("openrouter", {})):
-            priority_front.append("openrouter")
-        if "ollama" in ordered:
-            priority_front.append("ollama")
-        if priority_front:
-            ordered = priority_front + [p for p in ordered if p not in priority_front]
-        if "llm7" in ordered and len(ordered) > 1:
-            ordered = [p for p in ordered if p != "llm7"] + ["llm7"]
+    
+    # Add free/keyless providers as fallback
+    for pid in free_providers:
+        if pid not in ordered:
+            ordered.append(pid)
+    
+    # Add any stragglers (opt-in with keys but not in configured set)
+    for pid, cfg in PROVIDERS.items():
+        if pid not in ordered and _has_key(cfg) and not _provider_temporarily_unavailable(pid):
+            ordered.append(pid)
+    
+    if not ordered:
+        ordered = list(free_providers) or [pid for pid, cfg in PROVIDERS.items() if _has_key(cfg)]
+    return ordered
 
     # Persona-level provider priority override (when provider=auto).
     if pref == "auto":
