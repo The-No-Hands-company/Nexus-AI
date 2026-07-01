@@ -92,7 +92,7 @@ async function loadSettingsModal(){
 }
 
 function populateProviderKeys(keyStatus) {
-  const container = document.getElementById('s-provider-keys');
+  var container = document.getElementById('s-provider-keys');
   if (!container) return;
 
   var providers = (window._providerCache && window._providerCache.length)
@@ -104,43 +104,86 @@ function populateProviderKeys(keyStatus) {
     return;
   }
 
-  var html = '';
+  // Separate configured vs unconfigured
+  var configured = [];
+  var unconfigured = [];
   for (var i = 0; i < providers.length; i++) {
     var p = providers[i];
     if (!p.id || p.id === 'auto') continue;
-    var has = keyStatus[p.id] ? keyStatus[p.id].has_key : false;
-    var source = keyStatus[p.id] ? keyStatus[p.id].source : 'none';
-    var placeholder = source === 'env' ? '(from environment)' : (has ? '(key stored)' : 'API key\u2026');
-    var statusText = source === 'env' ? '\uD83D\uDD12 env' : (has ? '\u2713 stored' : '');
-    html += '<div style="display:flex;align-items:center;gap:6px">'
-      + '<span style="min-width:90px;font-size:.73rem;font-weight:500;color:var(--text)">' + (p.label || p.id) + '</span>'
-      + '<input type="password" id="pk-' + p.id + '" placeholder="' + placeholder + '"'
-      + ' style="flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface2);color:var(--text);font-size:.73rem;"'
-      + ' onchange="document.getElementById(\'pk-status-' + p.id + '\').textContent=\'\'" />'
-      + '<span id="pk-status-' + p.id + '" style="font-size:.65rem;color:var(--muted);min-width:50px">' + statusText + '</span>'
-      + '</div>';
+    var info = keyStatus[p.id] || {};
+    if (info.has_key) {
+      configured.push({ id: p.id, label: p.label || p.id, source: info.source || 'none' });
+    } else {
+      unconfigured.push({ id: p.id, label: p.label || p.id });
+    }
   }
-  container.innerHTML = html || '<span style="color:var(--muted);font-size:.72rem;">No providers configured.</span>';
+
+  var html = '';
+
+  // Configured providers — compact badges
+  if (configured.length > 0) {
+    html += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px">';
+    for (var c = 0; c < configured.length; c++) {
+      var cp = configured[c];
+      var icon = cp.source === 'env' ? '\uD83D\uDD12' : '\u2713';
+      html += '<span style="padding:3px 8px;border-radius:10px;background:var(--surface2);border:1px solid var(--border);font-size:.68rem;cursor:pointer" title="' + cp.source + '" onclick="document.getElementById(\'pk-select\').value=\'' + cp.id + '\';document.getElementById(\'pk-input-row\').style.display=\'flex\';document.getElementById(\'pk-input\').focus()">'
+        + icon + ' ' + cp.label + '</span>';
+    }
+    html += '</div>';
+  }
+
+  // Dropdown + input for adding new keys
+  html += '<div style="display:flex;gap:6px;align-items:center">'
+    + '<select id="pk-select" style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.75rem;max-width:180px" onchange="document.getElementById(\'pk-input\').value=\'\';document.getElementById(\'pk-status\').textContent=\'\';document.getElementById(\'pk-input-row\').style.display=this.value?\'flex\':\'none\'">'
+    + '<option value="">+ Add key for...</option>';
+  for (var u = 0; u < unconfigured.length; u++) {
+    html += '<option value="' + unconfigured[u].id + '">' + unconfigured[u].label + '</option>';
+  }
+  html += '</select>'
+    + '<span id="pk-input-row" style="display:none;flex:1;gap:6px;align-items:center">'
+    + '<input type="password" id="pk-input" placeholder="Paste API key..." style="flex:1;padding:6px 8px;border:1px solid var(--border);border-radius:7px;background:var(--surface2);color:var(--text);font-size:.75rem" />'
+    + '<button onclick="saveSingleKey()" style="padding:6px 12px;border:none;border-radius:7px;background:#6366f1;color:#fff;font-size:.72rem;font-weight:600;cursor:pointer;white-space:nowrap">Save</button>'
+    + '</span>'
+    + '</div>'
+    + '<span id="pk-status" style="font-size:.65rem;color:var(--muted);margin-top:4px;display:inline-block"></span>';
+
+  container.innerHTML = html;
 }
 
-async function saveProviderKeys() {
-  const providers = (window._providerCache || []).filter(p => p.id !== 'auto');
-  for (const p of providers) {
-    const input = document.getElementById('pk-' + p.id);
-    if (!input) continue;
-    const val = input.value.trim();
-    if (!val && !input.placeholder.includes('stored') && !input.placeholder.includes('environment')) continue;
-    try {
-      await fetch('/settings/provider-keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: p.id, key: val })
+function saveSingleKey() {
+  var select = document.getElementById('pk-select');
+  var input = document.getElementById('pk-input');
+  var status = document.getElementById('pk-status');
+  var provider = select.value;
+  var key = input.value.trim();
+  if (!provider) return;
+
+  fetch('/settings/provider-keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ provider: provider, key: key })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (key) {
+      status.textContent = '\u2713 Key saved for ' + (d.provider || provider);
+      status.style.color = '#4a9';
+    } else {
+      status.textContent = '\u2717 Key removed';
+      status.style.color = 'var(--red)';
+    }
+    input.value = '';
+    // Refresh the list after 1s
+    setTimeout(function() {
+      fetch('/settings/provider-keys').then(function(r) { return r.json(); }).then(function(d) {
+        populateProviderKeys(d.provider_keys || {});
       });
-      const st = document.getElementById('pk-status-' + p.id);
-      if (st) st.textContent = val ? '✓ saved' : '✗ removed';
-    } catch (_) {}
-  }
+    }, 800);
+  }).catch(function(e) {
+    status.textContent = 'Failed: ' + e.message;
+    status.style.color = 'var(--red)';
+  });
 }
+
+// saveProviderKeys is no longer needed — saveSingleKey handles individual saves
 
 async function openSettings(){
   document.getElementById('settings-overlay').classList.add('open');
@@ -148,7 +191,6 @@ async function openSettings(){
 }
 function closeSettings(){document.getElementById('settings-overlay').classList.remove('open')}
 async function saveSettings(){
-  await saveProviderKeys();
   const resp=await fetch('/settings',{method:'POST',
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({
