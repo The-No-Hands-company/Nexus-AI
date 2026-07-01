@@ -379,6 +379,14 @@ def create_app() -> FastAPI:
     app.add_middleware(IpRateLimitMiddleware)   # type: ignore[arg-type]
     app.add_middleware(RequestIdMiddleware)     # type: ignore[arg-type]
 
+    # Per-user rate limit enforcement middleware
+    try:
+        from .rate_limiter import RateLimitMiddleware
+        app.add_middleware(RateLimitMiddleware)
+        _logger.info("rate_limit_middleware_registered")
+    except Exception as exc:
+        _logger.warning("rate_limit_middleware_failed error=%s", exc)
+
     # Opt-in request/response body audit logging (gated by AUDIT_BODY_LOG=true)
     if os.getenv("AUDIT_BODY_LOG", "").lower() == "true":
         from starlette.middleware.base import BaseHTTPMiddleware

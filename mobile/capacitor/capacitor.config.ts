@@ -37,7 +37,7 @@ function resolveServerConfig() {
 const config: CapacitorConfig = {
   appId: 'ai.nexus.mobile',
   appName: 'Nexus AI',
-  webDir: '../../static',
+  webDir: 'dist',
   bundledWebRuntime: false,
   server: resolveServerConfig(),
   backgroundColor: '#0a0f1a',

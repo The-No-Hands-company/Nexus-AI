@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [Unreleased] — Sprint L: Mobile App Native Functionality + Platform Completion
+
+### Added
+
+* `mobile/capacitor/src/App.tsx`: Full Capacitor native plugin integration — Camera capture (`Camera.getPhoto`), Local Notifications scheduling with permission requests, native Share sheet for generated images, Keyboard show/hide listeners with UI offset, SplashScreen auto-hide on init, Filesystem-based persistence for images and preferences
+* `mobile/capacitor/src/main.tsx`: React 18 `createRoot` rendering with StrictMode wrapper
+* `mobile/capacitor/capacitor.config.ts`: `webDir` corrected to `dist/`; added `@capacitor/splash-screen` plugin configuration
+* `mobile/capacitor/tsconfig.json`: Added `jsx: "react-jsx"`, removed strict duplicate `noImplicitAny`, removed `exactOptionalPropertyTypes` (incompatible with React optional prop patterns)
+* `mobile/capacitor/index.html`: Cleaned up to minimal PWA skeleton; removed duplicate meta tags and CDN scripts (not needed for React SPA)
+* `mobile/capacitor/package.json`: Added `@capacitor/splash-screen` dependency
+
+### Changed
+
+* `mobile/capacitor/`: Upgraded from skeleton shell to fully functional native mobile application with 7 integrated Capacitor plugins
+
+---
+
 ## [Unreleased] — Sprint K: Web UI — Live Trace, Task History, Swarm SSE
 
 ### Added

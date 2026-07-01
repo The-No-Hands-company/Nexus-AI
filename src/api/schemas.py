@@ -158,6 +158,8 @@ _SKIP |= {
     "UnicodeError", "UnicodeTranslateError", "UnicodeWarning", "UserWarning",
     "ValueError", "Warning", "ZeroDivisionError", "KeyError",
     "AllProvidersExhausted", "AudioProviderError",
+    # Domain classes imported in routes that must not be shadowed by schemas
+    "DocStore",
 }
 
 _text = pathlib.Path(__file__).with_name("routes.py").read_text(encoding="utf-8", errors="ignore")

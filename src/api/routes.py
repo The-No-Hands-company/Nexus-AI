@@ -20,6 +20,9 @@ from fastapi.responses import FileResponse, StreamingResponse, HTMLResponse, JSO
 router = APIRouter()
 from ..agent import (run_agent_task, stream_agent_task, get_providers_list, get_provider_health, get_free_provider_diagnostics, get_config, update_config, call_llm_with_fallback, get_session_dir, get_system_resources, _config, PERSONAS, activity_log, _MAX_ACTIVITY, get_session_safety_profile, _push_safety_event, AllProvidersExhausted, PROVIDERS, _provider_secret_name)
 from ..approvals import list_tool_approvals, decide_tool_approval
+from ..rate_limiter import get_settings as rate_get_settings, update_settings as rate_update_settings, set_user_quota, get_user_quota, remove_user_override, list_user_overrides, get_quota_status
+from ..job_queue_durable import list_dlq, get_dlq_entry, retry_from_dlq, delete_from_dlq, purge_dlq, dlq_stats, restore_dlq as jqd_restore_dlq, execute_with_retry
+from ..document_pipeline import DocStore, ingest_document, build_rag_context
 from ..auth import JWT_SECRET, JWT_ALGO, JWT_EXPIRE_H, MULTI_USER
 from ..scheduler import (
     schedule_job,
@@ -4561,6 +4564,146 @@ async def resolve_approval(approval_id: str, request: Request):
     return resolved
 
 
+# ── Dead-Letter Queue endpoints ───────────────────────────────────────
+
+@router.get("/jobs/dlq")
+def get_dlq_entries(limit: int = 100):
+    return {"entries": list_dlq(limit), "stats": dlq_stats()}
+
+
+@router.get("/jobs/dlq/{dlq_id}")
+def get_dlq_entry_endpoint(dlq_id: str):
+    entry = get_dlq_entry(dlq_id)
+    if not entry:
+        return _api_error("DLQ entry not found", "not_found", 404)
+    return entry
+
+
+@router.post("/jobs/dlq/{dlq_id}/retry")
+def retry_dlq_entry(dlq_id: str):
+    result = retry_from_dlq(dlq_id)
+    if result is None:
+        return _api_error("DLQ entry not found", "not_found", 404)
+    if "error" in result:
+        return _api_error(str(result["error"]), "retry_failed", 500)
+    return result
+
+
+@router.delete("/jobs/dlq/{dlq_id}")
+def delete_dlq_entry_endpoint(dlq_id: str):
+    ok = delete_from_dlq(dlq_id)
+    if not ok:
+        return _api_error("DLQ entry not found", "not_found", 404)
+    return {"deleted": dlq_id}
+
+
+@router.delete("/jobs/dlq")
+def purge_dlq_endpoint():
+    count = purge_dlq()
+    return {"purged": count}
+
+
+# ── Per-user quota admin endpoints ───────────────────────────────────
+
+@router.get("/quota/admin/users")
+def list_quota_overrides():
+    return {"users": list_user_overrides(), "global": rate_get_settings()}
+
+
+@router.get("/quota/admin/users/{username}")
+def get_user_quota_endpoint(username: str):
+    return get_user_quota(username)
+
+
+@router.post("/quota/admin/users/{username}")
+async def set_user_quota_endpoint(username: str, request: Request):
+    data = await request.json()
+    per_minute = data.get("per_minute")
+    per_day = data.get("per_day")
+    if per_minute is not None:
+        per_minute = int(per_minute)
+    if per_day is not None:
+        per_day = int(per_day)
+    result = set_user_quota(username, per_minute, per_day)
+    return result
+
+
+@router.delete("/quota/admin/users/{username}")
+def delete_user_override_endpoint(username: str):
+    ok = remove_user_override(username)
+    if not ok:
+        return _api_error("no override found for user", "not_found", 404)
+    return {"removed": username}
+
+
+@router.get("/quota/status")
+def quota_status(request: Request):
+    principal = _principal_from_request(request)
+    return get_quota_status(principal)
+
+
+# ── RAG-augmented chat endpoint ──────────────────────────────────────
+
+_document_store = DocStore()
+
+
+@router.post("/documents/rag-chat")
+async def documents_rag_chat(request: Request):
+    """RAG-augmented chat: answers questions using ingested documents as context.
+
+    POST body: { "question": "What are the key findings?", "top_k": 5 }
+    """
+    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    question = str(body.get("question", "")).strip()
+    top_k = int(body.get("top_k", 5))
+
+    if not question:
+        return _api_error("question is required", "validation_error", 400)
+
+    store_stats = _document_store.stats()
+    if store_stats["total_documents"] == 0:
+        return {"answer": "No documents have been ingested yet. Use /documents/ingest first.", "sources": [], "store_stats": store_stats}
+
+    context = build_rag_context(_document_store, question, top_k=top_k)
+    if not context:
+        return {"answer": "No relevant documents found for your question.", "sources": [], "store_stats": store_stats}
+
+    # Build RAG-augmented system prompt
+    system_msg = f"You are a document analysis assistant. Answer the user's question using ONLY the provided document context below. If the answer cannot be found in the context, say so clearly.\n\nDOCUMENT CONTEXT:\n{context[:8000]}"
+
+    try:
+        result = call_llm_with_fallback(
+            messages=[
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": question},
+            ],
+            temperature=0.2,
+        )
+        answer = result.get("content", "") if isinstance(result, dict) else str(result)
+    except Exception as exc:
+        answer = f"Error generating response: {exc}"
+
+    return {
+        "answer": answer,
+        "sources": [{"id": r["id"], "score": r["score"], "source": r["metadata"].get("source", "")} for r in _document_store.search(question, top_k=top_k)],
+        "store_stats": store_stats,
+    }
+
+
+@router.get("/documents/store/stats")
+def document_store_stats():
+    return _document_store.stats()
+
+
+@router.delete("/documents/store")
+def clear_document_store():
+    count = _document_store.clear()
+    return {"cleared": count}
+
+
+# ── Scheduler helpers ────────────────────────────────────────────────
+
+
 def _run_scheduled_task_extended(task: str) -> str:
     if task == "__internal_quota_cleanup__":
         return _quota_cleanup_task()
@@ -4589,6 +4732,14 @@ def startup_event() -> None:
     set_run_function(_run_scheduled_task_extended)
     restore_from_db()
     _register_quota_reset_scheduler()
+    # Restore dead-letter queue from persistent storage
+    try:
+        restored = jqd_restore_dlq()
+        if restored:
+            import logging
+            logging.getLogger(__name__).info("dlq_restored count=%d", restored)
+    except Exception:
+        pass
     try:
         from ..benchmark import register_benchmark_schedules
         from ..validation_program import register_validation_program_schedules

@@ -235,7 +235,7 @@ def update_config(provider=None, model=None, temperature=None, persona=None,
 GH_TOKEN    = os.getenv("GH_TOKEN", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "")
 MAX_LOOP    = 24
-COOLDOWN_SECONDS = int(os.getenv("RATE_LIMIT_COOLDOWN", "60"))
+COOLDOWN_SECONDS = int(os.getenv("RATE_LIMIT_COOLDOWN", "20"))
 
 # ── Swarm View activity log ───────────────────────────────────────────────────
 _MAX_ACTIVITY = 500
@@ -1508,7 +1508,7 @@ def _provider_temporarily_unavailable(pid: str) -> bool:
     return _is_rate_limited(pid) or _is_circuit_open(pid) or _is_demoted(pid)
 
 def _mark_rate_limited(pid):
-    cd = 15 if PROVIDERS.get(pid,{}).get("keyless") else COOLDOWN_SECONDS
+    cd = 5 if PROVIDERS.get(pid,{}).get("keyless") else COOLDOWN_SECONDS
     _cooldowns[pid] = time.time() + cd
 
 
@@ -3082,7 +3082,7 @@ def _build_openai_request(
 
 def _do_openai_http_call(url: str, headers: Dict[str, str], payload: bytes) -> Dict[str, Any]:
     import requests
-    _call_timeout = int(os.getenv("LLM_CALL_TIMEOUT_S", "30"))
+    _call_timeout = int(os.getenv("LLM_CALL_TIMEOUT_S", "10"))
     r = requests.post(url, headers=headers, data=payload, timeout=_call_timeout)
     if r.status_code >= 400:
         body_txt = (r.text or "")[:300]
@@ -3506,6 +3506,71 @@ def call_llm_with_fallback(
     ram_txt = f"{avail_ram}GB" if avail_ram is not None else "unknown"
     logger.debug(f"🧠 {complexity}/{resource_hint} (ram={ram_txt}) → {' → '.join(order[:4])}")
     last_err = None
+
+    # ── Parallel racing optimization: try providers in batches ─────────────
+    # Instead of trying providers one at a time, race 3 simultaneously.
+    # The first to respond wins. Dramatically reduces worst-case latency.
+    PARALLEL_BATCH = int(os.getenv("LLM_RACE_BATCH", "3"))
+    _use_racing = PARALLEL_BATCH > 1 and not os.environ.get("LLM_SERIAL", "")
+
+    if _use_racing:
+        from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeout
+        remaining = [p for p in order if not _provider_temporarily_unavailable(p)]
+        skipped = [p for p in order if _provider_temporarily_unavailable(p)]
+
+        for p in skipped:
+            status = "demoted_skip" if _is_demoted(p) else "cooldown_skip"
+            attempts.append({
+                "provider_id": p, "provider": PROVIDERS.get(p, {}).get("label", p),
+                "status": status, "error": _provider_demotion_reasons.get(p, "unavailable"),
+            })
+
+        while remaining:
+            batch = remaining[:PARALLEL_BATCH]
+            remaining = remaining[PARALLEL_BATCH:]
+            batch_started = time.time()
+
+            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
+                futures = {}
+                for pid in batch:
+                    breaker = _provider_circuit(pid)
+                    futures[executor.submit(breaker.call, _call_single, pid, messages, tools, system_prompt)] = pid
+
+                for future in as_completed(futures, timeout=max(15.0, _call_timeout * 1.5)):
+                    pid = futures[future]
+                    try:
+                        result = future.result(timeout=1.0)
+                        elapsed = max(0.0, time.time() - batch_started)
+                        if llm_counter is not None:
+                            llm_counter.labels(provider=pid, status="ok").inc()
+                        if llm_latency is not None:
+                            llm_latency.labels(provider=pid).observe(elapsed)
+                        attempts.append({
+                            "provider_id": pid, "provider": PROVIDERS.get(pid, {}).get("label", pid),
+                            "status": "ok", "latency_ms": int(elapsed * 1000),
+                        })
+                        _set_last_provider_attempts(attempts)
+                        if isinstance(result, dict):
+                            result = _attach_provider_diagnostics(result, attempts)
+                        _recent_provider_hint[hint_key] = pid
+                        try:
+                            from .redis_state import cache_set
+                            cache_set(_cache_key, result, ttl=300)
+                        except Exception:
+                            pass
+                        # Cancel remaining futures
+                        for f in futures:
+                            if f != future:
+                                f.cancel()
+                        return result, pid
+                    except (CircuitBreakerOpen, Exception) as exc:
+                        attempts.append({
+                            "provider_id": pid, "provider": PROVIDERS.get(pid, {}).get("label", pid),
+                            "status": "error", "error": str(exc)[:200],
+                        })
+                        last_err = exc
+
+    # ── Serial fallback (when racing disabled or batch_size=1) ─────────────
     for pid in order:
         if _provider_temporarily_unavailable(pid):
             if _is_demoted(pid):
