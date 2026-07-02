@@ -95,6 +95,8 @@
   <button class="btn-icon" onclick="toggleSidebar()" title="History (Cmd+/)">☰</button>
     <div class="logo">Nexus AI</div>
     <button class="btn-ghost" onclick="newChat()" style="margin-left: 10px; font-size: 0.75rem; color: var(--accent); font-weight: 600;">+ New Chat</button>
+    <button class="btn-ghost" onclick="copyConversation()" style="font-size:0.72rem;color:var(--muted);margin-left:4px" title="Copy entire conversation">📋 Copy</button>
+    <button class="btn-ghost" onclick="exportConversationMD()" style="font-size:0.72rem;color:var(--muted)" title="Export as Markdown">📥 MD</button>
   <div class="header-spacer"></div>
   <div id="autosave-dot" title="Auto-saving…"></div>
   <button class="pill pill-safety" id="safety-pill" title="Active safety profile — click Settings to change" onclick="openSettings()">
@@ -2130,6 +2132,40 @@ async function newChat(){
   // autosave handles this
   await refreshSessionSafetyUI();
   showTyping(false);if(drawerOpen)toggleDrawer();closeSidebar();ta.focus();
+}
+
+function copyConversation(){
+  const rows = document.querySelectorAll('.msg-row');
+  let text = '';
+  rows.forEach(function(row){
+    const role = row.classList.contains('user') ? 'You' : 'Nexus AI';
+    const bubble = row.querySelector('.bubble');
+    if(bubble) text += role + ': ' + bubble.innerText.trim() + '\n\n';
+  });
+  if(!text) return;
+  navigator.clipboard.writeText(text.trim()).catch(function(){});
+}
+
+function exportConversationMD(){
+  const rows = document.querySelectorAll('.msg-row');
+  let md = '# Nexus AI Conversation\n\n';
+  rows.forEach(function(row){
+    const role = row.classList.contains('user') ? '**You**' : '**Nexus AI**';
+    const bubble = row.querySelector('.bubble');
+    if(bubble) md += '### ' + role + '\n\n' + bubble.innerText.trim() + '\n\n---\n\n';
+  });
+  const blob = new Blob([md], {type: 'text/markdown'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = 'nexus-conversation.md'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function showToast(msg){
+  const el = document.getElementById('settings-status');
+  if(!el) return;
+  el.textContent = msg;
+  setTimeout(function(){ el.textContent = ''; }, 2500);
 }
 
 
