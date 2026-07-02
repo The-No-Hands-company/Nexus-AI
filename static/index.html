@@ -95,8 +95,6 @@
   <button class="btn-icon" onclick="toggleSidebar()" title="History (Cmd+/)">☰</button>
     <div class="logo">Nexus AI</div>
     <button class="btn-ghost" onclick="newChat()" style="margin-left: 10px; font-size: 0.75rem; color: var(--accent); font-weight: 600;">+ New Chat</button>
-    <button class="btn-ghost" onclick="copyConversation()" style="font-size:0.72rem;color:var(--muted);margin-left:4px" title="Copy entire conversation">📋 Copy</button>
-    <button class="btn-ghost" onclick="exportConversationMD()" style="font-size:0.72rem;color:var(--muted)" title="Export as Markdown">📥 MD</button>
   <div class="header-spacer"></div>
   <div id="autosave-dot" title="Auto-saving…"></div>
   <button class="pill pill-safety" id="safety-pill" title="Active safety profile — click Settings to change" onclick="openSettings()">
@@ -492,6 +490,10 @@
     </div>
 
     <div id="rate-toast"></div>
+    <div id="conv-footer" style="display:none;justify-content:center;gap:8px;padding:6px 14px;border-top:1px solid var(--border);background:var(--surface2);flex-shrink:0">
+      <button class="btn-ghost" onclick="copyConversation()" style="font-size:.68rem;color:var(--muted);padding:4px 10px;border:1px solid var(--border);border-radius:6px">📋 Copy conversation</button>
+      <button class="btn-ghost" onclick="exportConversationMD()" style="font-size:.68rem;color:var(--muted);padding:4px 10px;border:1px solid var(--border);border-radius:6px">📥 Export Markdown</button>
+    </div>
     <div id="file-chips"></div>
     <div id="token-bar" style="display:none" class="token-bar">
       🔑 <span style="color:var(--amber);font-weight:600">Private repo?</span>
@@ -1232,6 +1234,8 @@ function showChat(){document.getElementById('welcome').style.display='none'}
 function clearMessages(){
   const msgs=document.getElementById('messages'),typing=document.getElementById('typing');
   [...msgs.children].forEach(c=>{if(c!==typing)c.remove()});
+  var footer = document.getElementById('conv-footer');
+  if(footer) footer.style.display = 'none';
 }
 function scrollBottom(){const m=document.getElementById('messages');m.scrollTop=m.scrollHeight}
 function addBubble(role,content='',meta='',rawText=''){
@@ -1251,6 +1255,9 @@ function addBubble(role,content='',meta='',rawText=''){
     enhanceRenderedContent(bub);
   }
   row.appendChild(wrap);msgs.insertBefore(row,typing);scrollBottom();
+  // Show conversation footer if there are messages
+  var footer = document.getElementById('conv-footer');
+  if(footer) footer.style.display = 'flex';
   return{wrap,bub,row};
 }
 function showTyping(v){document.getElementById('typing').style.display=v?'block':'none';if(v)scrollBottom()}
