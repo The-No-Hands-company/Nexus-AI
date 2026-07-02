@@ -104,8 +104,8 @@ _config: Dict[str, Any] = {
     "ensemble_threshold": 0.4,
     "hitl_approval_mode": os.getenv("HITL_APPROVAL_MODE", "off").lower(),
     "safety_profile":     os.getenv("SAFETY_POLICY_PROFILE", "standard").lower(),
-    "strict_mode_profile": os.getenv("STRICT_MODE_PROFILE", "strict").lower(),
-    "strict_no_guess_mode": os.getenv("STRICT_NO_GUESS_MODE", "true").lower() in ("1", "true", "yes", "on"),
+    "strict_mode_profile": os.getenv("STRICT_MODE_PROFILE", "balanced").lower(),
+    "strict_no_guess_mode": os.getenv("STRICT_NO_GUESS_MODE", "false").lower() in ("1", "true", "yes", "on"),
     "strict_confidence_threshold": float(os.getenv("STRICT_CONFIDENCE_THRESHOLD", "0.95")),
     "strict_evidence_threshold": int(os.getenv("STRICT_EVIDENCE_THRESHOLD", "1")),
     # Native tool-calling: send the OpenAI tools= array to the model instead of
@@ -128,6 +128,11 @@ _config: Dict[str, Any] = {
 }
 
 _STRICT_MODE_PRESETS: Dict[str, Dict[str, Any]] = {
+    "sandbox": {
+        "strict_no_guess_mode": False,
+        "strict_confidence_threshold": 0.0,
+        "strict_evidence_threshold": 0,
+    },
     "balanced": {
         "strict_no_guess_mode": False,
         "strict_confidence_threshold": 0.80,
@@ -147,9 +152,9 @@ _STRICT_MODE_PRESETS: Dict[str, Dict[str, Any]] = {
 
 
 def _apply_strict_mode_profile(profile: str) -> str:
-    selected = str(profile or "strict").lower().strip()
+    selected = str(profile or "balanced").lower().strip()
     if selected not in _STRICT_MODE_PRESETS:
-        selected = "strict"
+        selected = "balanced"
     preset = _STRICT_MODE_PRESETS[selected]
     _config["strict_mode_profile"] = selected
     _config["strict_no_guess_mode"] = bool(preset["strict_no_guess_mode"])
