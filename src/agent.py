@@ -2080,8 +2080,7 @@ Available actions:
 
 Rules:
 - clarify ONLY for new project creation where architecture choices matter. 2-4 questions max.
-- In strict no-guess mode, any unresolved uncertainty must return a structured clarification card instead of executing actions.
-- plan BEFORE building 3+ files. Then execute immediately.
+''' + (("- In strict no-guess mode, any unresolved uncertainty must return a structured clarification card instead of executing actions.\n") if _config.get("strict_no_guess_mode") else "") + '''- plan BEFORE building 3+ files. Then execute immediately.
 - clone_repo: use the exact URL from the user's message. Never use placeholder URLs.
 - commit_push: always include repo_url so the right repo gets pushed.
 - run_command: no rm -rf, sudo, or destructive ops.
@@ -4301,7 +4300,7 @@ Original prompt: {clean_task}"""
     _budget_start = time.time()
     _tool_call_count = 0
     _read_file_count = 0   # track consecutive read_file calls to prevent over-reading
-    _strict_mode = bool(_config.get("strict_no_guess_mode", True))
+    _strict_mode = bool(_config.get("strict_no_guess_mode", False))
     _strict_confidence_threshold = float(_config.get("strict_confidence_threshold", 0.95) or 0.95)
     _strict_evidence_threshold = int(_config.get("strict_evidence_threshold", 1) or 1)
     _evidence_hits = 0
