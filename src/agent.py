@@ -2573,7 +2573,7 @@ _STRICT_HIGH_RISK_ACTIONS = {
     "create_repo", "api_call", "query_db", "db_migrate", "inspect_db",
 }
 _DESTRUCTIVE_ACTIONS = {
-    "delete_file", "run_command", "clone_repo", "commit_push",
+    "delete_file", "clone_repo", "commit_push",
     "create_repo", "api_call", "db_migrate",
 }
 _STRICT_EVIDENCE_REQUIRED_ACTIONS = {
