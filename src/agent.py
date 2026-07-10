@@ -176,7 +176,12 @@ def update_config(provider=None, model=None, temperature=None, persona=None,
     if provider           is not None: _config["provider"]           = provider.lower()
     if model              is not None: _config["model"]              = model
     if temperature        is not None: _config["temperature"]        = float(temperature)
-    if persona            is not None: _config["persona"]            = persona
+    if persona            is not None:
+        if _config.get("persona") != persona:
+            # Persona changes the stable system-prompt prefix — drop the memo so
+            # the next call rebuilds it instead of serving a stale cached prefix.
+            clear_prefix_memo()
+        _config["persona"]            = persona
     if ensemble_mode      is not None:
         _config["ensemble_mode"] = bool(ensemble_mode)
         set_ensemble_enabled(bool(ensemble_mode))
@@ -1885,7 +1890,10 @@ Always finish with a respond action."""
         )
 
     persona_name = str(_config.get("persona") or "").strip()
-    profile_pack = load_profile_pack(persona_name=persona_name)
+    profile_pack = _prefix_memoize(
+        f"profile_pack:{persona_name}",
+        lambda: load_profile_pack(persona_name=persona_name),
+    )
     profile_instructions = str(profile_pack.get("instructions") or "").strip()
     if profile_instructions:
         base = base.rstrip() + (
@@ -2585,6 +2593,57 @@ _STRICT_EXECUTION_CONTRACT_ACTIONS = {
 _STRICT_EVIDENCE_ACTIONS = {
     "web_search", "read_page", "api_call", "query_db", "inspect_db", "rag_query", "read_file",
 }
+
+# ── Concurrency safety (Claude-Code pattern: safe-to-parallelize is per-call) ──
+# Read-only actions with no shared-state side effects can run concurrently.
+# Fail-closed: anything NOT explicitly listed is treated as serial (a write,
+# a network mutation, or unknown). This prevents e.g. two concurrent write_file
+# calls to the same path from corrupting each other. Zero API cost — pure
+# latency win on read-heavy fan-outs.
+_CONCURRENCY_SAFE_ACTIONS = {
+    "read_file", "list_files", "search_in_files", "grep",
+    "web_search", "read_page", "get_time", "calculate",
+    "json_format", "diff", "file_diff", "regex", "base64", "convert",
+    "currency", "weather",
+    "git_status", "git_log", "git_diff",
+    "rag_query", "rag_status",
+    "kg_query", "kg_list",
+    "nexus_status", "ollama_list_models",
+    "youtube_transcript", "read_pdf", "read_docx", "read_xlsx", "read_pptx", "read_csv",
+    "think", "think_deep",
+}
+_READONLY_SHELL_BINS = {
+    "ls", "cat", "head", "tail", "wc", "grep", "rg", "find", "fd",
+    "stat", "file", "tree", "du", "df", "pwd", "echo", "git", "which",
+}
+_READONLY_GIT_SUBCMDS = {"status", "log", "diff", "show", "branch", "remote", "rev-parse", "describe"}
+_SHELL_UNSAFE_TOKENS = ("&&", "||", ";", "|", ">", "<", "`", "$(", "\n")
+
+
+def _is_tool_call_concurrency_safe(sub_action: Dict[str, Any]) -> bool:
+    """Return True only when a tool call is provably side-effect-free.
+
+    For run_command we inspect the actual command (like CC inspects Bash):
+    a single read-only binary with no shell operators is safe; anything with
+    pipes/redirects/chaining or an unknown binary is not.
+    """
+    if not isinstance(sub_action, dict):
+        return False
+    act = str(sub_action.get("action") or "").strip()
+    if not act:
+        return False
+    if act in _CONCURRENCY_SAFE_ACTIONS:
+        return True
+    if act == "run_command":
+        cmd = str(sub_action.get("cmd") or sub_action.get("command") or "").strip()
+        if not cmd or any(tok in cmd for tok in _SHELL_UNSAFE_TOKENS):
+            return False
+        parts = cmd.split()
+        bin0 = parts[0]
+        if bin0 == "git":
+            return len(parts) > 1 and parts[1] in _READONLY_GIT_SUBCMDS
+        return bin0 in _READONLY_SHELL_BINS
+    return False
 _ACTION_REQUIRED_FIELDS: Dict[str, List[str]] = {
     "respond": ["content"],
     "clarify": ["questions"],
@@ -2998,6 +3057,21 @@ def _estimate_tokens(text: str) -> int:
     return max(1, len(text) * 2 // 7)
 
 
+def _usage_from_action(action: Dict[str, Any]) -> Optional[Dict[str, int]]:
+    """Return provider-reported token usage attached to an LLM action, if any.
+
+    Providers on the OpenAI-compat path attach `_usage` (see _call_openai). This
+    is authoritative and preferred over char/tiktoken estimates for cost and
+    context accounting. Returns None when the provider did not report usage.
+    """
+    if not isinstance(action, dict):
+        return None
+    u = action.get("_usage")
+    if isinstance(u, dict) and (u.get("prompt_tokens") or u.get("completion_tokens")):
+        return u
+    return None
+
+
 def _messages_token_estimate(messages: List[Dict]) -> int:
     total = 0
     for m in messages:
@@ -3171,7 +3245,21 @@ def _call_openai(
             raise
 
     msg_obj = data["choices"][0]["message"]
-    return _parse_openai_message(msg_obj, use_tools=bool(tools))
+    parsed = _parse_openai_message(msg_obj, use_tools=bool(tools))
+    # Anchor token accounting on the provider's authoritative `usage` block
+    # (free OpenAI-compat fleet returns it) instead of char/tiktoken estimates.
+    # Absent → downstream falls back to _estimate_tokens. Zero extra API cost.
+    _u = data.get("usage") if isinstance(data, dict) else None
+    if isinstance(_u, dict) and isinstance(parsed, dict):
+        pt = int(_u.get("prompt_tokens") or _u.get("input_tokens") or 0)
+        ct = int(_u.get("completion_tokens") or _u.get("output_tokens") or 0)
+        if pt or ct:
+            parsed["_usage"] = {
+                "prompt_tokens": pt,
+                "completion_tokens": ct,
+                "total_tokens": int(_u.get("total_tokens") or (pt + ct)),
+            }
+    return parsed
 
 
 def _call_grok(messages):
@@ -3815,45 +3903,175 @@ def call_llm_smart(
     return result, pid, meta
 
 
-def _maybe_compress_history(history: List[Dict]) -> List[Dict]:
-    """Compress history using the LLM-backed summarizer for very long contexts,
-    falling back to the naive truncation approach for moderate lengths."""
-    if len(history) <= 20:
-        return history
-    # For histories long enough to warrant an LLM summary, use the smart path
-    if len(history) > 40:
-        try:
-            return CONTEXT_WINDOW.compress_history_with_llm(history, _orchestrator_llm)
-        except Exception:
-            logger.warning("agent.py:3717: LLM history compression failed", exc_info=True)
-    # Token-aware history compression: keep as many recent messages as possible
-    MAX_HISTORY_TOKENS = 2000
-    selected_messages = []
+# ── Compaction circuit breaker (Claude-Code lesson: cap retries on failure) ──
+# CC observed production sessions burning 250K API calls/day in a
+# compact→fail→retry death spiral. After N consecutive failures we stop
+# attempting the (token-costing) LLM summary entirely and serve the free
+# deterministic path. NAI: deterministic compaction is the zero-cost default;
+# LLM summary is an opt-in enhancement, never a requirement.
+_COMPACT_MAX_FAILURES = int(os.getenv("NEXUS_COMPACT_MAX_FAILURES", "3") or 3)
+_compact_failures = 0
+_compact_lock = threading.Lock()
+
+
+def _llm_compact_enabled() -> bool:
+    return os.getenv("NEXUS_LLM_COMPACT", "true").lower() in ("1", "true", "yes", "on")
+
+
+def _compact_breaker_ok() -> bool:
+    with _compact_lock:
+        return _compact_failures < _COMPACT_MAX_FAILURES
+
+
+def _compact_breaker_trip() -> None:
+    global _compact_failures
+    with _compact_lock:
+        _compact_failures += 1
+
+
+def _compact_breaker_reset() -> None:
+    global _compact_failures
+    with _compact_lock:
+        _compact_failures = 0
+
+
+def _cheap_compress_history(history: List[Dict], max_tokens: int = 2000) -> List[Dict]:
+    """Free, deterministic compaction: keep the most recent messages that fit a
+    token budget and prepend a boundary marker for the omitted span. No LLM."""
+    selected_messages: List[Dict] = []
     current_tokens = 0
-    
     for msg in reversed(history):
         msg_tokens = _messages_token_estimate([msg])
-        if current_tokens + msg_tokens > MAX_HISTORY_TOKENS:
+        if selected_messages and current_tokens + msg_tokens > max_tokens:
             break
         selected_messages.insert(0, msg)
         current_tokens += msg_tokens
-    
     if selected_messages and len(selected_messages) < len(history):
         omitted_count = len(history) - len(selected_messages)
-        summary_msg = {
+        selected_messages.insert(0, {
             "role": "user",
-            "content": f"[{omitted_count} earlier messages omitted to stay within token limits. Continuing with recent context.]"
-        }
-        selected_messages.insert(0, summary_msg)
-    
+            "content": f"[{omitted_count} earlier messages omitted to stay within token limits. Continuing with recent context.]",
+        })
     return selected_messages if selected_messages else history[:2]
 
 
-def _get_custom_instructions() -> str:
+def _maybe_compress_history(history: List[Dict]) -> List[Dict]:
+    """Layered compaction: cheapest operations first, LLM summary last.
+
+    Layer 0: short histories pass through untouched.
+    Layer 1 (free): deterministic token-aware removal with a boundary marker.
+    Layer 2 (opt-in, costs tokens): LLM semantic summary for very long
+      histories — gated by NEXUS_LLM_COMPACT and a circuit breaker so repeated
+      failures never spiral into runaway API calls.
+    """
+    if len(history) <= 20:
+        return history
+
+    # Layer 1 — free deterministic path. Sufficient on its own to bound context.
+    cheap = _cheap_compress_history(history)
+
+    # For moderate histories the free path is enough; never spend tokens.
+    if len(history) <= 40:
+        return cheap
+
+    # Layer 2 — semantic LLM summary only when enabled and the breaker is closed.
+    if _llm_compact_enabled() and _compact_breaker_ok():
+        try:
+            result = CONTEXT_WINDOW.compress_history_with_llm(history, _orchestrator_llm)
+            _compact_breaker_reset()
+            return result
+        except Exception:
+            _compact_breaker_trip()
+            logger.warning(
+                "agent.py: LLM history compression failed (%d/%d); using free deterministic compaction",
+                _compact_failures, _COMPACT_MAX_FAILURES, exc_info=True,
+            )
+    return cheap
+
+
+# ── Tool-result budgeting (Claude-Code pattern, NAI zero-waste tuning) ───────
+# Oversized tool output is the biggest silent token sink. Instead of dropping
+# the overflow (losing it forever), persist the full text to disk and leave a
+# short preview plus a read_file pointer so the model can retrieve detail only
+# when it actually needs it. An aggregate budget then stops N tools from each
+# emitting a near-limit result and collectively flooding the window.
+_TOOL_RESULT_AGG_BUDGET = int(os.getenv("TOOL_RESULT_AGGREGATE_MAX_CHARS", "8000") or 8000)
+
+
+def _persist_oversized_result(result_str: str, workdir: str, kind: str) -> str:
+    """Write full tool output to disk; return a workdir-relative path or ""."""
     try:
-        return load_custom_instructions()
+        base = workdir or "/tmp/ca_anon"
+        rdir = os.path.join(base, ".nexus_tool_results")
+        os.makedirs(rdir, exist_ok=True)
+        digest = hashlib.sha1(result_str.encode("utf-8", "ignore")).hexdigest()[:12]
+        fpath = os.path.join(rdir, f"{(kind or 'tool')}_{digest}.txt")
+        with open(fpath, "w", encoding="utf-8", errors="ignore") as fh:
+            fh.write(result_str)
+        return os.path.relpath(fpath, base)
     except Exception:
+        logger.warning("agent.py: failed to persist oversized tool result", exc_info=True)
         return ""
+
+
+def _budget_tool_result(result_str: str, workdir: str, kind: str,
+                        per_result_max: int, agg_used: int) -> tuple[str, int]:
+    """Return (context_text, chars_added). Persists overflow to disk with a
+    retrieval pointer, and tightens the cap once the aggregate budget is spent."""
+    cap = per_result_max
+    if agg_used > _TOOL_RESULT_AGG_BUDGET:
+        # Death-by-a-thousand-cuts guard: shrink previews after the budget.
+        cap = max(300, per_result_max // 3)
+    full_len = len(result_str)
+    if full_len <= cap:
+        return result_str, full_len
+    preview = result_str[:cap]
+    rel = _persist_oversized_result(result_str, workdir, kind)
+    if rel:
+        ctx = (preview + f"\n…[{full_len - cap} chars omitted. Full output saved to "
+               f"'{rel}' — use read_file to retrieve it if needed.]")
+    else:
+        ctx = preview + f"\n…[truncated — {full_len - cap} chars omitted for context]"
+    return ctx, len(ctx)
+
+
+# ── Session-stable prefix memoization ────────────────────────────────────────
+# The system prompt is rebuilt on every LLM call inside the multi-step agent
+# loop. Re-reading custom instructions (DB) and profile packs (filesystem) on
+# each call both wastes I/O and risks a byte-different prefix that busts
+# server-side prompt caches on cache-capable providers (Claude/Gemini/DeepSeek —
+# the paid opt-in path). A short TTL memo keeps the prefix byte-stable within a
+# turn while still picking up genuine config changes within seconds. Zero cost.
+_PREFIX_MEMO_TTL_S = float(os.getenv("NEXUS_PREFIX_MEMO_TTL_S", "30") or 30)
+_prefix_memo: Dict[str, tuple] = {}
+_prefix_memo_lock = threading.Lock()
+
+
+def _prefix_memoize(key: str, compute):
+    now = time.time()
+    with _prefix_memo_lock:
+        hit = _prefix_memo.get(key)
+        if hit is not None and (now - hit[0]) < _PREFIX_MEMO_TTL_S:
+            return hit[1]
+    value = compute()
+    with _prefix_memo_lock:
+        _prefix_memo[key] = (now, value)
+    return value
+
+
+def clear_prefix_memo() -> None:
+    """Invalidate memoized prompt-prefix lookups (call on config/persona change)."""
+    with _prefix_memo_lock:
+        _prefix_memo.clear()
+
+
+def _get_custom_instructions() -> str:
+    def _load() -> str:
+        try:
+            return load_custom_instructions()
+        except Exception:
+            return ""
+    return _prefix_memoize("custom_instructions", _load)
 
 
 def _orchestrator_llm(prompt: str, task: str = "") -> str:
@@ -4299,6 +4517,7 @@ Original prompt: {clean_task}"""
     # ── per-request execution budget ─────────────────────────────────────────
     _budget_start = time.time()
     _tool_call_count = 0
+    _tool_result_chars_total = 0   # aggregate tool-result budget across the turn
     _read_file_count = 0   # track consecutive read_file calls to prevent over-reading
     _strict_mode = bool(_config.get("strict_no_guess_mode", False))
     _strict_confidence_threshold = float(_config.get("strict_confidence_threshold", 0.95) or 0.95)
@@ -4723,7 +4942,16 @@ Original prompt: {clean_task}"""
 
             messages.append({"role": "assistant", "content": final})
             cfg = PROVIDERS.get(providers_used[-1] if providers_used else "", {})
-            output_tokens = _estimate_tokens(final)
+            # Prefer the provider's real token counts; estimate only when absent.
+            _final_usage = _usage_from_action(action)
+            if _final_usage and _final_usage.get("completion_tokens"):
+                output_tokens = int(_final_usage["completion_tokens"])
+            else:
+                output_tokens = _estimate_tokens(final)
+            if _final_usage and _final_usage.get("prompt_tokens"):
+                # Real prompt_tokens reflect the full grown context of the final
+                # call — more accurate than the start-of-turn estimate for logs.
+                input_token_estimate = int(_final_usage["prompt_tokens"])
             provider_id = providers_used[-1] if providers_used else ""
             model_name = _config["model"] or cfg.get("default_model", "?")
 
@@ -4926,35 +5154,51 @@ Original prompt: {clean_task}"""
                     return _sr
                 return {"result": f"unknown tool: {sub_action.get('action','?')}", "status": "error"}
 
-            with __import__("concurrent.futures").futures.ThreadPoolExecutor(
-                max_workers=min(len(tools_list), 6)
-            ) as pool:
-                _futures = {pool.submit(_run_one, t): (i, t) for i, t in enumerate(tools_list)}
-                _presults = {}
-                for fut in __import__("concurrent.futures").futures.as_completed(_futures, timeout=90):
-                    idx, sub_act = _futures[fut]
-                    call_id = f"{_ptid}_{idx}"
-                    try:
-                        r = fut.result()
-                        _presults[call_id] = r
-                        yield {"type": "tool", "id": call_id, "parent_id": _ptid,
-                               "status": r.get("status", "done"),
-                               "icon": TOOL_ICONS.get(sub_act.get("action", ""), "🔧"),
-                               "action": sub_act.get("action", "?"), "tool_name": sub_act.get("action", "?"),
-                               "label": str(sub_act)[:120], "result": str(r.get("result", ""))[:400],
-                               "input": sub_act, "metadata": r.get("metadata", {}),
-                               "file_path": None, "file_content": None, "artifact": False}
-                    except Exception as exc:
-                        _presults[call_id] = {"result": str(exc), "status": "error"}
-                        yield {"type": "tool", "id": call_id, "parent_id": _ptid,
-                               "status": "error", "action": sub_act.get("action", "?"),
-                               "label": str(sub_act)[:120], "result": str(exc),
-                               "file_path": None, "file_content": None, "artifact": False}
-                        _tool_call_count += 1
+            def _tool_event(idx: int, sub_act: Dict, r: Dict, status: str = "") -> Dict:
+                return {"type": "tool", "id": f"{_ptid}_{idx}", "parent_id": _ptid,
+                        "status": status or r.get("status", "done"),
+                        "icon": TOOL_ICONS.get(sub_act.get("action", ""), "🔧"),
+                        "action": sub_act.get("action", "?"), "tool_name": sub_act.get("action", "?"),
+                        "label": str(sub_act)[:120], "result": str(r.get("result", ""))[:400],
+                        "input": sub_act, "metadata": r.get("metadata", {}),
+                        "file_path": None, "file_content": None, "artifact": False}
+
+            # Partition by per-invocation safety (CC pattern): read-only-safe
+            # calls run concurrently; writes/unknowns run serially in submission
+            # order so they can't corrupt shared state. Fail-closed.
+            _safe = [(i, t) for i, t in enumerate(tools_list) if _is_tool_call_concurrency_safe(t)]
+            _serial = [(i, t) for i, t in enumerate(tools_list) if not _is_tool_call_concurrency_safe(t)]
+            _presults: Dict[int, Dict] = {}
+
+            if _safe:
+                with __import__("concurrent.futures").futures.ThreadPoolExecutor(
+                    max_workers=min(len(_safe), 6)
+                ) as pool:
+                    _futures = {pool.submit(_run_one, t): (i, t) for i, t in _safe}
+                    for fut in __import__("concurrent.futures").futures.as_completed(_futures, timeout=90):
+                        idx, sub_act = _futures[fut]
+                        try:
+                            r = fut.result()
+                        except Exception as exc:
+                            r = {"result": str(exc), "status": "error"}
+                        _presults[idx] = r
+                        yield _tool_event(idx, sub_act, r)
+
+            # Serial (mutating) calls run in order, each seeing prior effects.
+            for idx, sub_act in _serial:
+                try:
+                    r = _run_one(sub_act)
+                except Exception as exc:
+                    r = {"result": str(exc), "status": "error"}
+                _presults[idx] = r
+                yield _tool_event(idx, sub_act, r)
 
             _tool_call_count += len(tools_list)
+            # Combine in submission order (not completion order) so the model
+            # sees results aligned with the calls it requested.
             combined = "\n".join(
-                f"[{k}] {v.get('result','')}" for k, v in sorted(_presults.items())
+                f"[{_ptid}_{i}] {_presults[i].get('result','')}"
+                for i in range(len(tools_list)) if i in _presults
             )
             messages.append({"role": "assistant", "content": json.dumps(action)})
             messages.append({"role": "user", "content": f"Parallel tool results:\n{combined}\n\nContinue."})
@@ -5474,8 +5718,12 @@ Original prompt: {clean_task}"""
             )
         )
         _result_for_ctx = result if isinstance(result, str) else str(result)
-        if len(_result_for_ctx) > _CONTEXT_RESULT_MAX:
-            _result_for_ctx = _result_for_ctx[:_CONTEXT_RESULT_MAX] + f"\n…[truncated — {len(result) - _CONTEXT_RESULT_MAX} chars omitted for context]"
+        # Persist overflow to disk (retrievable via read_file) instead of
+        # dropping it, and tighten previews once the aggregate budget is spent.
+        _result_for_ctx, _added = _budget_tool_result(
+            _result_for_ctx, workdir, kind, _CONTEXT_RESULT_MAX, _tool_result_chars_total
+        )
+        _tool_result_chars_total += _added
 
         # ── History format: native tool-calling vs legacy JSON text ──────────
         if action.get("_native_tool_call") and action.get("_tool_calls"):
